@@ -19,6 +19,17 @@ DECISION_SCHEMA = {
             "importance": 0.0,
         }
     ],
+    "self_updates": [
+        {
+            "op": "create|update",
+            "id": None,
+            "domain": "capability|preference|strategy|limitation|relationship|identity_interpretation|uncertainty|other",
+            "proposition": "required for create",
+            "confidence": 0.0,
+            "status": "active|supported|uncertain|refuted|retired",
+            "evidence": "required; autobiographical intuition alone is not evidence",
+        }
+    ],
     "goal_updates": [
         {
             "op": "create|update|complete|abandon|block|activate",
@@ -101,6 +112,7 @@ class PromptTemplate:
                 )
                 if key in self_model
             },
+            "adaptive_self_hypotheses": context.get("self_hypotheses") or [],
             "available_skills": available_skills,
         }
         return (
