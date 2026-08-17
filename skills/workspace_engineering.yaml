@@ -1,0 +1,24 @@
+name: workspace_engineering
+version: 1
+maturity: prototype
+description: Build or revise artifacts inside ELIA's private workspace using small reversible steps and explicit validation plans.
+required_capabilities:
+  - list_workspace
+  - read_workspace
+  - write_workspace
+authority: private_workspace_read_write
+preconditions:
+  - a durable goal or repair proposal requires an artifact that can be produced within the workspace jail
+procedure:
+  - inspect existing workspace state before writing
+  - define the smallest artifact change that advances the goal
+  - write only inside the private workspace jail
+  - preserve provenance and a validation plan in the artifact when relevant
+  - inspect the result before claiming completion
+evidence_contract:
+  - workspace path
+  - write/read result
+  - explicit validation observation or remaining uncertainty
+failure_policy:
+  - never treat workspace write authority as shell or host filesystem authority
+  - do not overwrite unrelated artifacts without a goal-linked reason
