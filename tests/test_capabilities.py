@@ -47,6 +47,16 @@ class RepeatedFailureBrain:
         )
 
 
+class SelfCheckBrain:
+    def decide(self, context):
+        return Decision(
+            objective="Verify my bounded local body.",
+            summary="Run the declared local self-check and persist its result.",
+            action_name="self_check",
+            sleep_seconds=0,
+        )
+
+
 def test_capability_catalog_is_structured(tmp_path: Path) -> None:
     registry = ToolRegistry(tmp_path / "workspace")
     catalog = registry.catalog()
@@ -71,6 +81,20 @@ def test_self_check_cleans_up_scratch_state(tmp_path: Path) -> None:
     assert result.ok is True
     assert all(result.data["checks"].values())
     assert list(workspace.glob(".selfcheck-*")) == []
+
+
+def test_runtime_self_check_enters_memory_and_chronicle(tmp_path: Path) -> None:
+    runtime = EliaRuntime(make_config(tmp_path), brain=SelfCheckBrain())
+    report = runtime.cycle()
+    assert report["result"]["ok"] is True
+    assert report["result"]["tool"] == "self_check"
+    assert runtime.memory.capability_health("self_check")["successes"] == 1
+    recent = runtime.memory.recent(20)
+    assert any(record.kind == "action_result" and "self_check" in record.content for record in recent)
+    assert runtime.chronicle.verify() == (True, None)
+    chronicle_text = runtime.chronicle.path.read_text(encoding="utf-8")
+    assert '"tool": "self_check"' in chronicle_text
+    assert list((runtime.config.runtime.state_dir / "workspace").glob(".selfcheck-*")) == []
 
 
 def test_repair_proposal_is_staged_not_deployed(tmp_path: Path) -> None:
