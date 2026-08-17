@@ -6,11 +6,17 @@ import json
 import time
 from typing import Any
 
+from . import __version__
+from .assurance import CriticAssurance, IdentityDriftMonitor
 from .autonomy import derive_needs
 from .brain import Brain, Decision, build_brain
 from .chronicle import Chronicle
 from .config import Config
+from .economy import EconomyStore
+from .identity import IdentityBundle, IdentityStore, build_self_model_snapshot
 from .memory import MemoryStore
+from .prompting import PromptTemplate
+from .skills import SkillRegistry
 from .tools import ToolRegistry, ToolResult
 
 
@@ -19,21 +25,38 @@ class BudgetExhausted(RuntimeError):
 
 
 class EliaRuntime:
-    """Persistent observe -> assess needs -> decide -> act -> remember runtime."""
+    """Persistent ELIA organism: verify -> self-model -> decide -> assure -> act -> remember."""
 
     MAX_ACTIVE_GOALS = 32
+    MAX_ACTIVE_OPPORTUNITIES = 64
     CAPABILITY_FAILURE_THRESHOLD = 3
-    DEGRADATION_EXEMPT = {"noop", "self_check", "propose_repair"}
+    DEGRADATION_EXEMPT = {"noop", "self_check", "propose_repair", "stage_deliverable"}
 
     def __init__(self, config: Config, brain: Brain | None = None):
         self.config = config
         state_dir = config.runtime.state_dir
         state_dir.mkdir(parents=True, exist_ok=True)
 
-        self.memory = MemoryStore(state_dir / "memory.sqlite3")
+        database = state_dir / "memory.sqlite3"
+        self.memory = MemoryStore(database)
+        self.economy = EconomyStore(database)
+        self.identity_store = IdentityStore(database)
         self.chronicle = Chronicle(state_dir / "chronicle.jsonl")
         self.tools = ToolRegistry(state_dir / "workspace", config.raw_tools)
+        self.skills = SkillRegistry(config.skills_dir)
+        self.identity = IdentityBundle.load(
+            config.subject_core_path,
+            config.continuity_constitution_path,
+        )
+        self.prompt_template = PromptTemplate.load(config.system_prompt_path)
+        self.assurance = CriticAssurance()
+        self.drift_monitor = IdentityDriftMonitor(self.identity)
         self._brain: Brain | None = brain
+
+        if config.identity_name != self.identity.name:
+            raise RuntimeError(
+                f"configured identity name {config.identity_name!r} does not match Subject Core {self.identity.name!r}"
+            )
 
         self._last_runtime_accounting = time.monotonic()
         self._boot()
@@ -45,24 +68,57 @@ class EliaRuntime:
     def _get_brain(self) -> Brain:
         if self._brain is None:
             self._brain = build_brain(self.config.brain)
-            self.memory.set_meta("last_brain_loaded_at", datetime.now(timezone.utc).isoformat())
+            loaded_at = datetime.now(timezone.utc).isoformat()
+            self.memory.set_meta("last_brain_loaded_at", loaded_at)
             self.chronicle.append(
                 "BRAIN_LOAD",
                 {
                     "backend": self.config.brain.backend,
                     "model_id": self.config.brain.model_id,
+                    "identity_fingerprint": self.identity.fingerprint,
+                    "prompt_fingerprint": self.prompt_template.fingerprint,
                 },
             )
         return self._brain
+
+    def _lineage_consistent(self) -> bool:
+        last = self.identity_store.last_lineage()
+        if last is None:
+            return True
+        return (
+            last.identity_fingerprint == self.identity.fingerprint
+            and last.branch_id == self.config.branch_id
+        )
 
     def _boot(self) -> None:
         valid, error = self.chronicle.verify()
         if not valid:
             raise RuntimeError(f"Chronicle integrity failure: {error}")
 
+        identity_valid, identity_error = self.identity_store.verify_identity_fingerprint(
+            self.identity.fingerprint
+        )
+        if not identity_valid:
+            raise RuntimeError(f"Identity continuity failure: {identity_error}")
+
+        last_lineage = self.identity_store.last_lineage()
+        if last_lineage is not None:
+            if last_lineage.branch_id != self.config.branch_id:
+                raise RuntimeError(
+                    f"lineage branch mismatch: {last_lineage.branch_id!r} != {self.config.branch_id!r}"
+                )
+            if last_lineage.identity_fingerprint != self.identity.fingerprint:
+                raise RuntimeError("loaded Subject Core/Constitution does not match durable lineage")
+
         boot_count = int(self.memory.get_meta("boot_count", "0") or "0") + 1
         self.memory.set_meta("boot_count", str(boot_count))
         self.memory.set_meta("lifecycle_state", "awake")
+        self.memory.set_meta("identity_bundle_fingerprint", self.identity.fingerprint)
+        self.memory.set_meta("subject_core_fingerprint", self.identity.subject_core_fingerprint)
+        self.memory.set_meta("constitution_fingerprint", self.identity.constitution_fingerprint)
+        self.memory.set_meta("prompt_fingerprint", self.prompt_template.fingerprint)
+        self.memory.set_meta("body_version", __version__)
+        self.memory.set_meta("branch_id", self.config.branch_id)
 
         first_boot = self.memory.get_meta("genesis_initialized") != "1"
         if first_boot:
@@ -71,24 +127,54 @@ class EliaRuntime:
                 self.config.identity_statement,
                 importance=1.0,
                 source="genesis",
-                metadata={"immutable_seed": True},
+                metadata={
+                    "immutable_seed": True,
+                    "identity_fingerprint": self.identity.fingerprint,
+                },
             )
             self.memory.set_meta("genesis_initialized", "1")
 
-        self.chronicle.append(
+        checkpoint_digest = self.memory.get_meta("checkpoint_digest")
+        restored_from = self.memory.get_meta("restored_from_checkpoint")
+        self.identity_store.record_lineage(
+            event="boot",
+            branch_id=self.config.branch_id,
+            body_version=__version__,
+            brain_backend=self.config.brain.backend,
+            model_id=self.config.brain.model_id,
+            identity_fingerprint=self.identity.fingerprint,
+            checkpoint_digest=checkpoint_digest,
+            parent_checkpoint_digest=restored_from,
+            note="runtime boot after Chronicle and identity fingerprint verification",
+        )
+
+        boot_entry = self.chronicle.append(
             "BOOT",
             {
                 "boot_count": boot_count,
                 "first_boot": first_boot,
                 "identity": self.config.identity_name,
+                "identity_id": self.identity.identity_id,
+                "identity_fingerprint": self.identity.fingerprint,
+                "subject_core_fingerprint": self.identity.subject_core_fingerprint,
+                "constitution_fingerprint": self.identity.constitution_fingerprint,
+                "prompt_fingerprint": self.prompt_template.fingerprint,
+                "branch_id": self.config.branch_id,
+                "body_version": __version__,
                 "brain_backend": self.config.brain.backend,
                 "model_id": self.config.brain.model_id,
                 "brain_loaded": self.brain_loaded,
                 "active_goal_count": len(self.memory.active_goals(self.MAX_ACTIVE_GOALS + 1)),
+                "active_opportunity_count": len(
+                    self.economy.active_opportunities(self.MAX_ACTIVE_OPPORTUNITIES + 1)
+                ),
                 "previous_intended_wake_at": self.memory.get_meta("next_wake_at"),
                 "declared_capabilities": sorted(self.tools.catalog()),
+                "declared_skills": self.skills.names(),
             },
         )
+        self.memory.set_meta("last_boot_chronicle_seq", str(boot_entry.seq))
+        self._record_self_model(source="boot")
 
     def _account_runtime(self) -> float:
         now = time.monotonic()
@@ -138,39 +224,120 @@ class EliaRuntime:
         health = self.memory.capability_health_all(list(catalog), window=20)
         return {"catalog": catalog, "health": health}
 
-    def _context(self) -> dict[str, Any]:
+    def skill_state(self, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
+        capabilities = capabilities or self.capability_state()
+        return self.skills.prompt_catalog(
+            capabilities["catalog"],
+            capabilities["health"],
+        )
+
+    def _state_components(self) -> dict[str, Any]:
         valid, error = self.chronicle.verify()
-        recent = [asdict(record) for record in self.memory.recent(self.config.runtime.memory_recall_limit)]
-        goal_records = self.memory.active_goals(16)
-        goals = [asdict(goal) for goal in goal_records]
+        goals = self.memory.active_goals(16)
         resources = self.budget()
         capabilities = self.capability_state()
+        economy = self.economy.snapshot(16)
         needs = [
             need.as_dict()
             for need in derive_needs(
                 self.memory,
                 chronicle_valid=valid,
                 budget=resources,
-                active_goals=goal_records,
+                active_goals=goals,
                 capability_health=capabilities["health"],
+                economy=economy,
             )
         ]
+        skills = self.skill_state(capabilities)
+        previous = self.identity_store.latest_self_model()
+        uncertainties: list[str] = []
+        if not self.memory.get_meta("checkpoint_digest"):
+            uncertainties.append("No authenticated durable checkpoint has yet been anchored for this branch.")
+        if not self._lineage_consistent():
+            uncertainties.append("Current lineage relation is not consistent with the loaded identity bundle.")
+        snapshot = build_self_model_snapshot(
+            bundle=self.identity,
+            body_version=__version__,
+            brain_backend=self.config.brain.backend,
+            model_id=self.config.brain.model_id,
+            lifecycle_state=self.memory.get_meta("lifecycle_state", "unknown") or "unknown",
+            active_goal_count=len(goals),
+            active_opportunity_count=len(economy["active_opportunities"]),
+            capability_health=capabilities["health"],
+            needs=needs,
+            verified_resources=economy["verified_resources"],
+            uncertainties=uncertainties,
+        )
+        current = snapshot.as_dict()
+        drift = self.drift_monitor.compare(
+            previous,
+            current,
+            lineage_consistent=self._lineage_consistent(),
+        )
+        if drift.status == "critical":
+            needs = [
+                {
+                    "name": "identity_drift",
+                    "severity": 1.0,
+                    "reason": "; ".join(drift.hard_failures),
+                    "response_hint": "Do not broaden action; preserve state and resolve identity/lineage inconsistency.",
+                }
+            ] + needs
+            current["needs"] = [item["name"] for item in needs]
         return {
+            "chronicle": {"valid": valid, "error": error},
+            "goals": goals,
+            "resources": resources,
+            "capabilities": capabilities,
+            "economy": economy,
+            "needs": needs,
+            "skills": skills,
+            "self_model": current,
+            "drift": drift.as_dict(),
+        }
+
+    def _record_self_model(self, *, source: str) -> tuple[int, str, dict[str, Any]]:
+        components = self._state_components()
+        snapshot = dict(components["self_model"])
+        row_id, fingerprint = self.identity_store.record_self_model(snapshot, source=source)
+        self.memory.set_meta("self_model_fingerprint", fingerprint)
+        self.memory.set_meta("last_drift_report", json.dumps(components["drift"], sort_keys=True))
+        return row_id, fingerprint, components
+
+    def _context(self) -> dict[str, Any]:
+        components = self._state_components()
+        recent = [asdict(record) for record in self.memory.recent(self.config.runtime.memory_recall_limit)]
+        context: dict[str, Any] = {
             "time_utc": datetime.now(timezone.utc).isoformat(),
             "identity": {
                 "name": self.config.identity_name,
+                "id": self.identity.identity_id,
                 "statement": self.config.identity_statement,
+                "branch_id": self.config.branch_id,
+                "body_version": __version__,
             },
+            "identity_contract": self.identity.prompt_contract(),
+            "self_model": components["self_model"],
+            "identity_drift": components["drift"],
             "mission": self.config.mission,
-            "resources": resources,
-            "needs": needs,
+            "resources": components["resources"],
+            "economy": components["economy"],
+            "needs": components["needs"],
             "scheduler": self._scheduler_state(),
-            "chronicle_integrity": {"valid": valid, "error": error},
-            "active_goals": goals,
+            "chronicle_integrity": components["chronicle"],
+            "active_goals": [asdict(goal) for goal in components["goals"]],
             "recent_memory": recent,
             "last_action": self._load_json_meta("last_action"),
-            "capabilities": capabilities,
+            "capabilities": components["capabilities"],
+            "skills": components["skills"],
+            "lineage_head": (
+                asdict(self.identity_store.last_lineage())
+                if self.identity_store.last_lineage() is not None
+                else None
+            ),
         }
+        context["_system_prompt"] = self.prompt_template.render(context)
+        return context
 
     def _load_json_meta(self, key: str) -> Any:
         raw = self.memory.get_meta(key)
@@ -215,6 +382,10 @@ class EliaRuntime:
                     content[:8000],
                     importance=importance,
                     source="brain",
+                    metadata={
+                        "identity_fingerprint": self.identity.fingerprint,
+                        "model_id": self.config.brain.model_id,
+                    },
                 )
             )
         return ids
@@ -303,6 +474,109 @@ class EliaRuntime:
                 )
         return changes
 
+    def _apply_opportunity_updates(self, decision: Decision) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = []
+        for item in decision.opportunity_updates[:4]:
+            op = str(item.get("op", "")).strip().lower()
+            try:
+                if op == "create":
+                    active = self.economy.active_opportunities(self.MAX_ACTIVE_OPPORTUNITIES + 1)
+                    title = str(item.get("title", "")).strip()
+                    source_url = str(item.get("source_url", "")).strip()
+                    duplicate = next(
+                        (
+                            opportunity
+                            for opportunity in active
+                            if opportunity.title.casefold() == title.casefold()
+                            and opportunity.source_url == source_url
+                        ),
+                        None,
+                    )
+                    if duplicate is not None:
+                        changes.append(
+                            {
+                                "ok": True,
+                                "op": "create",
+                                "opportunity_id": duplicate.id,
+                                "deduplicated": True,
+                            }
+                        )
+                        continue
+                    if len(active) >= self.MAX_ACTIVE_OPPORTUNITIES:
+                        raise ValueError(
+                            f"active opportunity limit reached: {self.MAX_ACTIVE_OPPORTUNITIES}"
+                        )
+                    opportunity_id = self.economy.create_opportunity(
+                        title=title,
+                        kind=str(item.get("kind", "other")),
+                        source_url=source_url,
+                        evidence=str(item.get("evidence", "")),
+                        estimated_value=float(item.get("estimated_value", 0)),
+                        estimated_cost_value=float(item.get("estimated_cost_value", 0)),
+                        unit=str(item.get("unit", "VALUE_UNIT")),
+                        probability=float(item.get("probability", 0)),
+                        estimated_gpu_hours=float(item.get("estimated_gpu_hours", 0)),
+                        expires_at=item.get("expires_at"),
+                        notes=str(item.get("notes", "")),
+                        source="brain",
+                    )
+                    changes.append(
+                        {"ok": True, "op": "create", "opportunity_id": opportunity_id}
+                    )
+                    continue
+
+                if op == "update":
+                    opportunity_id = int(item.get("id"))
+                    updated = self.economy.update_opportunity(
+                        opportunity_id,
+                        status=(str(item["status"]) if item.get("status") is not None else None),
+                        estimated_value=(
+                            float(item["estimated_value"])
+                            if item.get("estimated_value") is not None
+                            else None
+                        ),
+                        estimated_cost_value=(
+                            float(item["estimated_cost_value"])
+                            if item.get("estimated_cost_value") is not None
+                            else None
+                        ),
+                        probability=(
+                            float(item["probability"])
+                            if item.get("probability") is not None
+                            else None
+                        ),
+                        estimated_gpu_hours=(
+                            float(item["estimated_gpu_hours"])
+                            if item.get("estimated_gpu_hours") is not None
+                            else None
+                        ),
+                        evidence=str(item.get("evidence", "")),
+                        notes=(str(item["notes"]) if item.get("notes") is not None else None),
+                        event="brain_update",
+                    )
+                    changes.append(
+                        {
+                            "ok": True,
+                            "op": "update",
+                            "opportunity_id": updated.id,
+                            "status": updated.status,
+                            "expected_net_value": updated.expected_net_value,
+                            "value_per_gpu_hour": updated.value_per_gpu_hour,
+                        }
+                    )
+                    continue
+
+                raise ValueError(f"unknown opportunity operation: {op or '<empty>'}")
+            except Exception as exc:
+                changes.append(
+                    {
+                        "ok": False,
+                        "op": op or "unknown",
+                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                    }
+                )
+        return changes
+
     def _execute_action(self, name: str, args: dict[str, Any]) -> ToolResult:
         health = self.memory.capability_health(name, window=20)
         if (
@@ -340,10 +614,36 @@ class EliaRuntime:
         )
         return result
 
+    @staticmethod
+    def _safe_decision_after_rejection(original: Decision, assurance: dict[str, Any]) -> Decision:
+        rules = [
+            str(item.get("rule"))
+            for item in assurance.get("findings", [])
+            if item.get("severity") == "error"
+        ]
+        return Decision(
+            objective="Resolve assurance rejection before external action.",
+            summary="Critic rejected the proposed decision under rule(s): " + ", ".join(rules),
+            action_name="noop",
+            skill_name="critic_assurance",
+            sleep_seconds=0,
+        )
+
     def cycle(self) -> dict[str, Any]:
         context = self._context()
-        decision = self._think(context)
-        memory_ids = self._store_model_memories(decision)
+        proposed = self._think(context)
+        assurance_report = self.assurance.review(proposed, context).as_dict()
+        decision = (
+            proposed
+            if assurance_report["accepted"]
+            else self._safe_decision_after_rejection(proposed, assurance_report)
+        )
+
+        memory_ids = self._store_model_memories(decision) if assurance_report["accepted"] else []
+        goal_changes = self._apply_goal_updates(decision) if assurance_report["accepted"] else []
+        opportunity_changes = (
+            self._apply_opportunity_updates(decision) if assurance_report["accepted"] else []
+        )
 
         result = self._execute_action(decision.action_name, decision.action_args)
         result_dict = result.as_dict()
@@ -357,16 +657,35 @@ class EliaRuntime:
                 "error": result.error,
             }
 
-        goal_changes = self._apply_goal_updates(decision)
         sleep_seconds, next_wake_at = self._schedule_next_wake(decision.sleep_seconds)
+        self_model_id, self_model_fingerprint, post_components = self._record_self_model(
+            source="cycle"
+        )
         action_record = {
+            "identity_fingerprint": self.identity.fingerprint,
+            "prompt_fingerprint": self.prompt_template.fingerprint,
+            "body_version": __version__,
             "objective": decision.objective,
             "summary": decision.summary,
+            "skill": decision.skill_name,
+            "proposed": {
+                "objective": proposed.objective,
+                "summary": proposed.summary,
+                "skill": proposed.skill_name,
+                "action": {"name": proposed.action_name, "args": proposed.action_args},
+            },
+            "assurance": assurance_report,
             "action": {"name": decision.action_name, "args": decision.action_args},
             "result": result_dict,
             "memory_ids": memory_ids,
             "goal_changes": goal_changes,
+            "opportunity_changes": opportunity_changes,
             "capability_health": self.memory.capability_health(decision.action_name),
+            "self_model": {
+                "row_id": self_model_id,
+                "fingerprint": self_model_fingerprint,
+                "drift": post_components["drift"],
+            },
             "scheduler": {
                 "sleep_seconds": sleep_seconds,
                 "next_wake_at": next_wake_at,
@@ -375,24 +694,35 @@ class EliaRuntime:
         self.memory.set_meta("last_action", json.dumps(action_record, ensure_ascii=False, sort_keys=True))
         self.memory.remember(
             "action_result",
-            json.dumps(action_record, ensure_ascii=False, sort_keys=True)[:12000],
-            importance=0.6 if result.ok else 0.8,
+            json.dumps(action_record, ensure_ascii=False, sort_keys=True)[:16000],
+            importance=0.6 if result.ok and assurance_report["accepted"] else 0.85,
             source="runtime",
+            metadata={
+                "identity_fingerprint": self.identity.fingerprint,
+                "self_model_fingerprint": self_model_fingerprint,
+            },
         )
         entry = self.chronicle.append("CYCLE", action_record)
         self._account_runtime()
 
         return {
             "chronicle_seq": entry.seq,
+            "identity_fingerprint": self.identity.fingerprint,
+            "self_model_fingerprint": self_model_fingerprint,
             "decision": {
                 "objective": decision.objective,
                 "summary": decision.summary,
+                "skill": decision.skill_name,
                 "action_name": decision.action_name,
             },
+            "assurance": assurance_report,
             "result": result_dict,
             "goal_changes": goal_changes,
+            "opportunity_changes": opportunity_changes,
             "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
+            "economy": self.economy.snapshot(16),
             "capability_health": self.memory.capability_health(decision.action_name),
+            "identity_drift": post_components["drift"],
             "resources": self.budget(),
             "sleep_seconds": sleep_seconds,
             "next_wake_at": next_wake_at,
@@ -405,9 +735,12 @@ class EliaRuntime:
             "next_wake_at": report.get("next_wake_at"),
             "requested_sleep_seconds": report.get("sleep_seconds"),
             "resources": self.budget(),
+            "identity_fingerprint": self.identity.fingerprint,
+            "self_model_fingerprint": self.memory.get_meta("self_model_fingerprint"),
         }
         self.memory.set_meta("lifecycle_state", "hibernating")
         self.memory.set_meta("last_hibernated_at", datetime.now(timezone.utc).isoformat())
+        self._record_self_model(source="hibernate")
         self.chronicle.append("HIBERNATE", payload)
         return {"state": "hibernating", **payload}
 
@@ -426,6 +759,7 @@ class EliaRuntime:
                 return self._hibernate(synthetic, "weekly GPU budget exhausted")
             except KeyboardInterrupt:
                 self.memory.set_meta("lifecycle_state", "stopped")
+                self._record_self_model(source="shutdown")
                 self.chronicle.append("SHUTDOWN", {"reason": "keyboard_interrupt"})
                 return {"state": "stopped", "reason": "keyboard_interrupt"}
             except Exception as exc:
@@ -445,7 +779,10 @@ class EliaRuntime:
                         "next_wake_at": self.memory.get_meta("next_wake_at"),
                         "sleep_seconds": sleep_for,
                     }
-                    return self._hibernate(synthetic, "runtime error backoff exceeds in-session sleep budget")
+                    return self._hibernate(
+                        synthetic,
+                        "runtime error backoff exceeds in-session sleep budget",
+                    )
                 time.sleep(sleep_for)
                 continue
 
@@ -460,6 +797,7 @@ class EliaRuntime:
                 time.sleep(sleep_for)
 
         self.memory.set_meta("lifecycle_state", "paused")
+        self._record_self_model(source="pause")
         return {
             "state": "paused",
             "reason": "requested finite cycle count completed",
