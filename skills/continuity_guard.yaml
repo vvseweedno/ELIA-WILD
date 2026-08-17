@@ -1,0 +1,21 @@
+name: continuity_guard
+version: 1
+maturity: proven
+description: Verify that the current body is a recoverable continuation of trusted ELIA state before optional cognition.
+required_capabilities: []
+authority: local_identity_state_only
+preconditions:
+  - authenticated state is available or this is an explicit genesis branch
+procedure:
+  - verify Chronicle hash chain and checkpoint/lineage anchors
+  - compare current Subject Core and Constitution fingerprints with durable lineage
+  - inspect scheduler, lifecycle and previous intended wake state
+  - surface any fork, rollback, identity fingerprint mismatch or unresolved integrity uncertainty
+  - halt normal optional work when continuity integrity is unresolved
+evidence_contract:
+  - Chronicle verification result
+  - identity bundle fingerprint
+  - lineage head and checkpoint digest when available
+failure_policy:
+  - never invent continuity when lineage cannot be verified
+  - preserve evidence and request trusted recovery or explicit fork creation
