@@ -13,6 +13,8 @@ from uuid import uuid4
 
 import httpx
 
+from . import __version__
+
 
 @dataclass(slots=True)
 class ToolResult:
@@ -113,6 +115,15 @@ class ToolRegistry:
                 "none",
                 "low",
             ),
+            Capability(
+                "stage_deliverable",
+                "Persist a useful-work deliverable candidate for an opportunity without submitting it externally.",
+                "{title: str, content: str, format: str, opportunity_id?: int, validation: str, evidence?: str}",
+                "workspace_write",
+                "writes a staged artifact under workspace/deliverables only",
+                "none",
+                "low",
+            ),
         ]
         return {item.name: item.as_dict() for item in capabilities}
 
@@ -144,6 +155,8 @@ class ToolRegistry:
                 return self._self_check()
             if name == "propose_repair":
                 return self._propose_repair(args)
+            if name == "stage_deliverable":
+                return self._stage_deliverable(args)
             return ToolResult(False, name, error=f"Unknown tool: {name}")
         except Exception as exc:  # Tool failures become observations, not process failures.
             return ToolResult(False, name, error=f"{type(exc).__name__}: {exc}")
@@ -215,7 +228,7 @@ class ToolRegistry:
     @staticmethod
     def _slug(text: str) -> str:
         slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip()).strip("-").lower()
-        return (slug or "repair")[:64]
+        return (slug or "artifact")[:64]
 
     def _propose_repair(self, args: dict[str, Any]) -> ToolResult:
         title = str(args.get("title", "")).strip()[:240]
@@ -249,6 +262,49 @@ class ToolRegistry:
                 "path": relative,
                 "status": "proposal_only",
                 "message": "Repair proposal stored for validation; no runtime code was changed.",
+            },
+        )
+
+    def _stage_deliverable(self, args: dict[str, Any]) -> ToolResult:
+        title = str(args.get("title", "")).strip()[:240]
+        content = str(args.get("content", ""))
+        format_name = str(args.get("format", "text")).strip()[:64] or "text"
+        validation = str(args.get("validation", "")).strip()[:8000]
+        evidence = str(args.get("evidence", "")).strip()[:8000]
+        opportunity_raw = args.get("opportunity_id")
+        opportunity_id = int(opportunity_raw) if opportunity_raw is not None else None
+        if not title or not content or not validation:
+            return ToolResult(
+                False,
+                "stage_deliverable",
+                error="title, content, and validation are required",
+            )
+        if len(content.encode("utf-8")) > 240_000:
+            return ToolResult(False, "stage_deliverable", error="deliverable content exceeds 240 KB")
+        artifact = {
+            "title": title,
+            "opportunity_id": opportunity_id,
+            "format": format_name,
+            "content": content,
+            "validation": validation,
+            "evidence": evidence,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "staged_only",
+            "submission_authority": "none",
+        }
+        relative = f"deliverables/{self._slug(title)}-{uuid4().hex[:8]}.json"
+        payload = json.dumps(artifact, ensure_ascii=False, sort_keys=True, indent=2)
+        write = self._write_workspace(relative, payload)
+        if not write.ok:
+            return ToolResult(False, "stage_deliverable", error=write.error)
+        return ToolResult(
+            True,
+            "stage_deliverable",
+            {
+                "path": relative,
+                "opportunity_id": opportunity_id,
+                "status": "staged_only",
+                "message": "Deliverable candidate stored locally; nothing was submitted externally.",
             },
         )
 
@@ -287,7 +343,7 @@ class ToolRegistry:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             response = client.get(
                 url,
-                headers={"User-Agent": "ELIA-WILD/0.4 (+research-agent)"},
+                headers={"User-Agent": f"ELIA-WILD/{__version__} (+research-agent)"},
             )
 
         raw = response.content[:max_bytes]
