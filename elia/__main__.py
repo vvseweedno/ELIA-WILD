@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force-wake",
         action="store_true",
-        help="Bypass a future wake timestamp only; integrity and GPU budget guards still apply",
+        help="Bypass a future wake timestamp only; integrity, identity and GPU budget guards still apply",
     )
     parser.add_argument("--checkpoint-export", metavar="PATH", help="Create an authenticated state checkpoint")
     parser.add_argument("--checkpoint-restore", metavar="PATH", help="Restore an authenticated state checkpoint")
@@ -103,6 +103,7 @@ def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
     state_dir = config.runtime.state_dir
+    identity = _identity_bundle(config)
 
     checkpoint_modes = [args.checkpoint_export, args.checkpoint_restore, args.checkpoint_inspect]
     if sum(value is not None for value in checkpoint_modes) > 1:
@@ -143,6 +144,8 @@ def main() -> None:
         state_dir,
         config.runtime.weekly_gpu_budget_hours,
         force_wake=args.force_wake,
+        expected_identity_fingerprint=identity.fingerprint,
+        expected_branch_id=config.branch_id,
     )
 
     if args.preflight:
@@ -150,7 +153,6 @@ def main() -> None:
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
     if args.status or args.identity_report:
-        identity = _identity_bundle(config)
         prompt_template = PromptTemplate.load(config.system_prompt_path)
         memory = MemoryStore(state_dir / "memory.sqlite3")
         identity_store = IdentityStore(state_dir / "memory.sqlite3")
