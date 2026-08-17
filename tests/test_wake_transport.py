@@ -16,6 +16,7 @@ from elia.wake_transport import (
     mark_failure,
     mark_pending,
     mark_success,
+    parse_dataset_status,
     parse_kernel_status,
     read_digest,
     read_transport_state,
@@ -88,6 +89,15 @@ def test_kernel_status_parser_is_tolerant_but_conservative() -> None:
     assert parse_kernel_status("latest run failed with error") == "failed"
     assert parse_kernel_status("something undocumented") == "unknown"
     assert parse_kernel_status("") == "unknown"
+
+
+def test_dataset_status_parser_prefers_structured_state() -> None:
+    assert parse_dataset_status('{"status": "READY"}') == "ready"
+    assert parse_dataset_status('{"dataset": {"status": "PENDING"}}') == "pending"
+    assert parse_dataset_status('{"state": "FAILED", "message": "upload error"}') == "failed"
+    assert parse_dataset_status("Dataset status: processing") == "pending"
+    assert parse_dataset_status("Dataset is complete") == "ready"
+    assert parse_dataset_status("undocumented response") == "unknown"
 
 
 def test_kernel_metadata_defaults_to_t4_and_private_state() -> None:
