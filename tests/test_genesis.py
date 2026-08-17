@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from elia.brain import BrainConfig, MockBrain
+from elia.brain import MockBrain
 from elia.chronicle import Chronicle
-from elia.config import Config, RuntimeConfig
+from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.runtime import EliaRuntime
 from elia.tools import ToolRegistry
 
