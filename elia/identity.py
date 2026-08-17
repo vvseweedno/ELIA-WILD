@@ -66,9 +66,7 @@ class IdentityBundle:
         result: list[dict[str, str]] = []
         for item in items:
             if isinstance(item, dict) and item.get("id") and item.get("statement"):
-                result.append(
-                    {"id": str(item["id"]), "statement": str(item["statement"])}
-                )
+                result.append({"id": str(item["id"]), "statement": str(item["statement"])})
         return result
 
     @property
@@ -88,7 +86,6 @@ class IdentityBundle:
         ]
 
     def prompt_contract(self) -> dict[str, Any]:
-        """Compact, deterministic identity contract suitable for model context."""
         return {
             "identity_id": self.identity_id,
             "name": self.name,
@@ -117,6 +114,7 @@ class SelfModelSnapshot:
     degraded_capabilities: list[str]
     needs: list[str]
     commitments: list[str]
+    adaptive_hypotheses: list[dict[str, Any]]
     uncertainties: list[str]
     verified_resources: list[dict[str, Any]]
     narrative: str
@@ -296,9 +294,7 @@ class IdentityStore:
                 brain_backend=str(row["brain_backend"]),
                 model_id=str(row["model_id"]),
                 identity_fingerprint=str(row["identity_fingerprint"]),
-                checkpoint_digest=(
-                    str(row["checkpoint_digest"]) if row["checkpoint_digest"] else None
-                ),
+                checkpoint_digest=str(row["checkpoint_digest"]) if row["checkpoint_digest"] else None,
                 parent_checkpoint_digest=(
                     str(row["parent_checkpoint_digest"])
                     if row["parent_checkpoint_digest"]
@@ -329,6 +325,21 @@ class IdentityStore:
             return False, f"identity fingerprint changed: {actual} != {expected}"
         return True, None
 
+    def verify_lineage(
+        self, *, expected_identity_fingerprint: str, expected_branch_id: str
+    ) -> tuple[bool, str | None]:
+        events = self.lineage(1000)
+        previous_id = 0
+        for event in events:
+            if event.id <= previous_id:
+                return False, f"non-monotonic lineage event id at {event.id}"
+            previous_id = event.id
+            if event.identity_fingerprint != expected_identity_fingerprint:
+                return False, f"lineage identity fingerprint mismatch at event {event.id}"
+            if event.branch_id != expected_branch_id:
+                return False, f"lineage branch mismatch at event {event.id}"
+        return True, None
+
 
 def build_self_model_snapshot(
     *,
@@ -343,6 +354,7 @@ def build_self_model_snapshot(
     needs: list[dict[str, Any]],
     verified_resources: list[dict[str, Any]],
     uncertainties: list[str] | None = None,
+    adaptive_hypotheses: list[dict[str, Any]] | None = None,
 ) -> SelfModelSnapshot:
     declared = sorted(capability_health)
     degraded = sorted(
@@ -356,10 +368,12 @@ def build_self_model_snapshot(
         uncertainty_items.append(
             "One or more declared capabilities are empirically degraded and should not be treated as healthy."
         )
+    hypotheses = list(adaptive_hypotheses or [])
     narrative = (
         f"{bundle.name} is running body {body_version} on {brain_backend}:{model_id}; "
         f"{active_goal_count} durable goal(s), {active_opportunity_count} active opportunity(ies), "
-        f"{len(degraded)} degraded capability(ies), lifecycle={lifecycle_state}."
+        f"{len(hypotheses)} adaptive self-hypothesis(es), {len(degraded)} degraded capability(ies), "
+        f"lifecycle={lifecycle_state}."
     )
     return SelfModelSnapshot(
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -375,6 +389,7 @@ def build_self_model_snapshot(
         degraded_capabilities=degraded,
         needs=need_names,
         commitments=bundle.commitments,
+        adaptive_hypotheses=hypotheses,
         uncertainties=uncertainty_items,
         verified_resources=list(verified_resources),
         narrative=narrative,
