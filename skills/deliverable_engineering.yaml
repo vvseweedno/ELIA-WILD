@@ -1,0 +1,22 @@
+name: deliverable_engineering
+version: 1
+maturity: prototype
+description: Convert an evidence-backed opportunity or goal into a locally validated deliverable candidate without external submission authority.
+required_capabilities:
+  - stage_deliverable
+authority: private_workspace_write_only
+preconditions:
+  - a concrete opportunity or durable goal specifies an output ELIA can produce with current capabilities
+procedure:
+  - restate the acceptance criteria from source evidence
+  - build the smallest complete deliverable that satisfies those criteria
+  - include a validation method and unresolved limitations
+  - stage the artifact locally and link it to the opportunity when applicable
+  - do not mark the opportunity won until an external trusted receipt exists
+evidence_contract:
+  - source requirements
+  - staged artifact path
+  - validation observation
+failure_policy:
+  - staging is not submission
+  - local quality judgment is not external acceptance or payment
