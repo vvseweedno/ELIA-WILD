@@ -28,7 +28,7 @@ def make_config(tmp_path: Path) -> Config:
             state_dir=tmp_path / ".elia",
             cycle_sleep_seconds=0,
             max_action_output_chars=16000,
-            weekly_brain_budget_hours=30,
+            weekly_gpu_budget_hours=30,
             memory_recall_limit=12,
         ),
         raw_tools={"http_get": {"enabled": True}},
