@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from elia.brain import MockBrain
+from elia.brain import Decision, MockBrain
 from elia.chronicle import Chronicle
 from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.memory import MemoryStore
@@ -38,6 +38,30 @@ def make_config(tmp_path: Path) -> Config:
     )
 
 
+class WakeBrain:
+    def decide(self, context):
+        return Decision(
+            objective="Persist an intended wake time.",
+            summary="Schedule a future cognitive cycle.",
+            action_name="noop",
+            sleep_seconds=123,
+        )
+
+
+class UnsupportedCompletionBrain:
+    def __init__(self, goal_id: int):
+        self.goal_id = goal_id
+
+    def decide(self, context):
+        return Decision(
+            objective="Attempt an unsupported completion claim.",
+            summary="The runtime must reject completion without evidence.",
+            action_name="noop",
+            goal_updates=[{"op": "complete", "id": self.goal_id}],
+            sleep_seconds=0,
+        )
+
+
 def test_mock_runtime_survives_restart(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     first = EliaRuntime(config, brain=MockBrain())
@@ -58,7 +82,34 @@ def test_mock_runtime_survives_restart(tmp_path: Path) -> None:
     assert second.memory.active_goals()[0].title == "Validate continuity after restart"
 
 
-def test_goal_completion_requires_evidence(tmp_path: Path) -> None:
+def test_wake_intent_survives_restart(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    first = EliaRuntime(config, brain=WakeBrain())
+    report = first.cycle()
+    intended = report["next_wake_at"]
+    assert intended
+    assert first.memory.get_meta("next_wake_at") == intended
+    assert first.memory.get_meta("last_sleep_seconds") == "123.000000"
+
+    second = EliaRuntime(config, brain=WakeBrain())
+    assert second.memory.get_meta("next_wake_at") == intended
+    last_line = second.chronicle.path.read_text(encoding="utf-8").strip().splitlines()[-1]
+    assert intended in last_line
+
+
+def test_runtime_rejects_goal_completion_without_evidence(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    memory = MemoryStore(config.runtime.state_dir / "memory.sqlite3")
+    goal_id = memory.create_goal("Only complete from evidence", priority=0.9)
+
+    runtime = EliaRuntime(config, brain=UnsupportedCompletionBrain(goal_id))
+    report = runtime.cycle()
+    assert report["goal_changes"][0]["ok"] is False
+    assert "requires evidence" in report["goal_changes"][0]["error"]
+    assert runtime.memory.goal(goal_id).status == "active"
+
+
+def test_goal_completion_with_evidence_is_persisted(tmp_path: Path) -> None:
     memory = MemoryStore(tmp_path / "memory.sqlite3")
     goal_id = memory.create_goal("Test an explicit result", priority=0.8)
     goal = memory.update_goal(goal_id, status="completed", event="complete", evidence="Test passed")
