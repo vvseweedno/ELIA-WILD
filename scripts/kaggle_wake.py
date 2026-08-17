@@ -1,0 +1,494 @@
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any
+
+from elia.checkpoint import CheckpointManager
+from elia.config import load_config
+from elia.lifecycle import evaluate_preflight
+from elia.wake_transport import (
+    CHECKPOINT_NAME,
+    DIGEST_NAME,
+    RELAY_REPORT_NAME,
+    TRANSPORT_NAME,
+    TransportState,
+    build_kernel_metadata,
+    launch_suppressed,
+    locate_state_bundle,
+    mark_failure,
+    mark_pending,
+    mark_success,
+    parse_kernel_status,
+    read_digest,
+    read_transport_state,
+    render_runner,
+    validate_relay_report,
+    write_digest,
+    write_transport_state,
+)
+
+
+FAILURE_THRESHOLD = 3
+PENDING_TIMEOUT_SECONDS = 8 * 3600
+
+
+def command(args: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        args,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        tail = (result.stdout or "")[-6000:]
+        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(args[:4])}\n{tail}")
+    return result
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"required environment variable is missing: {name}")
+    return value
+
+
+def print_event(event: str, **payload: Any) -> None:
+    print(json.dumps({"event": event, **payload}, ensure_ascii=False, sort_keys=True))
+
+
+def download_state_dataset(dataset: str, destination: Path) -> tuple[Path, Path, Path | None]:
+    destination.mkdir(parents=True, exist_ok=True)
+    command(
+        [
+            "kaggle",
+            "datasets",
+            "download",
+            dataset,
+            "--path",
+            str(destination),
+            "--unzip",
+            "--force",
+            "--quiet",
+        ]
+    )
+    return locate_state_bundle(destination)
+
+
+def dataset_upload_dir(
+    dataset: str,
+    checkpoint: Path,
+    digest: str,
+    transport: TransportState,
+    destination: Path,
+) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(checkpoint, destination / CHECKPOINT_NAME)
+    write_digest(destination / DIGEST_NAME, digest)
+    write_transport_state(destination / TRANSPORT_NAME, transport)
+    command(["kaggle", "datasets", "metadata", dataset, "--path", str(destination)])
+    metadata = destination / "dataset-metadata.json"
+    if not metadata.is_file():
+        raise RuntimeError("Kaggle did not return dataset-metadata.json")
+    return destination
+
+
+def version_state_dataset(
+    dataset: str,
+    checkpoint: Path,
+    digest: str,
+    transport: TransportState,
+    *,
+    message: str,
+    root: Path,
+) -> None:
+    upload = root / "dataset-upload"
+    if upload.exists():
+        shutil.rmtree(upload)
+    dataset_upload_dir(dataset, checkpoint, digest, transport, upload)
+    command(
+        [
+            "kaggle",
+            "datasets",
+            "version",
+            "--path",
+            str(upload),
+            "--message",
+            message[:200],
+            "--quiet",
+            "--keep-tabular",
+            "--dir-mode",
+            "skip",
+        ]
+    )
+
+
+def pending_age_seconds(state: TransportState) -> float | None:
+    if not state.pending_since:
+        return None
+    try:
+        moment = datetime.fromisoformat(state.pending_since)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - moment.astimezone(timezone.utc)).total_seconds())
+
+
+def inspect_restore(
+    *,
+    checkpoint: Path,
+    digest: str,
+    key: str,
+    identity_name: str,
+    state_dir: Path,
+) -> tuple[CheckpointManager, Any]:
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    manager = CheckpointManager(state_dir, identity_name, key.encode("utf-8"))
+    info = manager.inspect(checkpoint, expected_digest=digest)
+    manager.restore(checkpoint, expected_digest=digest)
+    return manager, info
+
+
+def kernel_status(kernel: str) -> tuple[str, str]:
+    result = command(["kaggle", "kernels", "status", kernel], check=False)
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        return "unknown", output
+    return parse_kernel_status(output), output
+
+
+def download_kernel_output(kernel: str, destination: Path) -> Path:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    command(
+        [
+            "kaggle",
+            "kernels",
+            "output",
+            kernel,
+            "--path",
+            str(destination),
+            "--force",
+            "--quiet",
+        ]
+    )
+    return destination
+
+
+def accept_completed_output(
+    *,
+    kernel: str,
+    state: TransportState,
+    source_checkpoint: Path,
+    source_digest: str,
+    source_counter: int,
+    key: str,
+    identity_name: str,
+    dataset: str,
+    root: Path,
+) -> tuple[Path, str, TransportState] | None:
+    output_root = download_kernel_output(kernel, root / "kernel-output")
+    output_checkpoint, output_digest_file, _ = locate_state_bundle(output_root)
+    report_path = output_root / RELAY_REPORT_NAME
+    if not report_path.is_file():
+        matches = [path for path in output_root.rglob(RELAY_REPORT_NAME) if path.is_file()]
+        if len(matches) != 1:
+            raise RuntimeError("completed kernel output has no unique relay-report.json")
+        report_path = matches[0]
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise RuntimeError("relay-report.json must contain a JSON object")
+    if not state.pending_launch_nonce:
+        raise RuntimeError("completed output cannot be accepted without a pending launch nonce")
+    report_digest, report_counter = validate_relay_report(
+        report,
+        expected_nonce=state.pending_launch_nonce,
+        expected_source_digest=source_digest,
+    )
+    file_digest = read_digest(output_digest_file)
+    if report_digest != file_digest:
+        raise RuntimeError("relay report digest and trusted-digest.txt disagree")
+
+    inspector = CheckpointManager(root / "inspect-only", identity_name, key.encode("utf-8"))
+    output_info = inspector.inspect(output_checkpoint, expected_digest=file_digest)
+    if output_info.digest != report_digest or output_info.counter != report_counter:
+        raise RuntimeError("output checkpoint metadata disagrees with relay report")
+    cognition_started = bool(report.get("cognition_started"))
+    if cognition_started and output_info.counter <= source_counter:
+        raise RuntimeError("cognitive run did not advance the authenticated checkpoint counter")
+    if output_info.counter < source_counter:
+        raise RuntimeError("kernel returned an older checkpoint counter")
+
+    accepted = mark_success(state, output_info.digest, output_info.counter)
+    version_state_dataset(
+        dataset,
+        output_checkpoint,
+        output_info.digest,
+        accepted,
+        message=f"ELIA relay accepted checkpoint {output_info.counter}",
+        root=root,
+    )
+    print_event(
+        "relay_accepted",
+        digest=output_info.digest,
+        counter=output_info.counter,
+        cognition_started=cognition_started,
+    )
+    return output_checkpoint, output_info.digest, accepted
+
+
+def prepare_kernel(
+    *,
+    repo_root: Path,
+    destination: Path,
+    kernel_id: str,
+    state_dataset: str,
+    accelerator: str,
+    source_digest: str,
+    nonce: str,
+    repo_ref: str,
+    max_cycles: int,
+) -> Path:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    template = (repo_root / "runtime" / "kaggle" / "runner_template.py").read_text(encoding="utf-8")
+    runner = render_runner(
+        template,
+        {
+            "version": 1,
+            "launch_nonce": nonce,
+            "source_digest": source_digest,
+            "repo_url": "https://github.com/vvseweedno/ELIA-WILD.git",
+            "repo_ref": repo_ref,
+            "max_cycles": max_cycles,
+        },
+    )
+    (destination / "elia_wild_runner.py").write_text(runner, encoding="utf-8")
+    metadata = build_kernel_metadata(
+        kernel_id=kernel_id,
+        state_dataset=state_dataset,
+        accelerator=accelerator,
+    )
+    (destination / "kernel-metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="ELIA WILD external wake heartbeat")
+    parser.add_argument("--config", default="config/genesis.yaml")
+    parser.add_argument("--state-dataset", default=os.getenv("ELIA_KAGGLE_STATE_DATASET", ""))
+    parser.add_argument("--kernel", default=os.getenv("ELIA_KAGGLE_KERNEL", ""))
+    parser.add_argument(
+        "--accelerator",
+        default=os.getenv("ELIA_KAGGLE_ACCELERATOR", "") or "NvidiaTeslaT4",
+    )
+    parser.add_argument("--repo-ref", default=os.getenv("ELIA_REPO_REF", "main"))
+    parser.add_argument("--max-cycles", type=int, default=int(os.getenv("ELIA_WAKE_MAX_CYCLES", "8")))
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.state_dataset or "/" not in args.state_dataset:
+        raise RuntimeError("--state-dataset / ELIA_KAGGLE_STATE_DATASET must be owner/dataset-slug")
+    if not args.kernel or "/" not in args.kernel:
+        raise RuntimeError("--kernel / ELIA_KAGGLE_KERNEL must be owner/kernel-slug")
+    require_env("KAGGLE_API_TOKEN")
+    key = require_env("ELIA_CHECKPOINT_KEY")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    config = load_config(repo_root / args.config)
+
+    with tempfile.TemporaryDirectory(prefix="elia-wake-") as temp_raw:
+        root = Path(temp_raw)
+        source_checkpoint, source_digest_path, transport_path = download_state_dataset(
+            args.state_dataset, root / "state-download"
+        )
+        source_digest = read_digest(source_digest_path)
+        transport = read_transport_state(transport_path or (root / "missing-transport.json"))
+        _, source_info = inspect_restore(
+            checkpoint=source_checkpoint,
+            digest=source_digest,
+            key=key,
+            identity_name=config.identity_name,
+            state_dir=root / "restored-state",
+        )
+        print_event(
+            "state_loaded",
+            digest=source_digest,
+            counter=source_info.counter,
+            pending=bool(transport.pending_launch_nonce),
+            consecutive_kernel_failures=transport.consecutive_kernel_failures,
+        )
+
+        if transport.pending_launch_nonce:
+            status, raw_status = kernel_status(args.kernel)
+            print_event("pending_kernel_status", state=status, raw=raw_status[-1000:])
+            if status in {"running", "queued"}:
+                return 0
+            if status == "complete":
+                try:
+                    accepted = accept_completed_output(
+                        kernel=args.kernel,
+                        state=transport,
+                        source_checkpoint=source_checkpoint,
+                        source_digest=source_digest,
+                        source_counter=source_info.counter,
+                        key=key,
+                        identity_name=config.identity_name,
+                        dataset=args.state_dataset,
+                        root=root,
+                    )
+                except Exception as exc:
+                    failed = mark_failure(transport, f"completed output rejected: {exc}")
+                    version_state_dataset(
+                        args.state_dataset,
+                        source_checkpoint,
+                        source_digest,
+                        failed,
+                        message="ELIA relay rejected invalid kernel output",
+                        root=root,
+                    )
+                    print_event("relay_rejected", error=str(exc), failures=failed.consecutive_kernel_failures)
+                    return 0
+                if accepted is not None:
+                    source_checkpoint, source_digest, transport = accepted
+                    _, source_info = inspect_restore(
+                        checkpoint=source_checkpoint,
+                        digest=source_digest,
+                        key=key,
+                        identity_name=config.identity_name,
+                        state_dir=root / "restored-state-after-relay",
+                    )
+            elif status == "failed":
+                failed = mark_failure(transport, raw_status or "Kaggle kernel reported failure")
+                version_state_dataset(
+                    args.state_dataset,
+                    source_checkpoint,
+                    source_digest,
+                    failed,
+                    message=f"ELIA kernel failure {failed.consecutive_kernel_failures}",
+                    root=root,
+                )
+                print_event("kernel_failure_recorded", failures=failed.consecutive_kernel_failures)
+                return 0
+            else:
+                age = pending_age_seconds(transport)
+                if age is None or age < PENDING_TIMEOUT_SECONDS:
+                    print_event("pending_status_unknown", age_seconds=age)
+                    return 0
+                failed = mark_failure(transport, "pending launch exceeded transport timeout", status="timeout")
+                version_state_dataset(
+                    args.state_dataset,
+                    source_checkpoint,
+                    source_digest,
+                    failed,
+                    message=f"ELIA pending launch timeout {failed.consecutive_kernel_failures}",
+                    root=root,
+                )
+                print_event("pending_timeout_recorded", failures=failed.consecutive_kernel_failures)
+                return 0
+
+        if launch_suppressed(transport, FAILURE_THRESHOLD):
+            print_event(
+                "launch_suppressed",
+                failures=transport.consecutive_kernel_failures,
+                reason="three consecutive kernel/relay failures require diagnosis before more GPU launches",
+            )
+            return 0
+
+        inspect_restore(
+            checkpoint=source_checkpoint,
+            digest=source_digest,
+            key=key,
+            identity_name=config.identity_name,
+            state_dir=root / "preflight-state",
+        )
+        preflight = evaluate_preflight(
+            root / "preflight-state",
+            config.runtime.weekly_gpu_budget_hours,
+        )
+        print_event("preflight", **preflight.as_dict())
+        if preflight.mode == "halt":
+            return 2
+        if preflight.mode != "wake":
+            return 0
+
+        pending = mark_pending(transport)
+        version_state_dataset(
+            args.state_dataset,
+            source_checkpoint,
+            source_digest,
+            pending,
+            message=f"ELIA wake pending {pending.pending_launch_nonce[:12]}",
+            root=root,
+        )
+        kernel_dir = prepare_kernel(
+            repo_root=repo_root,
+            destination=root / "kernel",
+            kernel_id=args.kernel,
+            state_dataset=args.state_dataset,
+            accelerator=args.accelerator,
+            source_digest=source_digest,
+            nonce=pending.pending_launch_nonce or "",
+            repo_ref=args.repo_ref,
+            max_cycles=max(1, min(args.max_cycles, 64)),
+        )
+        try:
+            pushed = command(
+                [
+                    "kaggle",
+                    "kernels",
+                    "push",
+                    "--path",
+                    str(kernel_dir),
+                    "--accelerator",
+                    args.accelerator,
+                ]
+            )
+        except Exception as exc:
+            failed = mark_failure(pending, f"kernel push failed: {exc}", status="push_failed")
+            version_state_dataset(
+                args.state_dataset,
+                source_checkpoint,
+                source_digest,
+                failed,
+                message=f"ELIA launch push failure {failed.consecutive_kernel_failures}",
+                root=root,
+            )
+            print_event("kernel_push_failed", error=str(exc), failures=failed.consecutive_kernel_failures)
+            return 0
+
+        print_event(
+            "kernel_launched",
+            kernel=args.kernel,
+            accelerator=args.accelerator,
+            nonce=pending.pending_launch_nonce,
+            output=(pushed.stdout or "")[-1000:],
+        )
+        return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print_event("wake_transport_error", error=f"{type(exc).__name__}: {exc}")
+        raise
