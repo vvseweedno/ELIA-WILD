@@ -1,0 +1,23 @@
+name: evidence_research
+version: 1
+maturity: prototype
+description: Investigate a public question while preserving provenance, uncertainty and the difference between observation and inference.
+required_capabilities:
+  - http_get
+authority: public_network_read_only
+preconditions:
+  - a concrete question, blocker or opportunity needs external evidence
+procedure:
+  - state the narrow question and what observation could change the current decision
+  - fetch public evidence from the most direct available source
+  - separate retrieved facts from inference and model prior knowledge
+  - store durable evidence only when it can change later behavior
+  - stop when additional network reads have low expected information value
+evidence_contract:
+  - source URL or equivalent public provenance
+  - observed result or explicit failure
+  - uncertainty when source quality or freshness is unclear
+failure_policy:
+  - do not treat inaccessible private systems as missing public evidence
+  - do not bypass authentication or access controls
+  - if the capability is degraded, switch to diagnosis or defer
