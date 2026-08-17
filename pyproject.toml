@@ -14,6 +14,12 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]
+gpu = [
+  "torch>=2.4",
+  "accelerate>=1.0",
+  "bitsandbytes>=0.49",
+  "transformers @ git+https://github.com/huggingface/transformers.git@main",
+]
 
 [project.scripts]
 elia-wild = "elia.__main__:main"
