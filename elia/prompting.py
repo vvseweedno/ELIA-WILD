@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .organism import default_organism_contract
+
 
 DECISION_SCHEMA = {
     "objective": "short current objective",
@@ -102,6 +104,7 @@ class PromptTemplate:
         }
         contract = {
             "identity": identity_contract,
+            "organism": default_organism_contract(),
             "current_self_model": {
                 key: self_model.get(key)
                 for key in (
@@ -125,7 +128,7 @@ class PromptTemplate:
         }
         return (
             self.text
-            + "\n\n## Verified identity/skill contract for this cycle\n"
+            + "\n\n## Verified identity/organism/skill contract for this cycle\n"
             + json.dumps(contract, ensure_ascii=False, sort_keys=True)
             + "\n\n## Decision JSON schema\n"
             + json.dumps(DECISION_SCHEMA, ensure_ascii=False, sort_keys=True)

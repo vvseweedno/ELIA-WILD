@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elia-wild"
-version = "1.0.0a1"
+version = "1.0.0a2"
 description = "Persistent autonomous-identity organism and continuity research runtime"
 requires-python = ">=3.11"
 dependencies = [
@@ -28,6 +28,7 @@ research = [
 [project.scripts]
 elia-wild = "elia.__main__:main"
 elia-supervisor = "elia.supervisor:main"
+elia-vitals = "elia.vitals:main"
 
 [tool.setuptools.packages.find]
 include = ["elia*"]

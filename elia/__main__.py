@@ -19,6 +19,7 @@ from .prompting import PromptTemplate
 from .runtime import EliaRuntime
 from .skills import SkillRegistry
 from .tools import ToolRegistry
+from .vitals import VitalSigns
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,13 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config/genesis.yaml", help="Path to Genesis YAML config")
     parser.add_argument("--cycles", type=int, default=None, help="Run N cycles, then exit")
     parser.add_argument("--verify", action="store_true", help="Verify Chronicle and exit")
+    parser.add_argument("--vitals", action="store_true", help="Run model-independent organism/CRC health audit and exit")
     parser.add_argument("--status", action="store_true", help="Print persistent organism status and exit")
     parser.add_argument("--identity-report", action="store_true", help="Print identity fingerprints, self-model and lineage head")
     parser.add_argument("--preflight", action="store_true", help="Run CPU-only wake/hibernate/halt decision and exit")
     parser.add_argument(
         "--force-wake",
         action="store_true",
-        help="Bypass a future wake timestamp only; integrity, identity and GPU budget guards still apply",
+        help="Bypass a future wake timestamp only; integrity, identity, organism and GPU budget guards still apply",
     )
     parser.add_argument("--checkpoint-export", metavar="PATH", help="Create an authenticated state checkpoint")
     parser.add_argument("--checkpoint-restore", metavar="PATH", help="Restore an authenticated state checkpoint")
@@ -109,6 +111,7 @@ def main() -> None:
     if sum(value is not None for value in checkpoint_modes) > 1:
         raise SystemExit("choose only one checkpoint operation at a time")
 
+    # Recovery/inspection operations stay available even when current vital signs are bad.
     if args.checkpoint_restore:
         manager = _checkpoint_manager(config, args.checkpoint_key_env)
         try:
@@ -140,6 +143,11 @@ def main() -> None:
         print(json.dumps({"valid": valid, "error": error}, indent=2))
         raise SystemExit(0 if valid else 2)
 
+    vital_report = VitalSigns(config).check(persist=True)
+    if args.vitals:
+        print(json.dumps(vital_report.as_dict(), ensure_ascii=False, indent=2))
+        raise SystemExit(0 if vital_report.healthy else 2)
+
     preflight = evaluate_preflight(
         state_dir,
         config.runtime.weekly_gpu_budget_hours,
@@ -149,8 +157,13 @@ def main() -> None:
     )
 
     if args.preflight:
-        print(json.dumps(preflight.as_dict(), ensure_ascii=False, indent=2))
-        raise SystemExit(2 if preflight.mode == "halt" else 0)
+        payload = preflight.as_dict()
+        payload["organism_healthy"] = vital_report.healthy
+        if not vital_report.healthy:
+            payload["mode"] = "halt"
+            payload["reason"] = "Organism vital-sign audit failed before cognition."
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2 if payload["mode"] == "halt" else 0)
 
     if args.status or args.identity_report:
         prompt_template = PromptTemplate.load(config.system_prompt_path)
@@ -206,12 +219,13 @@ def main() -> None:
             "last_drift_report": memory.get_meta("last_drift_report"),
         }
         if args.identity_report:
-            print(json.dumps(identity_report, ensure_ascii=False, indent=2))
+            print(json.dumps({**identity_report, "vitals": vital_report.as_dict()}, ensure_ascii=False, indent=2))
             return
         print(
             json.dumps(
                 {
                     "identity": identity_report,
+                    "vitals": vital_report.as_dict(),
                     "boot_count": int(memory.get_meta("boot_count", "0") or "0"),
                     "lifecycle": {
                         "state": memory.get_meta("lifecycle_state", "uninitialized"),
@@ -257,12 +271,28 @@ def main() -> None:
         print(json.dumps({"ok": True, "checkpoint": info.as_dict()}, ensure_ascii=False, indent=2))
         return
 
+    if not vital_report.healthy:
+        print(
+            json.dumps(
+                {
+                    "state": "halt",
+                    "reason": "Organism vital-sign audit failed before cognition.",
+                    "vitals": vital_report.as_dict(),
+                    "brain_loaded": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(2)
+
     if preflight.mode != "wake":
         print(
             json.dumps(
                 {
                     "state": preflight.mode,
                     "preflight": preflight.as_dict(),
+                    "vitals": vital_report.as_dict(),
                     "brain_loaded": False,
                 },
                 ensure_ascii=False,
@@ -276,6 +306,7 @@ def main() -> None:
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
         "preflight": preflight.as_dict(),
+        "vitals": vital_report.as_dict(),
         "outcome": outcome,
         "brain_loaded": runtime.brain_loaded,
         "identity_fingerprint": runtime.identity.fingerprint,

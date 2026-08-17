@@ -14,6 +14,7 @@ from typing import Any
 from .config import Config, load_config
 from .identity import IdentityBundle
 from .lifecycle import LifecycleDecision, evaluate_preflight
+from .vitals import VitalSigns
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,12 +31,11 @@ class SupervisorDecision:
 
 
 class ResidentSupervisor:
-    """Cheap model-independent lifecycle supervisor.
+    """Cheap model-independent lifecycle and organism supervisor.
 
-    The supervisor itself never imports or loads a model. It periodically validates
-    persistent identity state and starts a fixed ELIA child command only when CPU-only
-    preflight says cognition is due. It is therefore suitable for systemd, a small VPS,
-    a workstation, or a container outside notebook lifetimes.
+    The supervisor itself never imports or loads a model backend. It validates organism
+    anatomy/CRC plus persistent identity state, and starts one fixed ELIA child command
+    only when both vital signs and CPU-only lifecycle preflight permit cognition.
     """
 
     def __init__(
@@ -51,6 +51,8 @@ class ResidentSupervisor:
             self.config.subject_core_path,
             self.config.continuity_constitution_path,
         )
+        self.vitals = VitalSigns(self.config)
+        self.last_vitals: dict[str, Any] | None = None
         self.heartbeat_seconds = max(5.0, min(float(heartbeat_seconds), 3600.0))
         self.max_cycles = max(1, min(int(max_cycles), 64))
 
@@ -74,7 +76,23 @@ class ResidentSupervisor:
         )
 
     def decide(self) -> SupervisorDecision:
+        vital_report = self.vitals.check(persist=True)
+        self.last_vitals = vital_report.as_dict()
         preflight = self.preflight()
+        if not vital_report.healthy:
+            findings = [
+                item.get("message", "")
+                for item in self.last_vitals.get("organism", {}).get("findings", [])
+                if item.get("severity") == "critical"
+            ]
+            comparison = self.last_vitals.get("continuity_comparison") or {}
+            failures = list(comparison.get("critical_failures") or [])
+            detail = "; ".join((findings + failures)[:4]) or "organism/continuity vital signs are not healthy"
+            return SupervisorDecision(
+                "halt",
+                "Organism vital-sign failure before cognition: " + detail,
+                preflight.as_dict(),
+            )
         if preflight.mode == "halt":
             return SupervisorDecision(
                 "halt",
@@ -115,7 +133,10 @@ class ResidentSupervisor:
 
     def heartbeat(self, *, execute: bool = True) -> dict[str, Any]:
         decision = self.decide()
-        report: dict[str, Any] = {"decision": decision.as_dict()}
+        report: dict[str, Any] = {
+            "decision": decision.as_dict(),
+            "vitals": self.last_vitals,
+        }
         if execute and decision.action == "launch" and decision.child_command:
             report["child"] = self.run_child(decision.child_command)
         return report
@@ -146,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Evaluate lifecycle without starting the cognitive child",
+        help="Evaluate vital signs/lifecycle without starting the cognitive child",
     )
     return parser
 
