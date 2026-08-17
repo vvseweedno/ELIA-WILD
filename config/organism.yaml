@@ -10,8 +10,8 @@ layers:
   identity: immutable identity contract and lineage
   cognition: replaceable inference plus prompting and calibration
   memory: durable episodic, semantic and adaptive self state
-  assurance: critic, drift and continuity verification
-  agency: goals, needs, capabilities, skills and bounded action
+  assurance: critic, drift, continuity verification and revision validation
+  agency: goals, needs, capabilities, skills, bounded action and body-revision proposals
   metabolism: compute/resource accounting and opportunity economy
   lifecycle: preflight, hibernation, checkpointing, supervisor and wake transport
   research: optional measured mutations and ablations
@@ -25,7 +25,6 @@ organs:
     maturity: core
     authority: none
     role: Immutable identity invariants and epistemic boundaries.
-
   - id: continuity_constitution
     layer: identity
     kind: artifact
@@ -34,7 +33,6 @@ organs:
     maturity: core
     authority: none
     role: Precedence and continuity clauses constraining adaptive change.
-
   - id: cognitive_contract
     layer: cognition
     kind: artifact
@@ -43,7 +41,6 @@ organs:
     maturity: core
     authority: none
     role: Project-owned model-facing cognitive contract; not model identity itself.
-
   - id: identity_bundle
     layer: identity
     kind: python
@@ -53,7 +50,6 @@ organs:
     maturity: core
     authority: none
     role: Loads and fingerprints the Subject Core and Constitution.
-
   - id: identity_lineage
     layer: identity
     kind: python
@@ -63,7 +59,6 @@ organs:
     maturity: core
     authority: local_state
     role: Persists self-model snapshots and branch lineage.
-
   - id: chronicle
     layer: assurance
     kind: python
@@ -73,7 +68,6 @@ organs:
     maturity: core
     authority: local_state
     role: Tamper-evident append-only event history.
-
   - id: persistent_memory
     layer: memory
     kind: python
@@ -83,7 +77,6 @@ organs:
     maturity: core
     authority: local_state
     role: Durable memories, goals, metrics and capability-health state.
-
   - id: semantic_recall
     layer: memory
     kind: python
@@ -93,7 +86,6 @@ organs:
     maturity: proven
     authority: local_read
     role: Inspectable CPU recall over durable memory.
-
   - id: adaptive_self_model
     layer: memory
     kind: python
@@ -103,7 +95,6 @@ organs:
     maturity: core
     authority: local_state
     role: Revisable evidence-bearing hypotheses about self.
-
   - id: metacognition
     layer: cognition
     kind: python
@@ -113,7 +104,6 @@ organs:
     maturity: proven
     authority: local_state
     role: Commits forecasts before action and calibrates them against outcomes.
-
   - id: prompt_renderer
     layer: cognition
     kind: python
@@ -122,8 +112,7 @@ organs:
     required: true
     maturity: core
     authority: none
-    role: Injects verified identity, skills and decision schema into model context.
-
+    role: Injects verified identity, organism anatomy, skills and decision schema into model context.
   - id: brain_adapter
     layer: cognition
     kind: python
@@ -133,7 +122,6 @@ organs:
     maturity: core
     authority: model_inference
     role: Replaceable model substrate with lazy loading.
-
   - id: critic_assurance
     layer: assurance
     kind: python
@@ -143,7 +131,6 @@ organs:
     maturity: core
     authority: none
     role: Deterministic pre-action assurance gate inspired by PASB/CriticAssurance.
-
   - id: identity_drift_monitor
     layer: assurance
     kind: python
@@ -153,7 +140,6 @@ organs:
     maturity: core
     authority: none
     role: Detects structural identity/lineage drift while allowing substrate change.
-
   - id: continuity_record_capsule
     layer: assurance
     kind: python
@@ -163,7 +149,15 @@ organs:
     maturity: proven
     authority: local_read
     role: Falsifiable continuity measurement across persistent states.
-
+  - id: body_revision_gate
+    layer: assurance
+    kind: python
+    module: elia.evolution
+    symbol: RevisionGate
+    required: true
+    maturity: proven
+    authority: none
+    role: Separates proposed self-mutations from validated body revisions using tests, vitals, CRC and metrics.
   - id: capability_registry
     layer: agency
     kind: python
@@ -173,7 +167,6 @@ organs:
     maturity: core
     authority: bounded_actions
     role: Explicit executable authority boundary.
-
   - id: skill_registry
     layer: agency
     kind: python
@@ -183,7 +176,6 @@ organs:
     maturity: core
     authority: procedure_only
     role: Versioned procedures that never grant authority by themselves.
-
   - id: needs_engine
     layer: agency
     kind: python
@@ -193,7 +185,6 @@ organs:
     maturity: core
     authority: none
     role: Deterministic self-maintenance pressures from verified state.
-
   - id: economy
     layer: metabolism
     kind: python
@@ -203,7 +194,6 @@ organs:
     maturity: core
     authority: local_state
     role: Separates estimates/opportunities from verified resource receipts.
-
   - id: lifecycle_preflight
     layer: lifecycle
     kind: python
@@ -213,7 +203,6 @@ organs:
     maturity: core
     authority: process_control
     role: CPU-only wake, hibernate or halt gate before model loading.
-
   - id: checkpoint_manager
     layer: lifecycle
     kind: python
@@ -223,7 +212,6 @@ organs:
     maturity: core
     authority: local_state
     role: Authenticated state migration and rollback resistance.
-
   - id: resident_supervisor
     layer: lifecycle
     kind: python
@@ -232,8 +220,7 @@ organs:
     required: true
     maturity: proven
     authority: fixed_child_process
-    role: Cheap persistent pulse that wakes cognition only when due.
-
+    role: Cheap persistent pulse that wakes cognition only when due and vital signs are healthy.
   - id: wake_transport
     layer: lifecycle
     kind: python
@@ -243,7 +230,6 @@ organs:
     maturity: prototype
     authority: configured_kaggle_relay
     role: External authenticated wake/state relay for ephemeral GPU sessions.
-
   - id: runtime
     layer: agency
     kind: python
@@ -253,7 +239,6 @@ organs:
     maturity: core
     authority: composed
     role: Integrates identity, memory, assurance, action and persistence into cycles.
-
   - id: research_registry
     layer: research
     kind: python
@@ -263,7 +248,6 @@ organs:
     maturity: prototype
     authority: none
     role: Separates proven, prototype, archived and hypothesis research artifacts.
-
   - id: seraphim_adapter
     layer: research
     kind: python
@@ -273,7 +257,6 @@ organs:
     maturity: prototype
     authority: none
     role: Ouroboros/x0, TopologicalLoss and hybrid-objective research adapters.
-
   - id: memory_backends
     layer: research
     kind: python
@@ -283,7 +266,33 @@ organs:
     maturity: prototype
     authority: none
     role: Scroll, Fractal, LRU-scan and Holo-scan reference backends.
-
+  - id: recurrent_cache
+    layer: research
+    kind: python
+    module: elia.research.cache
+    symbol: StatefulMemoryCache
+    required: false
+    maturity: prototype
+    authority: none
+    role: Per-stream recurrent cache abstraction for experimental memory backends.
+  - id: research_runtime_checker
+    layer: research
+    kind: python
+    module: elia.research.runtime
+    symbol: RuntimeCompatibilityChecker
+    required: false
+    maturity: proven
+    authority: none
+    role: Smoke-first environment and dependency validation extracted from archived failures.
+  - id: research_ablation_harness
+    layer: research
+    kind: python
+    module: elia.research.bench
+    symbol: run_memory_backend_ablation
+    required: false
+    maturity: prototype
+    authority: none
+    role: Common reference ablation harness for experimental memory backends.
   - id: omega_adapters
     layer: research
     kind: python
@@ -293,7 +302,6 @@ organs:
     maturity: prototype
     authority: none
     role: ContextAnchor, bounded-depth FiLM, OmegaFilter and TriCore ablations.
-
   - id: cognitive_stress_evaluators
     layer: research
     kind: python

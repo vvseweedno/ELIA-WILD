@@ -120,6 +120,56 @@ RESEARCH_REGISTRY: dict[str, ResearchArtifact] = {
             "Elastic depth remains a hypothesis rather than a validated default.",
         ),
     ),
+    "stateful_memory_cache": ResearchArtifact(
+        "stateful_memory_cache",
+        "holo-seraphim",
+        "prototype",
+        "Keep recurrent research-memory state scoped by stream without making it part of immutable identity.",
+        (
+            "Extracted from HoloSeraphim recurrent cache requirements.",
+            "Genesis durable identity still lives in verified external state, not an ephemeral tensor cache.",
+        ),
+    ),
+    "runtime_compatibility_checker": ResearchArtifact(
+        "runtime_compatibility_checker",
+        "infrastructure",
+        "proven",
+        "Classify dependency/environment readiness before expensive experiments.",
+        (
+            "Encodes repeated TPU/JAX/Kaggle failure lessons: API mismatch and missing auth are not model-quality evidence.",
+            "Repository regression tests exercise required/optional dependency classification.",
+        ),
+    ),
+    "dataset_cocktail_registry": ResearchArtifact(
+        "dataset_cocktail_registry",
+        "infrastructure",
+        "prototype",
+        "Declare weighted datasets with explicit gating/auth readiness checks before loading.",
+        (
+            "Extracted from archived gated/unsupported dataset failures.",
+            "The registry does not download data or bypass access controls.",
+        ),
+    ),
+    "smoke_first_runner": ResearchArtifact(
+        "smoke_first_runner",
+        "infrastructure",
+        "proven",
+        "Prevent expensive experimental paths unless a cheap smoke predicate succeeds.",
+        (
+            "Generalizes the smoke-first discipline already used by Genesis CI and Kaggle lifecycle work.",
+            "Regression tests prove the full path is not called after failed smoke.",
+        ),
+    ),
+    "memory_backend_ablation": ResearchArtifact(
+        "memory_backend_ablation",
+        "memory",
+        "prototype",
+        "Run deterministic reference comparisons across Scroll, Fractal, LRU and Holo memory backends.",
+        (
+            "Provides a common executable baseline harness before model-scale benchmarking.",
+            "Reference metrics are diagnostics and are not language-model performance claims.",
+        ),
+    ),
     "complex_rmsnorm": ResearchArtifact(
         "complex_rmsnorm",
         "holo",

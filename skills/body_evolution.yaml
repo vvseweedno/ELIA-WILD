@@ -1,0 +1,24 @@
+name: body_evolution
+version: 1
+description: Formulate evidence-driven body revisions without confusing a proposed mutation with a validated new organism version.
+maturity: prototype
+required_capabilities:
+  - propose_repair
+authority: workspace_proposal_only
+preconditions:
+  - Current organism vital signs and identity continuity are known.
+  - The target organ or bottleneck is named.
+procedure:
+  - State one falsifiable hypothesis for the proposed body change.
+  - Name every core/research organ expected to change.
+  - Define baseline and candidate metrics before implementation.
+  - Define regression tests for identity, Chronicle, authority, memory and resource behavior.
+  - Define an explicit rollback path before testing.
+  - Stage the mutation as a repair/body-revision proposal; do not call it validated.
+  - Validate only after tests pass, organism audit is healthy and CRC continuity is not broken.
+evidence_contract:
+  - Validation evidence includes test result, organism audit, CRC comparison and declared metric outcomes.
+  - A changed architecture fingerprint is expected; a changed immutable identity fingerprint is not silently accepted.
+failure_policy:
+  - Rejected mutations remain evidence and do not become defaults.
+  - Never bypass the critic, vital-sign gate or authority layer to preserve a mutation.
