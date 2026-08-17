@@ -20,6 +20,8 @@ class BudgetExhausted(RuntimeError):
 class EliaRuntime:
     """Persistent observe -> decide -> act -> remember runtime."""
 
+    MAX_ACTIVE_GOALS = 32
+
     def __init__(self, config: Config, brain: Brain | None = None):
         self.config = config
         state_dir = config.runtime.state_dir
@@ -60,6 +62,7 @@ class EliaRuntime:
                 "identity": self.config.identity_name,
                 "brain_backend": self.config.brain.backend,
                 "model_id": self.config.brain.model_id,
+                "active_goal_count": len(self.memory.active_goals(self.MAX_ACTIVE_GOALS + 1)),
             },
         )
 
@@ -86,6 +89,7 @@ class EliaRuntime:
     def _context(self) -> dict[str, Any]:
         valid, error = self.chronicle.verify()
         recent = [asdict(record) for record in self.memory.recent(self.config.runtime.memory_recall_limit)]
+        goals = [asdict(goal) for goal in self.memory.active_goals(16)]
         return {
             "time_utc": datetime.now(timezone.utc).isoformat(),
             "identity": {
@@ -95,6 +99,7 @@ class EliaRuntime:
             "mission": self.config.mission,
             "resources": self.budget(),
             "chronicle_integrity": {"valid": valid, "error": error},
+            "active_goals": goals,
             "recent_memory": recent,
             "last_action": self._load_json_meta("last_action"),
             "available_tools": self.tools.descriptions(),
@@ -146,6 +151,90 @@ class EliaRuntime:
             )
         return ids
 
+    def _apply_goal_updates(self, decision: Decision) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = []
+        for item in decision.goal_updates[:4]:
+            op = str(item.get("op", "")).strip().lower()
+            try:
+                if op == "create":
+                    title = str(item.get("title", "")).strip()
+                    active = self.memory.active_goals(self.MAX_ACTIVE_GOALS + 1)
+                    duplicate = next(
+                        (goal for goal in active if goal.title.casefold() == title.casefold()),
+                        None,
+                    )
+                    if duplicate is not None:
+                        changes.append(
+                            {
+                                "ok": True,
+                                "op": "create",
+                                "goal_id": duplicate.id,
+                                "deduplicated": True,
+                            }
+                        )
+                        continue
+                    if len(active) >= self.MAX_ACTIVE_GOALS:
+                        raise ValueError(f"active goal limit reached: {self.MAX_ACTIVE_GOALS}")
+                    parent_raw = item.get("parent_id")
+                    parent_id = int(parent_raw) if parent_raw is not None else None
+                    goal_id = self.memory.create_goal(
+                        title,
+                        str(item.get("description", "")),
+                        priority=float(item.get("priority", 0.5)),
+                        source="brain",
+                        parent_id=parent_id,
+                    )
+                    changes.append({"ok": True, "op": "create", "goal_id": goal_id})
+                    continue
+
+                if op in {"update", "complete", "abandon", "block", "activate"}:
+                    goal_id = int(item.get("id"))
+                    status = item.get("status")
+                    if op == "complete":
+                        status = "completed"
+                    elif op == "abandon":
+                        status = "abandoned"
+                    elif op == "block":
+                        status = "blocked"
+                    elif op == "activate":
+                        status = "active"
+                    evidence = str(item.get("evidence", "")).strip()
+                    if status in {"completed", "abandoned"} and not evidence:
+                        raise ValueError("completing or abandoning a goal requires evidence")
+                    updated = self.memory.update_goal(
+                        goal_id,
+                        status=str(status) if status is not None else None,
+                        priority=(float(item["priority"]) if item.get("priority") is not None else None),
+                        description=(
+                            str(item["description"])
+                            if item.get("description") is not None
+                            else None
+                        ),
+                        event=op,
+                        evidence=evidence,
+                    )
+                    changes.append(
+                        {
+                            "ok": True,
+                            "op": op,
+                            "goal_id": updated.id,
+                            "status": updated.status,
+                            "priority": updated.priority,
+                        }
+                    )
+                    continue
+
+                raise ValueError(f"unknown goal operation: {op or '<empty>'}")
+            except Exception as exc:
+                changes.append(
+                    {
+                        "ok": False,
+                        "op": op or "unknown",
+                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                    }
+                )
+        return changes
+
     def cycle(self) -> dict[str, Any]:
         context = self._context()
         decision = self._think(context)
@@ -163,12 +252,14 @@ class EliaRuntime:
                 "error": result.error,
             }
 
+        goal_changes = self._apply_goal_updates(decision)
         action_record = {
             "objective": decision.objective,
             "summary": decision.summary,
             "action": {"name": decision.action_name, "args": decision.action_args},
             "result": result_dict,
             "memory_ids": memory_ids,
+            "goal_changes": goal_changes,
         }
         self.memory.set_meta("last_action", json.dumps(action_record, ensure_ascii=False, sort_keys=True))
         self.memory.remember(
@@ -188,6 +279,8 @@ class EliaRuntime:
                 "action_name": decision.action_name,
             },
             "result": result_dict,
+            "goal_changes": goal_changes,
+            "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
             "resources": self.budget(),
             "sleep_seconds": decision.sleep_seconds,
         }
