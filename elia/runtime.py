@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
 import json
 import time
 from typing import Any
@@ -212,6 +211,8 @@ class EliaRuntime:
                     source="runtime",
                 )
                 self.chronicle.append("ERROR", error)
+                if cycles is not None:
+                    raise
                 sleep_for = min(max(self.config.runtime.cycle_sleep_seconds, 1.0), 300.0)
                 time.sleep(sleep_for)
                 continue
