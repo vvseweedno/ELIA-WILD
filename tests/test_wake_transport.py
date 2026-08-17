@@ -117,6 +117,26 @@ def test_runner_render_injects_only_nonsecret_config() -> None:
     assert "ELIA_CHECKPOINT_KEY" not in rendered
 
 
+def test_real_runner_template_renders_to_valid_python() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    template = (repo_root / "runtime" / "kaggle" / "runner_template.py").read_text(encoding="utf-8")
+    rendered = render_runner(
+        template,
+        {
+            "version": 1,
+            "launch_nonce": "nonce-compile-test",
+            "source_digest": D1,
+            "repo_url": "https://github.com/vvseweedno/ELIA-WILD.git",
+            "repo_ref": "deadbeef",
+            "max_cycles": 8,
+        },
+    )
+    compile(rendered, "elia_wild_runner.py", "exec")
+    assert "__ELIA_WAKE_CONFIG__" not in rendered
+    assert D1 in rendered
+    assert "bootstrap-test-secret" not in rendered
+
+
 def test_relay_report_requires_nonce_source_digest_and_valid_output() -> None:
     report = {
         "launch_nonce": "nonce-1",
