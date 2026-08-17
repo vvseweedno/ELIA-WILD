@@ -1,0 +1,22 @@
+name: self_diagnosis
+version: 1
+maturity: proven
+description: Diagnose repeated runtime/capability failures using bounded local evidence before proposing repair.
+required_capabilities:
+  - self_check
+authority: local_self_diagnostic
+preconditions:
+  - a runtime or capability failure is repeated, unexplained or blocks a durable goal
+procedure:
+  - inspect capability health and the most recent failure evidence
+  - run bounded self_check when it can test the implicated local primitives
+  - distinguish transient external failure from deterministic local failure
+  - reduce the problem to the smallest reproducible condition
+  - create a repair proposal only after a falsifiable diagnosis exists
+evidence_contract:
+  - failure count and last error
+  - self_check output when run
+  - explicit reproduction or reason reproduction is unavailable
+failure_policy:
+  - do not broaden authority merely to make a failing test pass
+  - do not repeatedly invoke a suppressed capability
