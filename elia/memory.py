@@ -130,24 +130,39 @@ class MemoryStore:
         return str(row["value"]) if row else default
 
     @staticmethod
-    def _iso_week_key(moment: datetime | None = None) -> str:
+    def _week_suffix(moment: datetime | None = None) -> str:
         moment = moment or datetime.now(timezone.utc)
         iso = moment.isocalendar()
-        return f"brain_seconds:{iso.year}-W{iso.week:02d}"
+        return f"{iso.year}-W{iso.week:02d}"
 
-    def add_brain_seconds(self, seconds: float) -> float:
-        key = self._iso_week_key()
+    def _metric_key(self, metric: str) -> str:
+        return f"{metric}:{self._week_suffix()}"
+
+    def add_metric(self, metric: str, amount: float) -> float:
+        key = self._metric_key(metric)
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO metrics(key, value) VALUES(?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=value+excluded.value",
-                (key, max(0.0, float(seconds))),
+                (key, max(0.0, float(amount))),
             )
             row = conn.execute("SELECT value FROM metrics WHERE key=?", (key,)).fetchone()
         return float(row["value"])
 
-    def brain_seconds_this_week(self) -> float:
-        key = self._iso_week_key()
+    def metric_this_week(self, metric: str) -> float:
+        key = self._metric_key(metric)
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM metrics WHERE key=?", (key,)).fetchone()
         return float(row["value"]) if row else 0.0
+
+    def add_brain_seconds(self, seconds: float) -> float:
+        return self.add_metric("brain_seconds", seconds)
+
+    def brain_seconds_this_week(self) -> float:
+        return self.metric_this_week("brain_seconds")
+
+    def add_runtime_seconds(self, seconds: float) -> float:
+        return self.add_metric("gpu_runtime_seconds", seconds)
+
+    def runtime_seconds_this_week(self) -> float:
+        return self.metric_this_week("gpu_runtime_seconds")
