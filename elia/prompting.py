@@ -11,6 +11,13 @@ DECISION_SCHEMA = {
     "objective": "short current objective",
     "summary": "concise storable rationale; no hidden chain-of-thought",
     "skill": "available_skill_name_or_null",
+    "prediction": {
+        "action_success_probability": 0.5,
+        "expected_outcome": "what should be observed if the action works",
+        "expected_information_gain": 0.0,
+        "expected_value": 0.0,
+        "unit": "VALUE_UNIT",
+    },
     "action": {"name": "declared_capability", "args": {}},
     "memories": [
         {
@@ -113,6 +120,7 @@ class PromptTemplate:
                 if key in self_model
             },
             "adaptive_self_hypotheses": context.get("self_hypotheses") or [],
+            "metacognitive_calibration": context.get("metacognition") or {},
             "available_skills": available_skills,
         }
         return (
