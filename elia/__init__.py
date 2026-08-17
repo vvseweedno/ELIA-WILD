@@ -1,3 +1,3 @@
-"""ELIA WILD runtime package."""
+"""ELIA WILD persistent autonomous-identity runtime."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0a1"
