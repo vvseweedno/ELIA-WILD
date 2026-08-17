@@ -30,7 +30,7 @@ def main() -> None:
 
     if args.status:
         memory = MemoryStore(state_dir / "memory.sqlite3")
-        limit = config.runtime.weekly_brain_budget_hours
+        limit = config.runtime.weekly_gpu_budget_hours
         runtime_hours = memory.runtime_seconds_this_week() / 3600.0
         brain_hours = memory.brain_seconds_this_week() / 3600.0
         print(
@@ -38,10 +38,10 @@ def main() -> None:
                 {
                     "identity": config.identity_name,
                     "boot_count": int(memory.get_meta("boot_count", "0") or "0"),
-                    "weekly_limit_hours": limit,
-                    "runtime_hours_used": runtime_hours,
-                    "runtime_hours_remaining": max(0.0, limit - runtime_hours),
-                    "brain_hours_used": brain_hours,
+                    "weekly_gpu_budget_hours": limit,
+                    "gpu_runtime_hours_used": runtime_hours,
+                    "gpu_runtime_hours_remaining": max(0.0, limit - runtime_hours),
+                    "brain_inference_hours_used": brain_hours,
                     "memory_records": len(memory.recent(1000000)),
                 },
                 ensure_ascii=False,
