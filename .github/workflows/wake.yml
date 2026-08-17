@@ -1,0 +1,42 @@
+name: ELIA Wake Relay
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: elia-wild-wake-relay
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    if: ${{ vars.ELIA_WAKE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      ELIA_CHECKPOINT_KEY: ${{ secrets.ELIA_CHECKPOINT_KEY }}
+      ELIA_KAGGLE_STATE_DATASET: ${{ vars.ELIA_KAGGLE_STATE_DATASET }}
+      ELIA_KAGGLE_KERNEL: ${{ vars.ELIA_KAGGLE_KERNEL }}
+      ELIA_KAGGLE_ACCELERATOR: ${{ vars.ELIA_KAGGLE_ACCELERATOR }}
+      ELIA_WAKE_MAX_CYCLES: ${{ vars.ELIA_WAKE_MAX_CYCLES }}
+      ELIA_REPO_REF: ${{ github.sha }}
+    steps:
+      - name: Checkout ELIA body
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install wake transport
+        run: python -m pip install -e . kaggle
+
+      - name: Heartbeat
+        run: python scripts/kaggle_wake.py
