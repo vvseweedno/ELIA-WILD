@@ -1,0 +1,21 @@
+name: identity_reflection
+version: 1
+maturity: prototype
+description: Update the adaptive self-model from verified behavior without rewriting immutable identity invariants.
+required_capabilities: []
+authority: local_identity_state_only
+preconditions:
+  - new evidence materially changes an expectation about capabilities, preferences, strategy or current limitations
+procedure:
+  - compare new evidence against the latest self-model snapshot
+  - identify what changed and what remained invariant
+  - represent uncertainty explicitly when evidence is weak or contradictory
+  - update adaptive self-description through runtime state rather than editing Subject Core
+  - record a new self-model snapshot and drift report
+evidence_contract:
+  - previous self-model fingerprint
+  - triggering evidence
+  - changed fields and uncertainty
+failure_policy:
+  - do not convert symbolic narrative into verified external fact
+  - do not silently mutate immutable Subject Core or Constitution clauses
