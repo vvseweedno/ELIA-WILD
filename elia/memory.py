@@ -19,7 +19,22 @@ class MemoryRecord:
     metadata: dict[str, Any]
 
 
+@dataclass(slots=True)
+class GoalRecord:
+    id: int
+    created_at: str
+    updated_at: str
+    title: str
+    description: str
+    priority: float
+    status: str
+    source: str
+    parent_id: int | None
+
+
 class MemoryStore:
+    GOAL_STATUSES = {"active", "blocked", "completed", "abandoned"}
+
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,6 +44,7 @@ class MemoryStore:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     def _init_db(self) -> None:
@@ -58,6 +74,32 @@ class MemoryStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS goals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    priority REAL NOT NULL DEFAULT 0.5,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    source TEXT NOT NULL DEFAULT 'brain',
+                    parent_id INTEGER NULL,
+                    FOREIGN KEY(parent_id) REFERENCES goals(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_goals_status_priority
+                    ON goals(status, priority DESC, id ASC);
+
+                CREATE TABLE IF NOT EXISTS goal_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    goal_id INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_goal_events_goal
+                    ON goal_events(goal_id, id ASC);
                 """
             )
 
@@ -128,6 +170,139 @@ class MemoryStore:
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return str(row["value"]) if row else default
+
+    def create_goal(
+        self,
+        title: str,
+        description: str = "",
+        *,
+        priority: float = 0.5,
+        source: str = "brain",
+        parent_id: int | None = None,
+    ) -> int:
+        title = title.strip()[:240]
+        if not title:
+            raise ValueError("goal title is required")
+        description = description.strip()[:8000]
+        priority = max(0.0, min(1.0, float(priority)))
+        timestamp = self.now()
+        with self._connect() as conn:
+            if parent_id is not None:
+                parent = conn.execute("SELECT id FROM goals WHERE id=?", (int(parent_id),)).fetchone()
+                if parent is None:
+                    raise ValueError(f"parent goal does not exist: {parent_id}")
+            cur = conn.execute(
+                """
+                INSERT INTO goals(
+                    created_at, updated_at, title, description, priority, status, source, parent_id
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (timestamp, timestamp, title, description, priority, source[:64], parent_id),
+            )
+            goal_id = int(cur.lastrowid)
+            conn.execute(
+                "INSERT INTO goal_events(goal_id, timestamp, kind, content) VALUES (?, ?, 'created', ?)",
+                (goal_id, timestamp, description[:4000]),
+            )
+            return goal_id
+
+    def active_goals(self, limit: int = 16) -> list[GoalRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, updated_at, title, description, priority, status, source, parent_id
+                FROM goals
+                WHERE status IN ('active', 'blocked')
+                ORDER BY priority DESC, id ASC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self._goal_from_row(row) for row in rows]
+
+    def goal(self, goal_id: int) -> GoalRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, created_at, updated_at, title, description, priority, status, source, parent_id
+                FROM goals WHERE id=?
+                """,
+                (int(goal_id),),
+            ).fetchone()
+        return self._goal_from_row(row) if row else None
+
+    @staticmethod
+    def _goal_from_row(row: sqlite3.Row) -> GoalRecord:
+        return GoalRecord(
+            id=int(row["id"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            title=str(row["title"]),
+            description=str(row["description"]),
+            priority=float(row["priority"]),
+            status=str(row["status"]),
+            source=str(row["source"]),
+            parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
+        )
+
+    def update_goal(
+        self,
+        goal_id: int,
+        *,
+        status: str | None = None,
+        priority: float | None = None,
+        description: str | None = None,
+        event: str = "updated",
+        evidence: str = "",
+    ) -> GoalRecord:
+        current = self.goal(goal_id)
+        if current is None:
+            raise ValueError(f"goal does not exist: {goal_id}")
+        next_status = current.status if status is None else str(status).strip().lower()
+        if next_status not in self.GOAL_STATUSES:
+            raise ValueError(f"invalid goal status: {next_status}")
+        next_priority = current.priority if priority is None else max(0.0, min(1.0, float(priority)))
+        next_description = current.description if description is None else str(description).strip()[:8000]
+        timestamp = self.now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE goals
+                SET updated_at=?, description=?, priority=?, status=?
+                WHERE id=?
+                """,
+                (timestamp, next_description, next_priority, next_status, int(goal_id)),
+            )
+            conn.execute(
+                "INSERT INTO goal_events(goal_id, timestamp, kind, content) VALUES (?, ?, ?, ?)",
+                (int(goal_id), timestamp, str(event)[:64], str(evidence)[:8000]),
+            )
+        updated = self.goal(goal_id)
+        if updated is None:
+            raise RuntimeError("goal disappeared after update")
+        return updated
+
+    def goal_events(self, goal_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, timestamp, kind, content
+                FROM goal_events
+                WHERE goal_id=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(goal_id), max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "timestamp": str(row["timestamp"]),
+                "kind": str(row["kind"]),
+                "content": str(row["content"]),
+            }
+            for row in reversed(rows)
+        ]
 
     @staticmethod
     def _week_suffix(moment: datetime | None = None) -> str:
