@@ -55,6 +55,10 @@ class Chronicle:
         item = json.loads(last_line)
         return int(item["seq"]), str(item["hash"])
 
+    def head(self) -> tuple[int, str]:
+        """Return the current sequence/hash head without mutating the Chronicle."""
+        return self._last()
+
     def append(self, kind: str, payload: dict[str, Any]) -> ChronicleEntry:
         last_seq, previous_hash = self._last()
         seq = last_seq + 1
