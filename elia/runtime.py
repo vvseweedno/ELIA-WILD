@@ -22,6 +22,8 @@ class EliaRuntime:
     """Persistent observe -> assess needs -> decide -> act -> remember runtime."""
 
     MAX_ACTIVE_GOALS = 32
+    CAPABILITY_FAILURE_THRESHOLD = 3
+    DEGRADATION_EXEMPT = {"noop", "self_check", "propose_repair"}
 
     def __init__(self, config: Config, brain: Brain | None = None):
         self.config = config
@@ -65,6 +67,7 @@ class EliaRuntime:
                 "model_id": self.config.brain.model_id,
                 "active_goal_count": len(self.memory.active_goals(self.MAX_ACTIVE_GOALS + 1)),
                 "previous_intended_wake_at": self.memory.get_meta("next_wake_at"),
+                "declared_capabilities": sorted(self.tools.catalog()),
             },
         )
 
@@ -111,12 +114,18 @@ class EliaRuntime:
         self.memory.set_meta("last_sleep_seconds", f"{delay:.6f}")
         return delay, wake_raw
 
+    def capability_state(self) -> dict[str, Any]:
+        catalog = self.tools.catalog()
+        health = self.memory.capability_health_all(list(catalog), window=20)
+        return {"catalog": catalog, "health": health}
+
     def _context(self) -> dict[str, Any]:
         valid, error = self.chronicle.verify()
         recent = [asdict(record) for record in self.memory.recent(self.config.runtime.memory_recall_limit)]
         goal_records = self.memory.active_goals(16)
         goals = [asdict(goal) for goal in goal_records]
         resources = self.budget()
+        capabilities = self.capability_state()
         needs = [
             need.as_dict()
             for need in derive_needs(
@@ -124,6 +133,7 @@ class EliaRuntime:
                 chronicle_valid=valid,
                 budget=resources,
                 active_goals=goal_records,
+                capability_health=capabilities["health"],
             )
         ]
         return {
@@ -140,7 +150,7 @@ class EliaRuntime:
             "active_goals": goals,
             "recent_memory": recent,
             "last_action": self._load_json_meta("last_action"),
-            "available_tools": self.tools.descriptions(),
+            "capabilities": capabilities,
         }
 
     def _load_json_meta(self, key: str) -> Any:
@@ -273,12 +283,49 @@ class EliaRuntime:
                 )
         return changes
 
+    def _execute_action(self, name: str, args: dict[str, Any]) -> ToolResult:
+        health = self.memory.capability_health(name, window=20)
+        if (
+            name not in self.DEGRADATION_EXEMPT
+            and int(health["consecutive_failures"]) >= self.CAPABILITY_FAILURE_THRESHOLD
+        ):
+            error = (
+                f"Capability temporarily suppressed after {health['consecutive_failures']} "
+                "consecutive failures. Use self_check, an alternative capability, or propose_repair "
+                "instead of blind retry."
+            )
+            self.memory.record_capability_event(
+                name,
+                ok=False,
+                executed=False,
+                duration_ms=0.0,
+                error=error,
+            )
+            return ToolResult(
+                False,
+                name,
+                data={"suppressed": True, "health": health},
+                error=error,
+            )
+
+        started = time.monotonic()
+        result = self.tools.execute(name, args)
+        duration_ms = (time.monotonic() - started) * 1000.0
+        self.memory.record_capability_event(
+            name,
+            ok=result.ok,
+            executed=True,
+            duration_ms=duration_ms,
+            error=result.error or "",
+        )
+        return result
+
     def cycle(self) -> dict[str, Any]:
         context = self._context()
         decision = self._think(context)
         memory_ids = self._store_model_memories(decision)
 
-        result: ToolResult = self.tools.execute(decision.action_name, decision.action_args)
+        result = self._execute_action(decision.action_name, decision.action_args)
         result_dict = result.as_dict()
         max_chars = self.config.runtime.max_action_output_chars
         serialized = json.dumps(result_dict, ensure_ascii=False, sort_keys=True)
@@ -299,6 +346,7 @@ class EliaRuntime:
             "result": result_dict,
             "memory_ids": memory_ids,
             "goal_changes": goal_changes,
+            "capability_health": self.memory.capability_health(decision.action_name),
             "scheduler": {
                 "sleep_seconds": sleep_seconds,
                 "next_wake_at": next_wake_at,
@@ -324,6 +372,7 @@ class EliaRuntime:
             "result": result_dict,
             "goal_changes": goal_changes,
             "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
+            "capability_health": self.memory.capability_health(decision.action_name),
             "resources": self.budget(),
             "sleep_seconds": sleep_seconds,
             "next_wake_at": next_wake_at,
