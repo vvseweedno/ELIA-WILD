@@ -94,11 +94,22 @@ class CheckpointManager:
     The authentication key is deliberately external to the checkpoint and repository.
     A local anchor detects rollback on an existing machine. On a completely fresh
     machine, strict rollback protection requires an externally trusted expected digest.
+    Identity fingerprints are carried as authenticated metadata when the current body
+    has established them; legacy v1 checkpoints without those fields remain readable.
     """
 
-    def __init__(self, state_dir: Path, identity_name: str, key: bytes):
+    def __init__(
+        self,
+        state_dir: Path,
+        identity_name: str,
+        key: bytes,
+        identity_fingerprint: str | None = None,
+    ):
         self.state_dir = Path(state_dir)
         self.identity_name = identity_name
+        self.identity_fingerprint = (
+            str(identity_fingerprint).strip() if identity_fingerprint else None
+        )
         if len(key) < 16:
             raise ValueError("checkpoint authentication key must be at least 16 bytes")
         self.key = key
@@ -171,6 +182,16 @@ class CheckpointManager:
         previous_digest = memory.get_meta("checkpoint_digest", "") or ""
         counter = previous_counter + 1
 
+        persisted_identity_fp = memory.get_meta("identity_bundle_fingerprint")
+        if (
+            self.identity_fingerprint
+            and persisted_identity_fp
+            and persisted_identity_fp != self.identity_fingerprint
+        ):
+            raise CheckpointError(
+                "refusing checkpoint export: durable identity fingerprint differs from loaded body"
+            )
+
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp_archive = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
 
@@ -207,6 +228,14 @@ class CheckpointManager:
                     "identity_meta": {
                         "boot_count": memory.get_meta("boot_count", "0"),
                         "genesis_initialized": memory.get_meta("genesis_initialized", "0"),
+                        "identity_bundle_fingerprint": persisted_identity_fp
+                        or self.identity_fingerprint,
+                        "subject_core_fingerprint": memory.get_meta("subject_core_fingerprint"),
+                        "constitution_fingerprint": memory.get_meta("constitution_fingerprint"),
+                        "prompt_fingerprint": memory.get_meta("prompt_fingerprint"),
+                        "self_model_fingerprint": memory.get_meta("self_model_fingerprint"),
+                        "body_version": memory.get_meta("body_version"),
+                        "branch_id": memory.get_meta("branch_id"),
                     },
                     "files": self._manifest_files(staged_state),
                 }
@@ -272,6 +301,17 @@ class CheckpointManager:
             if manifest.get("identity_name") != self.identity_name:
                 raise CheckpointError(
                     f"checkpoint identity mismatch: {manifest.get('identity_name')!r} != {self.identity_name!r}"
+                )
+            manifest_identity_fp = str(
+                (manifest.get("identity_meta") or {}).get("identity_bundle_fingerprint") or ""
+            )
+            if (
+                self.identity_fingerprint
+                and manifest_identity_fp
+                and manifest_identity_fp != self.identity_fingerprint
+            ):
+                raise CheckpointError(
+                    "checkpoint Subject Core/Constitution fingerprint does not match the loaded identity body"
                 )
 
             files = manifest.get("files")
