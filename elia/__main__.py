@@ -11,9 +11,13 @@ from .autonomy import derive_needs
 from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
+from .economy import EconomyStore
+from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
+from .prompting import PromptTemplate
 from .runtime import EliaRuntime
+from .skills import SkillRegistry
 from .tools import ToolRegistry
 
 
@@ -22,7 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config/genesis.yaml", help="Path to Genesis YAML config")
     parser.add_argument("--cycles", type=int, default=None, help="Run N cycles, then exit")
     parser.add_argument("--verify", action="store_true", help="Verify Chronicle and exit")
-    parser.add_argument("--status", action="store_true", help="Print persistent runtime status and exit")
+    parser.add_argument("--status", action="store_true", help="Print persistent organism status and exit")
+    parser.add_argument("--identity-report", action="store_true", help="Print identity fingerprints, self-model and lineage head")
     parser.add_argument("--preflight", action="store_true", help="Run CPU-only wake/hibernate/halt decision and exit")
     parser.add_argument(
         "--force-wake",
@@ -45,6 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _identity_bundle(config) -> IdentityBundle:
+    return IdentityBundle.load(
+        config.subject_core_path,
+        config.continuity_constitution_path,
+    )
+
+
 def _checkpoint_manager(config, key_env: str) -> CheckpointManager:
     key = os.getenv(key_env)
     if not key:
@@ -52,7 +64,13 @@ def _checkpoint_manager(config, key_env: str) -> CheckpointManager:
             f"checkpoint operation requires environment variable {key_env!r}; "
             "keep this secret outside GitHub and outside checkpoint archives"
         )
-    return CheckpointManager(config.runtime.state_dir, config.identity_name, key.encode("utf-8"))
+    identity = _identity_bundle(config)
+    return CheckpointManager(
+        config.runtime.state_dir,
+        config.identity_name,
+        key.encode("utf-8"),
+        identity_fingerprint=identity.fingerprint,
+    )
 
 
 def _maybe_auto_checkpoint(config, key_env: str, outcome: dict[str, Any]) -> dict[str, Any] | None:
@@ -68,11 +86,13 @@ def _maybe_auto_checkpoint(config, key_env: str, outcome: dict[str, Any]) -> dic
             "path": str(destination),
             "error": f"auto-checkpoint configured but {key_env} is not set",
         }
+    identity = _identity_bundle(config)
     try:
         info = CheckpointManager(
             config.runtime.state_dir,
             config.identity_name,
             key.encode("utf-8"),
+            identity_fingerprint=identity.fingerprint,
         ).export(destination)
     except CheckpointError as exc:
         return {"ok": False, "path": str(destination), "error": str(exc)}
@@ -129,11 +149,18 @@ def main() -> None:
         print(json.dumps(preflight.as_dict(), ensure_ascii=False, indent=2))
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    if args.status:
+    if args.status or args.identity_report:
+        identity = _identity_bundle(config)
+        prompt_template = PromptTemplate.load(config.system_prompt_path)
         memory = MemoryStore(state_dir / "memory.sqlite3")
+        identity_store = IdentityStore(state_dir / "memory.sqlite3")
+        economy_store = EconomyStore(state_dir / "memory.sqlite3")
         tools = ToolRegistry(state_dir / "workspace", config.raw_tools)
+        skills = SkillRegistry(config.skills_dir)
         capability_catalog = tools.catalog()
         capability_health = memory.capability_health_all(list(capability_catalog), window=20)
+        skill_state = skills.prompt_catalog(capability_catalog, capability_health)
+        economy = economy_store.snapshot(16)
         limit = config.runtime.weekly_gpu_budget_hours
         runtime_hours = memory.runtime_seconds_this_week() / 3600.0
         brain_hours = memory.brain_seconds_this_week() / 3600.0
@@ -153,6 +180,7 @@ def main() -> None:
                 budget=resources,
                 active_goals=active_goals,
                 capability_health=capability_health,
+                economy=economy,
             )
         ]
         anchor_path = state_dir / "checkpoint.anchor.json"
@@ -162,10 +190,26 @@ def main() -> None:
                 anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 anchor = {"error": "invalid checkpoint anchor"}
+        last_lineage = identity_store.last_lineage()
+        identity_report = {
+            "name": identity.name,
+            "identity_id": identity.identity_id,
+            "branch_id": config.branch_id,
+            "bundle_fingerprint": identity.fingerprint,
+            "subject_core_fingerprint": identity.subject_core_fingerprint,
+            "constitution_fingerprint": identity.constitution_fingerprint,
+            "prompt_fingerprint": prompt_template.fingerprint,
+            "latest_self_model": identity_store.latest_self_model(),
+            "lineage_head": asdict(last_lineage) if last_lineage is not None else None,
+            "last_drift_report": memory.get_meta("last_drift_report"),
+        }
+        if args.identity_report:
+            print(json.dumps(identity_report, ensure_ascii=False, indent=2))
+            return
         print(
             json.dumps(
                 {
-                    "identity": config.identity_name,
+                    "identity": identity_report,
                     "boot_count": int(memory.get_meta("boot_count", "0") or "0"),
                     "lifecycle": {
                         "state": memory.get_meta("lifecycle_state", "uninitialized"),
@@ -175,6 +219,7 @@ def main() -> None:
                     },
                     "chronicle": {"valid": chronicle_valid, "error": chronicle_error},
                     "resources": resources,
+                    "economy": economy,
                     "memory_records": len(memory.recent(1000000)),
                     "active_goals": [asdict(goal) for goal in active_goals],
                     "needs": needs,
@@ -186,6 +231,7 @@ def main() -> None:
                         "catalog": capability_catalog,
                         "health": capability_health,
                     },
+                    "skills": skill_state,
                     "checkpoint_anchor": anchor,
                     "auto_checkpoint_path": (
                         str(config.runtime.auto_checkpoint_path)
@@ -230,6 +276,8 @@ def main() -> None:
         "preflight": preflight.as_dict(),
         "outcome": outcome,
         "brain_loaded": runtime.brain_loaded,
+        "identity_fingerprint": runtime.identity.fingerprint,
+        "self_model_fingerprint": runtime.memory.get_meta("self_model_fingerprint"),
     }
     if auto_checkpoint is not None:
         output["auto_checkpoint"] = auto_checkpoint
