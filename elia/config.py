@@ -26,6 +26,8 @@ class RuntimeConfig:
     max_action_output_chars: int
     weekly_gpu_budget_hours: float
     memory_recall_limit: int
+    max_in_session_sleep_seconds: float = 5.0
+    auto_checkpoint_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -53,6 +55,9 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     runtime = data["runtime"]
     brain = data["brain"]
     gpu_budget = runtime.get("weekly_gpu_budget_hours", runtime.get("weekly_brain_budget_hours", 30))
+    auto_checkpoint_raw = os.getenv(
+        "ELIA_AUTO_CHECKPOINT_PATH", str(runtime.get("auto_checkpoint_path", "")).strip()
+    ).strip()
 
     return Config(
         identity_name=os.getenv("ELIA_IDENTITY_NAME", identity["name"]),
@@ -76,6 +81,13 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
             max_action_output_chars=int(runtime["max_action_output_chars"]),
             weekly_gpu_budget_hours=float(os.getenv("ELIA_WEEKLY_GPU_HOURS", gpu_budget)),
             memory_recall_limit=int(runtime["memory_recall_limit"]),
+            max_in_session_sleep_seconds=float(
+                os.getenv(
+                    "ELIA_MAX_IN_SESSION_SLEEP_SECONDS",
+                    runtime.get("max_in_session_sleep_seconds", 5),
+                )
+            ),
+            auto_checkpoint_path=(Path(auto_checkpoint_raw) if auto_checkpoint_raw else None),
         ),
         raw_tools=dict(data.get("tools", {})),
     )
