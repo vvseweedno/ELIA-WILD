@@ -10,6 +10,7 @@ from typing import Any
 from .config import Config, load_config
 from .crc import build_crc, compare_crc, read_crc, write_crc
 from .identity import IdentityBundle
+from .longitudinal import LongitudinalContinuityStore
 from .organism import OrganismManifest, default_manifest_path
 from .research.registry import maturity_summary
 
@@ -21,6 +22,7 @@ class VitalSignsReport:
     organism: dict[str, Any]
     crc: dict[str, Any]
     continuity_comparison: dict[str, Any] | None
+    longitudinal: dict[str, Any]
     research_maturity: dict[str, list[str]]
     last_healthy_crc_path: str
     failure_evidence_path: str | None
@@ -30,10 +32,11 @@ class VitalSignsReport:
 
 
 class VitalSigns:
-    """Model-independent organism/continuity gate.
+    """Model-independent organism/continuity gate with long-horizon evidence.
 
     The last *healthy* CRC is never replaced by a broken comparison. A failed check
-    therefore preserves both the trusted prior capsule and separate failure evidence.
+    preserves both the trusted prior capsule and separate failure evidence. Materially
+    new states are also written into a checkpointed longitudinal series.
     """
 
     def __init__(self, config: Config, *, manifest_path: Path | None = None):
@@ -46,6 +49,9 @@ class VitalSigns:
         self.root = config.runtime.state_dir / "workspace" / ".organism"
         self.last_healthy_crc_path = self.root / "last-healthy-crc.json"
         self.latest_report_path = self.root / "vitals.json"
+        self.longitudinal = LongitudinalContinuityStore(
+            config.runtime.state_dir / "memory.sqlite3"
+        )
 
     def _persist_report(self, report: VitalSignsReport) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -56,6 +62,7 @@ class VitalSigns:
 
     def check(self, *, persist: bool = True) -> VitalSignsReport:
         audit = self.manifest.audit(expected_identity_id=self.identity.identity_id)
+        audit_dict = audit.as_dict()
         capsule = build_crc(self.config)
         capsule_dict = capsule.as_dict()
         capsule_dict["capsule_fingerprint"] = capsule.fingerprint
@@ -78,13 +85,20 @@ class VitalSigns:
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
                 failure_path = self.root / f"failed-crc-{stamp}.json"
                 write_crc(failure_path, capsule)
+            self.longitudinal.record(
+                capsule=capsule_dict,
+                organism=audit_dict,
+                comparison=comparison_dict,
+                healthy=healthy,
+            )
 
         report = VitalSignsReport(
             checked_at=datetime.now(timezone.utc).isoformat(),
             healthy=healthy,
-            organism=audit.as_dict(),
+            organism=audit_dict,
             crc=capsule_dict,
             continuity_comparison=comparison_dict,
+            longitudinal=self.longitudinal.summary(),
             research_maturity=maturity_summary(),
             last_healthy_crc_path=str(self.last_healthy_crc_path),
             failure_evidence_path=str(failure_path) if failure_path else None,
