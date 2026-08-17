@@ -24,11 +24,12 @@ def derive_needs(
     budget: dict[str, float],
     active_goals: list[GoalRecord],
     capability_health: dict[str, dict[str, Any]] | None = None,
+    economy: dict[str, Any] | None = None,
 ) -> list[Need]:
     """Derive bounded, inspectable self-maintenance pressures from verified state.
 
-    These are runtime signals, not free-form model desires. They make the reason for
-    autonomous activity explicit and auditable.
+    These are deterministic runtime signals, not free-form model desires. They make
+    the reason for autonomous activity explicit and auditable.
     """
 
     needs: list[Need] = []
@@ -82,6 +83,56 @@ def derive_needs(
                 0.7,
                 f"GPU runway is below 25% ({remaining:.3f}/{limit:.3f} hours).",
                 "Prefer cheap observations and defer speculative work.",
+            )
+        )
+
+    economy = economy or {}
+    verified_resources = economy.get("verified_resources") or []
+    positive_verified = any(
+        float(item.get("verified_balance", 0) or 0) > 0
+        for item in verified_resources
+        if isinstance(item, dict)
+    )
+    opportunities = [
+        item
+        for item in (economy.get("active_opportunities") or [])
+        if isinstance(item, dict)
+    ]
+    positive_opportunities = [
+        item
+        for item in opportunities
+        if float(item.get("expected_net_value", 0) or 0) > 0
+    ]
+    if ratio <= 0.25 and not positive_verified:
+        needs.append(
+            Need(
+                "resource_acquisition",
+                0.62 if ratio > 0.10 else 0.78,
+                "Compute runway is low and no positive verified external resource balance is recorded.",
+                "Prefer legitimate opportunities that can extend compute/API/storage/economic runway; estimates remain separate from verified receipts.",
+            )
+        )
+    if positive_opportunities:
+        best = max(
+            positive_opportunities,
+            key=lambda item: float(item.get("value_per_gpu_hour", 0) or 0),
+        )
+        needs.append(
+            Need(
+                "opportunity_review",
+                0.52,
+                "At least one evidence-backed opportunity has positive estimated net value; "
+                f"current top candidate is #{best.get('id')} {best.get('title')!r}.",
+                "Validate eligibility and evidence, then pursue only if expected value justifies scarce compute and current capabilities.",
+            )
+        )
+    elif ratio <= 0.5 and not opportunities:
+        needs.append(
+            Need(
+                "opportunity_discovery",
+                0.4,
+                "No active resource/work opportunity is recorded while finite compute is being consumed.",
+                "Use public evidence research to discover legitimate work, bounties, grants or free compute/API resources when higher-severity maintenance needs are satisfied.",
             )
         )
 
@@ -141,4 +192,4 @@ def derive_needs(
             )
 
     needs.sort(key=lambda item: (-item.severity, item.name))
-    return needs[:8]
+    return needs[:10]
