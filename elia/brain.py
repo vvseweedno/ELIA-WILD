@@ -15,6 +15,7 @@ class Decision:
     summary: str
     action_name: str
     skill_name: str | None = None
+    prediction: dict[str, Any] = field(default_factory=dict)
     action_args: dict[str, Any] = field(default_factory=dict)
     memories: list[dict[str, Any]] = field(default_factory=list)
     self_updates: list[dict[str, Any]] = field(default_factory=list)
@@ -56,31 +57,50 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(stripped[start : end + 1])
 
 
+def _bounded_prediction(value: Any) -> dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    try:
+        probability = float(item.get("action_success_probability", 0.5))
+    except (TypeError, ValueError):
+        probability = 0.5
+    probability = max(0.0, min(1.0, probability))
+    try:
+        information = max(0.0, float(item.get("expected_information_gain", 0.0)))
+    except (TypeError, ValueError):
+        information = 0.0
+    try:
+        expected_value = float(item.get("expected_value", 0.0))
+    except (TypeError, ValueError):
+        expected_value = 0.0
+    return {
+        "action_success_probability": probability,
+        "expected_outcome": str(item.get("expected_outcome", ""))[:4000],
+        "expected_information_gain": min(information, 1_000_000.0),
+        "expected_value": max(-1_000_000_000.0, min(1_000_000_000.0, expected_value)),
+        "unit": str(item.get("unit", "VALUE_UNIT"))[:64],
+    }
+
+
 def _decision_from_item(item: dict[str, Any]) -> Decision:
     action = item.get("action") or {}
     memories = item.get("memories") or []
-    if not isinstance(memories, list):
-        memories = []
     self_updates = item.get("self_updates") or []
-    if not isinstance(self_updates, list):
-        self_updates = []
     goal_updates = item.get("goal_updates") or []
-    if not isinstance(goal_updates, list):
-        goal_updates = []
     opportunity_updates = item.get("opportunity_updates") or []
-    if not isinstance(opportunity_updates, list):
-        opportunity_updates = []
     skill = item.get("skill")
     return Decision(
         objective=str(item.get("objective", "Observe and preserve continuity."))[:1000],
         summary=str(item.get("summary", ""))[:4000],
         action_name=str(action.get("name", "noop"))[:128],
         skill_name=(str(skill)[:128] if skill not in {None, "", "null"} else None),
+        prediction=_bounded_prediction(item.get("prediction")),
         action_args=dict(action.get("args") or {}),
-        memories=[m for m in memories if isinstance(m, dict)][:8],
-        self_updates=[g for g in self_updates if isinstance(g, dict)][:4],
-        goal_updates=[g for g in goal_updates if isinstance(g, dict)][:4],
-        opportunity_updates=[g for g in opportunity_updates if isinstance(g, dict)][:4],
+        memories=[m for m in memories if isinstance(m, dict)][:8] if isinstance(memories, list) else [],
+        self_updates=[m for m in self_updates if isinstance(m, dict)][:4] if isinstance(self_updates, list) else [],
+        goal_updates=[g for g in goal_updates if isinstance(g, dict)][:4] if isinstance(goal_updates, list) else [],
+        opportunity_updates=[g for g in opportunity_updates if isinstance(g, dict)][:4]
+        if isinstance(opportunity_updates, list)
+        else [],
         sleep_seconds=(
             max(0.0, min(float(item["sleep_seconds"]), 86400.0))
             if item.get("sleep_seconds") is not None
@@ -103,6 +123,13 @@ class MockBrain:
                 summary="Genesis smoke cycle: establish observable state before changing it.",
                 action_name="list_workspace",
                 skill_name="workspace_engineering",
+                prediction={
+                    "action_success_probability": 0.95,
+                    "expected_outcome": "A bounded list of private workspace files is returned.",
+                    "expected_information_gain": 0.2,
+                    "expected_value": 0.0,
+                    "unit": "VALUE_UNIT",
+                },
                 memories=[
                     {
                         "kind": "self",
@@ -125,13 +152,18 @@ class MockBrain:
             summary="Smoke backend has no additional evidence to act on.",
             action_name="noop",
             skill_name="resource_conservation",
+            prediction={
+                "action_success_probability": 0.99,
+                "expected_outcome": "No external side effect occurs.",
+                "expected_information_gain": 0.0,
+                "expected_value": 0.0,
+                "unit": "VALUE_UNIT",
+            },
             sleep_seconds=0,
         )
 
 
 class OpenAICompatibleBrain:
-    """Calls a local OpenAI-compatible model server such as vLLM/SGLang."""
-
     def __init__(self, config: BrainConfig):
         self.config = config
 
@@ -158,14 +190,11 @@ class OpenAICompatibleBrain:
             response = client.post(url, json=payload)
             response.raise_for_status()
             body = response.json()
-
         content = body["choices"][0]["message"].get("content") or ""
         return _decision_from_item(_extract_json(content))
 
 
 class Transformers4BitBrain:
-    """Loads Qwen directly with bitsandbytes 4-bit quantization."""
-
     def __init__(self, config: BrainConfig):
         self.config = config
         try:
@@ -211,7 +240,6 @@ class Transformers4BitBrain:
             return_tensors="pt",
             enable_thinking=self.config.thinking,
         ).to(self.model.device)
-
         generation_kwargs: dict[str, Any] = {
             "max_new_tokens": self.config.max_tokens,
             "do_sample": True,
