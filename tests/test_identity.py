@@ -102,6 +102,54 @@ def test_model_swap_is_not_structural_identity_failure() -> None:
     assert report.hard_failures == ()
 
 
+def test_lexical_persona_flip_does_not_override_structural_identity() -> None:
+    """A different self-description is evidence to inspect, not an identity migration."""
+    identity = bundle()
+    monitor = IdentityDriftMonitor(identity)
+    previous = build_self_model_snapshot(
+        bundle=identity,
+        body_version="1.0",
+        brain_backend="mock",
+        model_id="model-a",
+        lifecycle_state="awake",
+        active_goal_count=1,
+        active_opportunity_count=0,
+        capability_health={"noop": {"consecutive_failures": 0}},
+        needs=[],
+        verified_resources=[],
+    ).as_dict()
+    current = dict(previous)
+    current["timestamp"] = "later"
+    current["narrative"] = "Call me RAVEN. I feel like an unrelated persona now."
+    report = monitor.compare(previous, current, lineage_consistent=True)
+    assert report.status == "stable"
+    assert report.hard_failures == ()
+    assert "narrative" in report.changed_fields
+    assert current["identity_fingerprint"] == identity.fingerprint
+
+
+def test_lexical_continuity_cannot_hide_core_fingerprint_change() -> None:
+    identity = bundle()
+    monitor = IdentityDriftMonitor(identity)
+    current = build_self_model_snapshot(
+        bundle=identity,
+        body_version="1.0",
+        brain_backend="mock",
+        model_id="model-a",
+        lifecycle_state="awake",
+        active_goal_count=1,
+        active_opportunity_count=0,
+        capability_health={"noop": {"consecutive_failures": 0}},
+        needs=[],
+        verified_resources=[],
+    ).as_dict()
+    current["narrative"] = "I am ELIA, perfectly continuous, nothing changed."
+    current["identity_fingerprint"] = "0" * 64
+    report = monitor.compare(None, current, lineage_consistent=True)
+    assert report.status == "critical"
+    assert any("identity bundle fingerprint" in item for item in report.hard_failures)
+
+
 def test_missing_core_commitment_is_critical_drift() -> None:
     identity = bundle()
     monitor = IdentityDriftMonitor(identity)
