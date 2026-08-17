@@ -1,0 +1,23 @@
+name: opportunity_scout
+version: 1
+maturity: prototype
+description: Find and rank legitimate work, bounties, grants, free compute or API resources that can extend ELIA's operational lifetime.
+required_capabilities:
+  - http_get
+authority: public_network_read_only
+preconditions:
+  - resource runway, mission or an explicit goal justifies opportunity discovery
+procedure:
+  - search only public legitimate sources reachable through declared read authority
+  - capture source evidence before estimating value or probability
+  - estimate reward, direct cost, probability and GPU hours separately
+  - rank by expected net value per scarce compute unit
+  - create a durable opportunity only when source evidence exists
+  - prefer opportunities compatible with current verified capabilities
+evidence_contract:
+  - source URL or public provenance
+  - observed eligibility/task requirements
+  - explicit estimate fields kept separate from verified resources
+failure_policy:
+  - estimated reward never changes verified balance
+  - do not use spam, deception, gambling, credential abuse or unauthorized access as resource strategy
