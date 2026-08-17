@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from hashlib import sha256
+import json
+from pathlib import Path
+from typing import Any
+
+
+DECISION_SCHEMA = {
+    "objective": "short current objective",
+    "summary": "concise storable rationale; no hidden chain-of-thought",
+    "skill": "available_skill_name_or_null",
+    "action": {"name": "declared_capability", "args": {}},
+    "memories": [
+        {
+            "kind": "observation|lesson|self|goal|economy|uncertainty",
+            "content": "durable fact worth remembering",
+            "importance": 0.0,
+        }
+    ],
+    "goal_updates": [
+        {
+            "op": "create|update|complete|abandon|block|activate",
+            "id": None,
+            "title": "required for create",
+            "description": "optional",
+            "priority": 0.0,
+            "parent_id": None,
+            "status": "active|blocked|completed|abandoned",
+            "evidence": "required for terminal state",
+        }
+    ],
+    "opportunity_updates": [
+        {
+            "op": "create|update",
+            "id": None,
+            "title": "required for create",
+            "kind": "work|bounty|grant|free_compute|free_api|product|other",
+            "source_url": "https://... or empty if evidence text exists",
+            "evidence": "observed provenance; required for terminal state",
+            "estimated_value": 0.0,
+            "estimated_cost_value": 0.0,
+            "unit": "USD|RUB|CREDIT|OTHER",
+            "probability": 0.0,
+            "estimated_gpu_hours": 0.0,
+            "status": "discovered|evaluating|pursuing|won|lost|expired|abandoned",
+            "expires_at": None,
+            "notes": "optional",
+        }
+    ],
+    "sleep_seconds": 60,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PromptTemplate:
+    path: Path
+    text: str
+    fingerprint: str
+
+    @classmethod
+    def load(cls, path: Path) -> "PromptTemplate":
+        path = Path(path)
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            raise ValueError("system prompt template is empty")
+        return cls(path, text, sha256(text.encode("utf-8")).hexdigest())
+
+    def render(self, context: dict[str, Any]) -> str:
+        identity_contract = context.get("identity_contract") or {}
+        self_model = context.get("self_model") or {}
+        skills = context.get("skills") or {}
+        available_skills = {
+            name: {
+                "maturity": item.get("maturity"),
+                "authority": item.get("authority"),
+                "description": item.get("description"),
+                "procedure": item.get("procedure"),
+                "evidence_contract": item.get("evidence_contract"),
+            }
+            for name, item in skills.items()
+            if item.get("available")
+        }
+        contract = {
+            "identity": identity_contract,
+            "current_self_model": {
+                key: self_model.get(key)
+                for key in (
+                    "identity_id",
+                    "identity_fingerprint",
+                    "body_version",
+                    "brain_backend",
+                    "model_id",
+                    "lifecycle_state",
+                    "degraded_capabilities",
+                    "needs",
+                    "commitments",
+                    "uncertainties",
+                    "narrative",
+                )
+                if key in self_model
+            },
+            "available_skills": available_skills,
+        }
+        return (
+            self.text
+            + "\n\n## Verified identity/skill contract for this cycle\n"
+            + json.dumps(contract, ensure_ascii=False, sort_keys=True)
+            + "\n\n## Decision JSON schema\n"
+            + json.dumps(DECISION_SCHEMA, ensure_ascii=False, sort_keys=True)
+        )
