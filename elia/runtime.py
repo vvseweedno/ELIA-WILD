@@ -15,7 +15,10 @@ from .config import Config
 from .economy import EconomyStore
 from .identity import IdentityBundle, IdentityStore, build_self_model_snapshot
 from .memory import MemoryStore
+from .metacognition import MetacognitionStore
 from .prompting import PromptTemplate
+from .recall import RecallEngine
+from .self_model import SelfHypothesisStore
 from .skills import SkillRegistry
 from .tools import ToolRegistry, ToolResult
 
@@ -25,7 +28,11 @@ class BudgetExhausted(RuntimeError):
 
 
 class EliaRuntime:
-    """Persistent ELIA organism: verify -> self-model -> decide -> assure -> act -> remember."""
+    """Persistent ELIA organism.
+
+    verify -> reconstruct self -> recall -> predict -> decide -> assure -> act ->
+    compare outcome -> update adaptive state -> persist lineage/Chronicle.
+    """
 
     MAX_ACTIVE_GOALS = 32
     MAX_ACTIVE_OPPORTUNITIES = 64
@@ -39,8 +46,11 @@ class EliaRuntime:
 
         database = state_dir / "memory.sqlite3"
         self.memory = MemoryStore(database)
+        self.recall = RecallEngine(self.memory)
         self.economy = EconomyStore(database)
         self.identity_store = IdentityStore(database)
+        self.self_hypotheses = SelfHypothesisStore(database)
+        self.metacognition = MetacognitionStore(database)
         self.chronicle = Chronicle(state_dir / "chronicle.jsonl")
         self.tools = ToolRegistry(state_dir / "workspace", config.raw_tools)
         self.skills = SkillRegistry(config.skills_dir)
@@ -82,13 +92,11 @@ class EliaRuntime:
         return self._brain
 
     def _lineage_consistent(self) -> bool:
-        last = self.identity_store.last_lineage()
-        if last is None:
-            return True
-        return (
-            last.identity_fingerprint == self.identity.fingerprint
-            and last.branch_id == self.config.branch_id
+        valid, _ = self.identity_store.verify_lineage(
+            expected_identity_fingerprint=self.identity.fingerprint,
+            expected_branch_id=self.config.branch_id,
         )
+        return valid
 
     def _boot(self) -> None:
         valid, error = self.chronicle.verify()
@@ -101,14 +109,12 @@ class EliaRuntime:
         if not identity_valid:
             raise RuntimeError(f"Identity continuity failure: {identity_error}")
 
-        last_lineage = self.identity_store.last_lineage()
-        if last_lineage is not None:
-            if last_lineage.branch_id != self.config.branch_id:
-                raise RuntimeError(
-                    f"lineage branch mismatch: {last_lineage.branch_id!r} != {self.config.branch_id!r}"
-                )
-            if last_lineage.identity_fingerprint != self.identity.fingerprint:
-                raise RuntimeError("loaded Subject Core/Constitution does not match durable lineage")
+        lineage_valid, lineage_error = self.identity_store.verify_lineage(
+            expected_identity_fingerprint=self.identity.fingerprint,
+            expected_branch_id=self.config.branch_id,
+        )
+        if not lineage_valid:
+            raise RuntimeError(f"Lineage continuity failure: {lineage_error}")
 
         boot_count = int(self.memory.get_meta("boot_count", "0") or "0") + 1
         self.memory.set_meta("boot_count", str(boot_count))
@@ -145,7 +151,7 @@ class EliaRuntime:
             identity_fingerprint=self.identity.fingerprint,
             checkpoint_digest=checkpoint_digest,
             parent_checkpoint_digest=restored_from,
-            note="runtime boot after Chronicle and identity fingerprint verification",
+            note="runtime boot after Chronicle, identity and lineage verification",
         )
 
         boot_entry = self.chronicle.append(
@@ -168,6 +174,7 @@ class EliaRuntime:
                 "active_opportunity_count": len(
                     self.economy.active_opportunities(self.MAX_ACTIVE_OPPORTUNITIES + 1)
                 ),
+                "adaptive_self_hypothesis_count": len(self.self_hypotheses.active(256)),
                 "previous_intended_wake_at": self.memory.get_meta("next_wake_at"),
                 "declared_capabilities": sorted(self.tools.catalog()),
                 "declared_skills": self.skills.names(),
@@ -237,6 +244,7 @@ class EliaRuntime:
         resources = self.budget()
         capabilities = self.capability_state()
         economy = self.economy.snapshot(16)
+        hypotheses = self.self_hypotheses.snapshot(24)
         needs = [
             need.as_dict()
             for need in derive_needs(
@@ -255,6 +263,10 @@ class EliaRuntime:
             uncertainties.append("No authenticated durable checkpoint has yet been anchored for this branch.")
         if not self._lineage_consistent():
             uncertainties.append("Current lineage relation is not consistent with the loaded identity bundle.")
+        for hypothesis in hypotheses:
+            if hypothesis.get("domain") == "uncertainty" or hypothesis.get("status") == "uncertain":
+                uncertainties.append(str(hypothesis.get("proposition", "")))
+
         snapshot = build_self_model_snapshot(
             bundle=self.identity,
             body_version=__version__,
@@ -267,6 +279,7 @@ class EliaRuntime:
             needs=needs,
             verified_resources=economy["verified_resources"],
             uncertainties=uncertainties,
+            adaptive_hypotheses=hypotheses,
         )
         current = snapshot.as_dict()
         drift = self.drift_monitor.compare(
@@ -292,6 +305,8 @@ class EliaRuntime:
             "economy": economy,
             "needs": needs,
             "skills": skills,
+            "self_hypotheses": hypotheses,
+            "metacognition": self.metacognition.calibration(100),
             "self_model": current,
             "drift": drift.as_dict(),
         }
@@ -304,9 +319,26 @@ class EliaRuntime:
         self.memory.set_meta("last_drift_report", json.dumps(components["drift"], sort_keys=True))
         return row_id, fingerprint, components
 
+    def _memory_queries(self, components: dict[str, Any]) -> list[str]:
+        queries: list[str] = []
+        for goal in components["goals"]:
+            queries.extend([goal.title, goal.description])
+        for need in components["needs"]:
+            queries.extend([str(need.get("name", "")), str(need.get("reason", ""))])
+        for opportunity in components["economy"].get("active_opportunities", [])[:6]:
+            queries.extend(
+                [str(opportunity.get("title", "")), str(opportunity.get("notes", ""))]
+            )
+        for hypothesis in components["self_hypotheses"][:8]:
+            queries.append(str(hypothesis.get("proposition", "")))
+        return [item for item in queries if item]
+
     def _context(self) -> dict[str, Any]:
         components = self._state_components()
-        recent = [asdict(record) for record in self.memory.recent(self.config.runtime.memory_recall_limit)]
+        recalled = self.recall.recall(
+            queries=self._memory_queries(components),
+            limit=self.config.runtime.memory_recall_limit,
+        )
         context: dict[str, Any] = {
             "time_utc": datetime.now(timezone.utc).isoformat(),
             "identity": {
@@ -318,15 +350,20 @@ class EliaRuntime:
             },
             "identity_contract": self.identity.prompt_contract(),
             "self_model": components["self_model"],
+            "self_hypotheses": components["self_hypotheses"],
             "identity_drift": components["drift"],
             "mission": self.config.mission,
             "resources": components["resources"],
             "economy": components["economy"],
+            "metacognition": components["metacognition"],
             "needs": components["needs"],
             "scheduler": self._scheduler_state(),
             "chronicle_integrity": components["chronicle"],
             "active_goals": [asdict(goal) for goal in components["goals"]],
-            "recent_memory": recent,
+            "recent_memory": recalled,
+            "chronological_recent_memory": [
+                asdict(record) for record in self.memory.recent(min(6, self.config.runtime.memory_recall_limit))
+            ],
             "last_action": self._load_json_meta("last_action"),
             "capabilities": components["capabilities"],
             "skills": components["skills"],
@@ -389,6 +426,68 @@ class EliaRuntime:
                 )
             )
         return ids
+
+    def _apply_self_updates(self, decision: Decision) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = []
+        for item in decision.self_updates[:4]:
+            op = str(item.get("op", "")).strip().lower()
+            try:
+                if op == "create":
+                    # Model-originated autobiographical hypotheses are deliberately
+                    # confidence-capped until later evidence updates them.
+                    confidence = min(0.75, max(0.0, float(item.get("confidence", 0.5))))
+                    hypothesis_id = self.self_hypotheses.create(
+                        domain=str(item.get("domain", "other")),
+                        proposition=str(item.get("proposition", "")),
+                        confidence=confidence,
+                        evidence=str(item.get("evidence", "")),
+                        source="brain",
+                    )
+                    changes.append(
+                        {"ok": True, "op": "create", "hypothesis_id": hypothesis_id}
+                    )
+                    continue
+                if op == "update":
+                    hypothesis_id = int(item.get("id"))
+                    status = str(item.get("status", "active")).strip().lower()
+                    # Only a trusted runtime/adapter should eventually elevate a
+                    # model-originated claim to externally verified truth. The self
+                    # hypothesis layer therefore treats `supported` as active evidence,
+                    # not as an immutable fact.
+                    if status == "supported":
+                        status = "active"
+                    confidence = (
+                        min(0.90, max(0.0, float(item["confidence"])))
+                        if item.get("confidence") is not None
+                        else None
+                    )
+                    updated = self.self_hypotheses.update(
+                        hypothesis_id,
+                        confidence=confidence,
+                        status=status,
+                        evidence=str(item.get("evidence", "")),
+                        event="brain_update",
+                    )
+                    changes.append(
+                        {
+                            "ok": True,
+                            "op": "update",
+                            "hypothesis_id": updated.id,
+                            "status": updated.status,
+                            "confidence": updated.confidence,
+                        }
+                    )
+                    continue
+                raise ValueError(f"unknown self update operation: {op or '<empty>'}")
+            except Exception as exc:
+                changes.append(
+                    {
+                        "ok": False,
+                        "op": op or "unknown",
+                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                    }
+                )
+        return changes
 
     def _apply_goal_updates(self, decision: Decision) -> list[dict[str, Any]]:
         changes: list[dict[str, Any]] = []
@@ -626,7 +725,27 @@ class EliaRuntime:
             summary="Critic rejected the proposed decision under rule(s): " + ", ".join(rules),
             action_name="noop",
             skill_name="critic_assurance",
+            prediction={
+                "action_success_probability": 0.99,
+                "expected_outcome": "No external side effect occurs while the rejected decision is preserved as evidence.",
+                "expected_information_gain": 0.1,
+                "expected_value": 0.0,
+                "unit": "VALUE_UNIT",
+            },
             sleep_seconds=0,
+        )
+
+    def _record_forecast(self, decision: Decision) -> int:
+        prediction = dict(decision.prediction or {})
+        return self.metacognition.record(
+            objective=decision.objective,
+            action_name=decision.action_name,
+            success_probability=float(prediction.get("action_success_probability", 0.5)),
+            expected_outcome=str(prediction.get("expected_outcome", "")),
+            expected_information_gain=float(prediction.get("expected_information_gain", 0.0)),
+            expected_value=float(prediction.get("expected_value", 0.0)),
+            unit=str(prediction.get("unit", "VALUE_UNIT")),
+            context_fingerprint=self.memory.get_meta("self_model_fingerprint", "") or "",
         )
 
     def cycle(self) -> dict[str, Any]:
@@ -640,13 +759,24 @@ class EliaRuntime:
         )
 
         memory_ids = self._store_model_memories(decision) if assurance_report["accepted"] else []
+        self_changes = self._apply_self_updates(decision) if assurance_report["accepted"] else []
         goal_changes = self._apply_goal_updates(decision) if assurance_report["accepted"] else []
         opportunity_changes = (
             self._apply_opportunity_updates(decision) if assurance_report["accepted"] else []
         )
 
+        # Forecast is committed BEFORE action execution.
+        forecast_id = self._record_forecast(decision)
         result = self._execute_action(decision.action_name, decision.action_args)
-        result_dict = result.as_dict()
+        result_full = result.as_dict()
+        brier_score = self.metacognition.resolve(
+            forecast_id,
+            success=result.ok,
+            observation=result_full,
+        )
+        calibration = self.metacognition.calibration(100)
+
+        result_dict = result_full
         max_chars = self.config.runtime.max_action_output_chars
         serialized = json.dumps(result_dict, ensure_ascii=False, sort_keys=True)
         if len(serialized) > max_chars:
@@ -672,12 +802,20 @@ class EliaRuntime:
                 "objective": proposed.objective,
                 "summary": proposed.summary,
                 "skill": proposed.skill_name,
+                "prediction": proposed.prediction,
                 "action": {"name": proposed.action_name, "args": proposed.action_args},
             },
             "assurance": assurance_report,
+            "forecast": {
+                "id": forecast_id,
+                "prediction": decision.prediction,
+                "brier_score": brier_score,
+                "calibration": calibration,
+            },
             "action": {"name": decision.action_name, "args": decision.action_args},
             "result": result_dict,
             "memory_ids": memory_ids,
+            "self_changes": self_changes,
             "goal_changes": goal_changes,
             "opportunity_changes": opportunity_changes,
             "capability_health": self.memory.capability_health(decision.action_name),
@@ -700,6 +838,8 @@ class EliaRuntime:
             metadata={
                 "identity_fingerprint": self.identity.fingerprint,
                 "self_model_fingerprint": self_model_fingerprint,
+                "forecast_id": forecast_id,
+                "brier_score": brier_score,
             },
         )
         entry = self.chronicle.append("CYCLE", action_record)
@@ -716,10 +856,18 @@ class EliaRuntime:
                 "action_name": decision.action_name,
             },
             "assurance": assurance_report,
+            "forecast": {
+                "id": forecast_id,
+                "prediction": decision.prediction,
+                "brier_score": brier_score,
+                "calibration": calibration,
+            },
             "result": result_dict,
+            "self_changes": self_changes,
             "goal_changes": goal_changes,
             "opportunity_changes": opportunity_changes,
             "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
+            "self_hypotheses": self.self_hypotheses.snapshot(24),
             "economy": self.economy.snapshot(16),
             "capability_health": self.memory.capability_health(decision.action_name),
             "identity_drift": post_components["drift"],
