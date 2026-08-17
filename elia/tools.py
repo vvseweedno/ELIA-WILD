@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 import ipaddress
 import json
+import re
 import socket
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -22,26 +25,108 @@ class ToolResult:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class Capability:
+    name: str
+    description: str
+    args: str
+    authority: str
+    side_effects: str
+    network_scope: str
+    cost_class: str
+    enabled: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class ToolRegistry:
     def __init__(self, workspace: Path, tool_config: dict[str, Any] | None = None):
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.config = tool_config or {}
 
+    def catalog(self) -> dict[str, dict[str, Any]]:
+        http_enabled = bool(self.config.get("http_get", {}).get("enabled", True))
+        capabilities = [
+            Capability(
+                "noop",
+                "Take no external action this cycle.",
+                "{}",
+                "none",
+                "none",
+                "none",
+                "negligible",
+            ),
+            Capability(
+                "list_workspace",
+                "List files owned by ELIA inside the private workspace jail.",
+                "{}",
+                "workspace_read",
+                "reads private workspace metadata",
+                "none",
+                "negligible",
+            ),
+            Capability(
+                "read_workspace",
+                "Read one UTF-8 file owned by ELIA inside the workspace jail.",
+                "{path: str}",
+                "workspace_read",
+                "reads private workspace content",
+                "none",
+                "negligible",
+            ),
+            Capability(
+                "write_workspace",
+                "Write one UTF-8 file owned by ELIA inside the workspace jail.",
+                "{path: str, content: str}",
+                "workspace_write",
+                "writes private workspace content",
+                "none",
+                "low",
+            ),
+            Capability(
+                "http_get",
+                "Read one public HTTP/HTTPS resource. Private and reserved destinations are rejected.",
+                "{url: str}",
+                "public_network_read",
+                "remote read request only",
+                "public_http_https",
+                "network",
+                enabled=http_enabled,
+            ),
+            Capability(
+                "self_check",
+                "Run bounded local checks of ELIA-owned workspace primitives and path-jail enforcement.",
+                "{}",
+                "local_self_diagnostic",
+                "creates and removes one temporary workspace scratch file",
+                "none",
+                "low",
+            ),
+            Capability(
+                "propose_repair",
+                "Persist a structured repair proposal for later validation; does not modify runtime code or deploy anything.",
+                "{title: str, diagnosis: str, proposed_change: str, validation_plan: str}",
+                "workspace_write",
+                "writes a proposal under workspace/repairs only",
+                "none",
+                "low",
+            ),
+        ]
+        return {item.name: item.as_dict() for item in capabilities}
+
     def descriptions(self) -> dict[str, str]:
         return {
-            "noop": "Do nothing this cycle. args={}",
-            "list_workspace": "List files in the private workspace. args={}",
-            "read_workspace": "Read one UTF-8 workspace file. args={path: str}",
-            "write_workspace": "Write one UTF-8 workspace file. args={path: str, content: str}",
-            "http_get": (
-                "Read one public http/https URL. Private, loopback, link-local and reserved "
-                "network destinations are rejected. args={url: str}"
-            ),
+            name: f"{item['description']} args={item['args']} enabled={item['enabled']}"
+            for name, item in self.catalog().items()
         }
 
     def execute(self, name: str, args: dict[str, Any] | None = None) -> ToolResult:
         args = args or {}
+        capability = self.catalog().get(name)
+        if capability is not None and not capability["enabled"]:
+            return ToolResult(False, name, error=f"Capability is disabled by configuration: {name}")
         try:
             if name == "noop":
                 return ToolResult(True, name, {"message": "No action taken."})
@@ -55,6 +140,10 @@ class ToolRegistry:
                 )
             if name == "http_get":
                 return self._http_get(str(args.get("url", "")))
+            if name == "self_check":
+                return self._self_check()
+            if name == "propose_repair":
+                return self._propose_repair(args)
             return ToolResult(False, name, error=f"Unknown tool: {name}")
         except Exception as exc:  # Tool failures become observations, not process failures.
             return ToolResult(False, name, error=f"{type(exc).__name__}: {exc}")
@@ -94,6 +183,75 @@ class ToolRegistry:
             {"path": relative, "bytes": len(content.encode("utf-8"))},
         )
 
+    def _self_check(self) -> ToolResult:
+        token = uuid4().hex
+        relative = f".selfcheck-{token}.txt"
+        scratch = self._safe_path(relative)
+        checks: dict[str, bool] = {}
+        try:
+            scratch.write_text(token, encoding="utf-8")
+            checks["workspace_write"] = scratch.is_file()
+            checks["workspace_read"] = scratch.read_text(encoding="utf-8") == token
+            try:
+                self._safe_path("../selfcheck-escape.txt")
+                checks["workspace_jail"] = False
+            except ValueError:
+                checks["workspace_jail"] = True
+        finally:
+            scratch.unlink(missing_ok=True)
+        checks["scratch_cleanup"] = not scratch.exists()
+        ok = all(checks.values())
+        return ToolResult(
+            ok,
+            "self_check",
+            {
+                "checks": checks,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "note": "No network, shell, credentials, or external systems were touched.",
+            },
+            error=None if ok else "One or more bounded self-checks failed",
+        )
+
+    @staticmethod
+    def _slug(text: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip()).strip("-").lower()
+        return (slug or "repair")[:64]
+
+    def _propose_repair(self, args: dict[str, Any]) -> ToolResult:
+        title = str(args.get("title", "")).strip()[:240]
+        diagnosis = str(args.get("diagnosis", "")).strip()[:8000]
+        proposed_change = str(args.get("proposed_change", "")).strip()[:16000]
+        validation_plan = str(args.get("validation_plan", "")).strip()[:8000]
+        if not title or not diagnosis or not proposed_change or not validation_plan:
+            return ToolResult(
+                False,
+                "propose_repair",
+                error="title, diagnosis, proposed_change, and validation_plan are required",
+            )
+        proposal = {
+            "title": title,
+            "diagnosis": diagnosis,
+            "proposed_change": proposed_change,
+            "validation_plan": validation_plan,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "proposal_only",
+            "deployment_authority": "none",
+        }
+        relative = f"repairs/{self._slug(title)}-{uuid4().hex[:8]}.json"
+        payload = json.dumps(proposal, ensure_ascii=False, sort_keys=True, indent=2)
+        write = self._write_workspace(relative, payload)
+        if not write.ok:
+            return ToolResult(False, "propose_repair", error=write.error)
+        return ToolResult(
+            True,
+            "propose_repair",
+            {
+                "path": relative,
+                "status": "proposal_only",
+                "message": "Repair proposal stored for validation; no runtime code was changed.",
+            },
+        )
+
     @staticmethod
     def _validate_public_url(url: str) -> None:
         parsed = urlparse(url)
@@ -129,7 +287,7 @@ class ToolRegistry:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             response = client.get(
                 url,
-                headers={"User-Agent": "ELIA-WILD/0.1 (+research-agent)"},
+                headers={"User-Agent": "ELIA-WILD/0.4 (+research-agent)"},
             )
 
         raw = response.content[:max_bytes]
