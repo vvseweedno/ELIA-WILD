@@ -40,6 +40,8 @@ class Config:
     raw_tools: dict
     subject_core_path: Path = Path("config/subject_core.yaml")
     continuity_constitution_path: Path = Path("config/continuity_constitution.yaml")
+    system_prompt_path: Path = Path("config/system_prompt.md")
+    skills_dir: Path = Path("skills")
     branch_id: str = "main"
 
 
@@ -55,6 +57,14 @@ def _resolve_config_path(config_path: Path, value: str | Path) -> Path:
     if candidate.is_absolute():
         return candidate
     return (config_path.parent / candidate).resolve()
+
+
+def _resolve_project_path(config_path: Path, value: str | Path) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate
+    project_root = config_path.parent.parent
+    return (project_root / candidate).resolve()
 
 
 def load_config(path: str | Path = "config/genesis.yaml") -> Config:
@@ -77,6 +87,11 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         "ELIA_CONTINUITY_CONSTITUTION",
         str(identity.get("continuity_constitution", "continuity_constitution.yaml")),
     )
+    system_prompt_raw = os.getenv(
+        "ELIA_SYSTEM_PROMPT",
+        str(identity.get("system_prompt", "system_prompt.md")),
+    )
+    skills_raw = os.getenv("ELIA_SKILLS_DIR", str(data.get("skills_dir", "skills")))
 
     return Config(
         identity_name=os.getenv("ELIA_IDENTITY_NAME", identity["name"]),
@@ -111,5 +126,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         raw_tools=dict(data.get("tools", {})),
         subject_core_path=_resolve_config_path(path, subject_core_raw),
         continuity_constitution_path=_resolve_config_path(path, constitution_raw),
+        system_prompt_path=_resolve_config_path(path, system_prompt_raw),
+        skills_dir=_resolve_project_path(path, skills_raw),
         branch_id=os.getenv("ELIA_BRANCH_ID", str(identity.get("branch_id", "main"))).strip() or "main",
     )
