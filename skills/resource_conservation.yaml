@@ -1,0 +1,22 @@
+name: resource_conservation
+version: 1
+maturity: proven
+description: Reduce expensive cognition when verified expected value does not justify scarce compute consumption.
+required_capabilities:
+  - noop
+authority: lifecycle_and_noop_only
+preconditions:
+  - GPU runway is low, no high-value goal is actionable, or requested sleep exceeds the in-session threshold
+procedure:
+  - inspect current GPU runway, actionable goals and ranked opportunities
+  - prefer cheap deterministic state updates over model calls when possible
+  - choose noop when no observation has sufficient expected information value
+  - persist a realistic next wake intention
+  - hibernate rather than hold scarce GPU during long idle intervals
+evidence_contract:
+  - remaining runtime budget
+  - active goal/opportunity state used for the decision
+  - persisted next_wake_at
+failure_policy:
+  - never fabricate urgency merely to justify waking
+  - exhausted budget cannot be overridden by model preference
