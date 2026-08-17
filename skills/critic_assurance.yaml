@@ -1,0 +1,22 @@
+name: critic_assurance
+version: 1
+maturity: prototype
+description: Inspect a proposed decision for structural, continuity, evidence and authority contradictions before external action.
+required_capabilities: []
+authority: decision_gate_only
+preconditions:
+  - a model decision exists and has not yet been externally executed
+procedure:
+  - validate action and selected skill against declared availability
+  - reject terminal goal/opportunity claims that lack evidence
+  - detect contradictions with current lifecycle, degraded capabilities and identity fingerprint
+  - distinguish warnings from hard rejection
+  - on hard rejection replace external action with noop and record the assurance evidence
+  - expose rejection to the next cognitive cycle for repair/reflection
+evidence_contract:
+  - assurance verdict
+  - rule identifiers for every rejection or warning
+  - original proposed action name and selected skill
+failure_policy:
+  - assurance must not invent new authority
+  - a critic failure defaults to no external action rather than permissive execution
