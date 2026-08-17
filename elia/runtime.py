@@ -73,11 +73,11 @@ class EliaRuntime:
 
     def budget(self) -> dict[str, float]:
         self._account_runtime()
-        limit_seconds = self.config.runtime.weekly_brain_budget_hours * 3600.0
+        limit_seconds = self.config.runtime.weekly_gpu_budget_hours * 3600.0
         runtime_seconds = self.memory.runtime_seconds_this_week()
         brain_seconds = self.memory.brain_seconds_this_week()
         return {
-            "weekly_limit_hours": self.config.runtime.weekly_brain_budget_hours,
+            "weekly_limit_hours": self.config.runtime.weekly_gpu_budget_hours,
             "runtime_hours_used": runtime_seconds / 3600.0,
             "brain_hours_used": brain_seconds / 3600.0,
             "runtime_hours_remaining": max(0.0, (limit_seconds - runtime_seconds) / 3600.0),
@@ -113,7 +113,7 @@ class EliaRuntime:
         resources = self.budget()
         if resources["runtime_hours_remaining"] <= 0:
             self.chronicle.append("BUDGET_EXHAUSTED", resources)
-            raise BudgetExhausted("Weekly runtime budget exhausted")
+            raise BudgetExhausted("Weekly GPU runtime budget exhausted")
 
     def _think(self, context: dict[str, Any]) -> Decision:
         self._check_budget()
