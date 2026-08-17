@@ -23,6 +23,7 @@ def derive_needs(
     chronicle_valid: bool,
     budget: dict[str, float],
     active_goals: list[GoalRecord],
+    capability_health: dict[str, dict[str, Any]] | None = None,
 ) -> list[Need]:
     """Derive bounded, inspectable self-maintenance pressures from verified state.
 
@@ -94,6 +95,27 @@ def derive_needs(
                 severity,
                 f"{len(recent_errors)} runtime error record(s) are present in recent memory.",
                 "Prefer diagnosis, reproduction, and a verified repair before expanding capabilities.",
+            )
+        )
+
+    degraded = []
+    for name, health in (capability_health or {}).items():
+        consecutive = int(health.get("consecutive_failures", 0) or 0)
+        if consecutive >= 3:
+            degraded.append((name, consecutive, health.get("last_error")))
+    if degraded:
+        degraded.sort(key=lambda item: (-item[1], item[0]))
+        summary = "; ".join(
+            f"{name}: {count} consecutive failures"
+            + (f" ({str(error)[:180]})" if error else "")
+            for name, count, error in degraded[:4]
+        )
+        needs.append(
+            Need(
+                "capability_repair",
+                min(0.95, 0.65 + 0.05 * max(item[1] for item in degraded)),
+                f"One or more declared capabilities are degraded: {summary}",
+                "Do not blindly retry the failing capability. Use self_check, inspect prior evidence, choose an alternative capability, or persist a repair proposal with a validation plan.",
             )
         )
 
