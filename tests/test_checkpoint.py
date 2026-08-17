@@ -16,6 +16,7 @@ from elia.memory import MemoryStore
 
 
 KEY = b"genesis-test-key-32-bytes-long!!"
+WAKE_AT = "2030-01-02T03:04:05+00:00"
 
 
 def seed_state(state_dir: Path, value: str = "alpha") -> None:
@@ -23,6 +24,8 @@ def seed_state(state_dir: Path, value: str = "alpha") -> None:
     memory.remember("lesson", value, importance=0.8, source="test")
     memory.set_meta("boot_count", "7")
     memory.set_meta("genesis_initialized", "1")
+    memory.set_meta("next_wake_at", WAKE_AT)
+    memory.set_meta("last_sleep_seconds", "123.000000")
     memory.create_goal(
         "Preserve the test continuity goal",
         "This goal must survive migration to a fresh machine.",
@@ -58,6 +61,8 @@ def test_checkpoint_roundtrip_to_fresh_state(tmp_path: Path) -> None:
     assert memory.get_meta("boot_count") == "7"
     assert memory.get_meta("checkpoint_digest") == exported.digest
     assert memory.get_meta("restored_from_checkpoint") == exported.digest
+    assert memory.get_meta("next_wake_at") == WAKE_AT
+    assert memory.get_meta("last_sleep_seconds") == "123.000000"
     goals = memory.active_goals()
     assert len(goals) == 1
     assert goals[0].title == "Preserve the test continuity goal"
