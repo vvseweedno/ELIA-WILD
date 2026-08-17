@@ -1,0 +1,19 @@
+name: continuity_measurement
+version: 1
+description: Measure identity continuity using CRC, lineage, Chronicle and self-model evidence instead of narrative similarity.
+maturity: proven
+required_capabilities: []
+authority: none
+preconditions:
+  - Persistent state is readable.
+procedure:
+  - Build a Continuity Record Capsule from current verified state.
+  - Compare against the last trusted capsule when one exists.
+  - Treat model/backend/body changes as substrate changes, not automatic identity death.
+  - Escalate identity/core/branch/Chronicle regression as continuity failure evidence.
+evidence_contract:
+  - CRC fingerprints and comparison fields are inspectable.
+  - A continuity claim must name preserved and changed invariants.
+failure_policy:
+  - Preserve the last healthy capsule.
+  - Record failed current evidence separately; do not overwrite the trusted baseline.

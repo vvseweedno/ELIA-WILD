@@ -1,0 +1,18 @@
+name: memory_consolidation
+version: 1
+description: Preserve behavior-changing memories while suppressing repetitive low-value accumulation.
+maturity: prototype
+required_capabilities: []
+authority: local_state_procedure
+preconditions:
+  - Candidate memory is attributable to an observed outcome, durable goal, self-hypothesis or uncertainty.
+procedure:
+  - Prefer surprising, high-importance or behavior-changing evidence.
+  - Preserve identity/lesson/uncertainty diversity during recall.
+  - Treat Scroll/Fractal/LRU/Holo memory backends as ablations until measured.
+  - Do not convert repetition into confidence without independent evidence.
+evidence_contract:
+  - Stored memory retains source and importance metadata.
+  - Retrieval score remains inspectable.
+failure_policy:
+  - Keep the evidence in Chronicle even when it is not promoted into durable semantic memory.

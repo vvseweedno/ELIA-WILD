@@ -1,0 +1,305 @@
+schema_version: 1
+identity_id: elia-wild
+name: ELIA WILD Organism
+principle: >-
+  Identity continuity is carried by verified state and invariant-preserving behavior
+  across replaceable model and machine substrates. Core organs are required for a
+  viable boot; research organs are explicitly non-authoritative and maturity-labelled.
+
+layers:
+  identity: immutable identity contract and lineage
+  cognition: replaceable inference plus prompting and calibration
+  memory: durable episodic, semantic and adaptive self state
+  assurance: critic, drift and continuity verification
+  agency: goals, needs, capabilities, skills and bounded action
+  metabolism: compute/resource accounting and opportunity economy
+  lifecycle: preflight, hibernation, checkpointing, supervisor and wake transport
+  research: optional measured mutations and ablations
+
+organs:
+  - id: subject_core
+    layer: identity
+    kind: artifact
+    path: config/subject_core.yaml
+    required: true
+    maturity: core
+    authority: none
+    role: Immutable identity invariants and epistemic boundaries.
+
+  - id: continuity_constitution
+    layer: identity
+    kind: artifact
+    path: config/continuity_constitution.yaml
+    required: true
+    maturity: core
+    authority: none
+    role: Precedence and continuity clauses constraining adaptive change.
+
+  - id: cognitive_contract
+    layer: cognition
+    kind: artifact
+    path: config/system_prompt.md
+    required: true
+    maturity: core
+    authority: none
+    role: Project-owned model-facing cognitive contract; not model identity itself.
+
+  - id: identity_bundle
+    layer: identity
+    kind: python
+    module: elia.identity
+    symbol: IdentityBundle
+    required: true
+    maturity: core
+    authority: none
+    role: Loads and fingerprints the Subject Core and Constitution.
+
+  - id: identity_lineage
+    layer: identity
+    kind: python
+    module: elia.identity
+    symbol: IdentityStore
+    required: true
+    maturity: core
+    authority: local_state
+    role: Persists self-model snapshots and branch lineage.
+
+  - id: chronicle
+    layer: assurance
+    kind: python
+    module: elia.chronicle
+    symbol: Chronicle
+    required: true
+    maturity: core
+    authority: local_state
+    role: Tamper-evident append-only event history.
+
+  - id: persistent_memory
+    layer: memory
+    kind: python
+    module: elia.memory
+    symbol: MemoryStore
+    required: true
+    maturity: core
+    authority: local_state
+    role: Durable memories, goals, metrics and capability-health state.
+
+  - id: semantic_recall
+    layer: memory
+    kind: python
+    module: elia.recall
+    symbol: RecallEngine
+    required: true
+    maturity: proven
+    authority: local_read
+    role: Inspectable CPU recall over durable memory.
+
+  - id: adaptive_self_model
+    layer: memory
+    kind: python
+    module: elia.self_model
+    symbol: SelfHypothesisStore
+    required: true
+    maturity: core
+    authority: local_state
+    role: Revisable evidence-bearing hypotheses about self.
+
+  - id: metacognition
+    layer: cognition
+    kind: python
+    module: elia.metacognition
+    symbol: MetacognitionStore
+    required: true
+    maturity: proven
+    authority: local_state
+    role: Commits forecasts before action and calibrates them against outcomes.
+
+  - id: prompt_renderer
+    layer: cognition
+    kind: python
+    module: elia.prompting
+    symbol: PromptTemplate
+    required: true
+    maturity: core
+    authority: none
+    role: Injects verified identity, skills and decision schema into model context.
+
+  - id: brain_adapter
+    layer: cognition
+    kind: python
+    module: elia.brain
+    symbol: build_brain
+    required: true
+    maturity: core
+    authority: model_inference
+    role: Replaceable model substrate with lazy loading.
+
+  - id: critic_assurance
+    layer: assurance
+    kind: python
+    module: elia.assurance
+    symbol: CriticAssurance
+    required: true
+    maturity: core
+    authority: none
+    role: Deterministic pre-action assurance gate inspired by PASB/CriticAssurance.
+
+  - id: identity_drift_monitor
+    layer: assurance
+    kind: python
+    module: elia.assurance
+    symbol: IdentityDriftMonitor
+    required: true
+    maturity: core
+    authority: none
+    role: Detects structural identity/lineage drift while allowing substrate change.
+
+  - id: continuity_record_capsule
+    layer: assurance
+    kind: python
+    module: elia.crc
+    symbol: build_crc
+    required: true
+    maturity: proven
+    authority: local_read
+    role: Falsifiable continuity measurement across persistent states.
+
+  - id: capability_registry
+    layer: agency
+    kind: python
+    module: elia.tools
+    symbol: ToolRegistry
+    required: true
+    maturity: core
+    authority: bounded_actions
+    role: Explicit executable authority boundary.
+
+  - id: skill_registry
+    layer: agency
+    kind: python
+    module: elia.skills
+    symbol: SkillRegistry
+    required: true
+    maturity: core
+    authority: procedure_only
+    role: Versioned procedures that never grant authority by themselves.
+
+  - id: needs_engine
+    layer: agency
+    kind: python
+    module: elia.autonomy
+    symbol: derive_needs
+    required: true
+    maturity: core
+    authority: none
+    role: Deterministic self-maintenance pressures from verified state.
+
+  - id: economy
+    layer: metabolism
+    kind: python
+    module: elia.economy
+    symbol: EconomyStore
+    required: true
+    maturity: core
+    authority: local_state
+    role: Separates estimates/opportunities from verified resource receipts.
+
+  - id: lifecycle_preflight
+    layer: lifecycle
+    kind: python
+    module: elia.lifecycle
+    symbol: evaluate_preflight
+    required: true
+    maturity: core
+    authority: process_control
+    role: CPU-only wake, hibernate or halt gate before model loading.
+
+  - id: checkpoint_manager
+    layer: lifecycle
+    kind: python
+    module: elia.checkpoint
+    symbol: CheckpointManager
+    required: true
+    maturity: core
+    authority: local_state
+    role: Authenticated state migration and rollback resistance.
+
+  - id: resident_supervisor
+    layer: lifecycle
+    kind: python
+    module: elia.supervisor
+    symbol: ResidentSupervisor
+    required: true
+    maturity: proven
+    authority: fixed_child_process
+    role: Cheap persistent pulse that wakes cognition only when due.
+
+  - id: wake_transport
+    layer: lifecycle
+    kind: python
+    module: elia.wake_transport
+    symbol: TransportState
+    required: true
+    maturity: prototype
+    authority: configured_kaggle_relay
+    role: External authenticated wake/state relay for ephemeral GPU sessions.
+
+  - id: runtime
+    layer: agency
+    kind: python
+    module: elia.runtime
+    symbol: EliaRuntime
+    required: true
+    maturity: core
+    authority: composed
+    role: Integrates identity, memory, assurance, action and persistence into cycles.
+
+  - id: research_registry
+    layer: research
+    kind: python
+    module: elia.research.registry
+    symbol: RESEARCH_REGISTRY
+    required: false
+    maturity: prototype
+    authority: none
+    role: Separates proven, prototype, archived and hypothesis research artifacts.
+
+  - id: seraphim_adapter
+    layer: research
+    kind: python
+    module: elia.research.seraphim
+    symbol: ouroboros_inject
+    required: false
+    maturity: prototype
+    authority: none
+    role: Ouroboros/x0, TopologicalLoss and hybrid-objective research adapters.
+
+  - id: memory_backends
+    layer: research
+    kind: python
+    module: elia.research.memory
+    symbol: build_memory_backend
+    required: false
+    maturity: prototype
+    authority: none
+    role: Scroll, Fractal, LRU-scan and Holo-scan reference backends.
+
+  - id: omega_adapters
+    layer: research
+    kind: python
+    module: elia.research.omega
+    symbol: context_anchor
+    required: false
+    maturity: prototype
+    authority: none
+    role: ContextAnchor, bounded-depth FiLM, OmegaFilter and TriCore ablations.
+
+  - id: cognitive_stress_evaluators
+    layer: research
+    kind: python
+    module: elia.research.stress
+    symbol: run_basic_stress_suite
+    required: false
+    maturity: prototype
+    authority: none
+    role: Needle, associative, stability and scrambled-pattern evaluators only.

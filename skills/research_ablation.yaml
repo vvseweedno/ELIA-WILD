@@ -1,0 +1,20 @@
+name: research_ablation
+version: 1
+description: Test ELIA/Seraphim/Holo/Omega hypotheses against explicit baselines without silently promoting them to core behavior.
+maturity: prototype
+required_capabilities: []
+authority: none
+preconditions:
+  - Hypothesis, baseline, metric and stop condition are explicit.
+procedure:
+  - Run smoke validation before expensive work.
+  - Compare one controlled change against an appropriate baseline.
+  - Record runtime, quality metric, failures and environment details.
+  - Keep archived failures as evidence rather than deleting them.
+  - Promote maturity only after reproducible evidence.
+evidence_contract:
+  - A claimed gain names baseline, dataset/task, metric, run budget and result.
+  - Historical notebook numbers remain historical evidence until reproduced.
+failure_policy:
+  - Failed experiments do not mutate Genesis core defaults.
+  - Environment/runtime failures are classified separately from model-quality failures.

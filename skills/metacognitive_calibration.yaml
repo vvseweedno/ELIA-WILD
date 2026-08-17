@@ -1,0 +1,19 @@
+name: metacognitive_calibration
+version: 1
+description: Calibrate confidence by committing predictions before action and scoring them against observed outcomes.
+maturity: proven
+required_capabilities: []
+authority: none
+preconditions:
+  - A contemplated action has a measurable success condition.
+procedure:
+  - State success probability and expected observable outcome before execution.
+  - Execute through the declared capability layer.
+  - Resolve the forecast from the actual tool result.
+  - Use aggregate Brier score and calibration gap to adjust future confidence.
+evidence_contract:
+  - Forecast timestamps precede action results.
+  - Resolution is tied to stored tool evidence.
+failure_policy:
+  - Preserve uncertainty when an outcome cannot be resolved.
+  - Never retroactively edit the committed forecast.
