@@ -27,6 +27,7 @@ research = [
 
 [project.scripts]
 elia-wild = "elia.__main__:main"
+elia-supervisor = "elia.supervisor:main"
 
 [tool.setuptools.packages.find]
 include = ["elia*"]
