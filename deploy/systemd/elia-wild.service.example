@@ -1,0 +1,24 @@
+[Unit]
+Description=ELIA WILD resident autonomic supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=elia
+Group=elia
+WorkingDirectory=/opt/elia-wild
+EnvironmentFile=-/etc/elia-wild/elia.env
+ExecStart=/opt/elia-wild/.venv/bin/elia-supervisor --config /opt/elia-wild/config/genesis.yaml
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/elia-wild /opt/elia-wild/.elia
+
+[Install]
+WantedBy=multi-user.target
