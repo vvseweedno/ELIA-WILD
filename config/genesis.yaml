@@ -16,6 +16,8 @@ mission:
 runtime:
   state_dir: .elia
   cycle_sleep_seconds: 60
+  max_in_session_sleep_seconds: 5
+  auto_checkpoint_path: ""
   max_action_output_chars: 16000
   weekly_gpu_budget_hours: 30
   memory_recall_limit: 12
