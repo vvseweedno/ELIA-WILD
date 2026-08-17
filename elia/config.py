@@ -24,7 +24,7 @@ class RuntimeConfig:
     state_dir: Path
     cycle_sleep_seconds: float
     max_action_output_chars: int
-    weekly_brain_budget_hours: float
+    weekly_gpu_budget_hours: float
     memory_recall_limit: int
 
 
@@ -52,6 +52,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     identity = data["identity"]
     runtime = data["runtime"]
     brain = data["brain"]
+    gpu_budget = runtime.get("weekly_gpu_budget_hours", runtime.get("weekly_brain_budget_hours", 30))
 
     return Config(
         identity_name=os.getenv("ELIA_IDENTITY_NAME", identity["name"]),
@@ -73,7 +74,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
                 os.getenv("ELIA_CYCLE_SLEEP_SECONDS", runtime["cycle_sleep_seconds"])
             ),
             max_action_output_chars=int(runtime["max_action_output_chars"]),
-            weekly_brain_budget_hours=float(runtime["weekly_brain_budget_hours"]),
+            weekly_gpu_budget_hours=float(os.getenv("ELIA_WEEKLY_GPU_HOURS", gpu_budget)),
             memory_recall_limit=int(runtime["memory_recall_limit"]),
         ),
         raw_tools=dict(data.get("tools", {})),
