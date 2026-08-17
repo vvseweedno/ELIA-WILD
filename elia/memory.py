@@ -100,6 +100,18 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_goal_events_goal
                     ON goal_events(goal_id, id ASC);
+
+                CREATE TABLE IF NOT EXISTS capability_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    ok INTEGER NOT NULL,
+                    executed INTEGER NOT NULL DEFAULT 1,
+                    duration_ms REAL NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_capability_events_name_id
+                    ON capability_events(capability, id DESC);
                 """
             )
 
@@ -303,6 +315,99 @@ class MemoryStore:
             }
             for row in reversed(rows)
         ]
+
+    def record_capability_event(
+        self,
+        capability: str,
+        *,
+        ok: bool,
+        duration_ms: float = 0.0,
+        error: str = "",
+        executed: bool = True,
+    ) -> int:
+        name = str(capability).strip()[:128]
+        if not name:
+            raise ValueError("capability name is required")
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO capability_events(timestamp, capability, ok, executed, duration_ms, error)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.now(),
+                    name,
+                    1 if ok else 0,
+                    1 if executed else 0,
+                    max(0.0, float(duration_ms)),
+                    str(error)[:4000],
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def capability_health(self, capability: str, window: int = 20) -> dict[str, Any]:
+        name = str(capability).strip()
+        limit = max(1, min(int(window), 200))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, timestamp, ok, executed, duration_ms, error
+                FROM capability_events
+                WHERE capability=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (name, limit),
+            ).fetchall()
+
+        executed_rows = [row for row in rows if bool(row["executed"])]
+        successes = sum(1 for row in executed_rows if bool(row["ok"]))
+        failures = sum(1 for row in executed_rows if not bool(row["ok"]))
+        suppressed = sum(1 for row in rows if not bool(row["executed"]))
+        consecutive_failures = 0
+        for row in executed_rows:
+            if bool(row["ok"]):
+                break
+            consecutive_failures += 1
+        last_error = ""
+        for row in rows:
+            if str(row["error"]):
+                last_error = str(row["error"])
+                break
+        average_duration_ms = (
+            sum(float(row["duration_ms"]) for row in executed_rows) / len(executed_rows)
+            if executed_rows
+            else 0.0
+        )
+        return {
+            "capability": name,
+            "window": limit,
+            "events": len(rows),
+            "attempts": len(executed_rows),
+            "successes": successes,
+            "failures": failures,
+            "suppressed": suppressed,
+            "success_rate": successes / len(executed_rows) if executed_rows else None,
+            "consecutive_failures": consecutive_failures,
+            "average_duration_ms": average_duration_ms,
+            "last_error": last_error or None,
+            "last_event_at": str(rows[0]["timestamp"]) if rows else None,
+        }
+
+    def capability_health_all(
+        self, capabilities: list[str] | None = None, window: int = 20
+    ) -> dict[str, dict[str, Any]]:
+        if capabilities is None:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT capability FROM capability_events ORDER BY capability ASC"
+                ).fetchall()
+            capabilities = [str(row["capability"]) for row in rows]
+        return {name: self.capability_health(name, window=window) for name in capabilities}
+
+    def capability_degraded(self, capability: str, threshold: int = 3) -> bool:
+        health = self.capability_health(capability)
+        return int(health["consecutive_failures"]) >= max(1, int(threshold))
 
     @staticmethod
     def _week_suffix(moment: datetime | None = None) -> str:
