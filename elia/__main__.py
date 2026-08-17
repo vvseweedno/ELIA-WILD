@@ -12,6 +12,7 @@ from .chronicle import Chronicle
 from .config import load_config
 from .memory import MemoryStore
 from .runtime import EliaRuntime
+from .tools import ToolRegistry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,6 +89,9 @@ def main() -> None:
 
     if args.status:
         memory = MemoryStore(state_dir / "memory.sqlite3")
+        tools = ToolRegistry(state_dir / "workspace", config.raw_tools)
+        capability_catalog = tools.catalog()
+        capability_health = memory.capability_health_all(list(capability_catalog), window=20)
         limit = config.runtime.weekly_gpu_budget_hours
         runtime_hours = memory.runtime_seconds_this_week() / 3600.0
         brain_hours = memory.brain_seconds_this_week() / 3600.0
@@ -106,6 +110,7 @@ def main() -> None:
                 chronicle_valid=chronicle_valid,
                 budget=resources,
                 active_goals=active_goals,
+                capability_health=capability_health,
             )
         ]
         anchor_path = state_dir / "checkpoint.anchor.json"
@@ -128,6 +133,10 @@ def main() -> None:
                     "scheduler": {
                         "next_wake_at": memory.get_meta("next_wake_at"),
                         "last_sleep_seconds": memory.get_meta("last_sleep_seconds"),
+                    },
+                    "capabilities": {
+                        "catalog": capability_catalog,
+                        "health": capability_health,
                     },
                     "checkpoint_anchor": anchor,
                 },
