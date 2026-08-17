@@ -63,17 +63,56 @@ python -m elia --cycles 1
 
 The model server is deliberately external to ELIA's identity state. Replacing the server or checkpoint must not erase continuity.
 
-## 4. Persistence is the current hard boundary
+## 4. Durable state and authenticated handoff
 
-`.elia/` contains the durable state:
+`.elia/` contains the durable identity state:
 
 ```text
 .elia/memory.sqlite3
 .elia/chronicle.jsonl
 .elia/workspace/
+.elia/checkpoint.anchor.json
 ```
 
-Kaggle session storage alone is not enough for continuity across independent sessions. Until Genesis v0.2 implements authenticated checkpoint/restore, losing `.elia/` is considered a continuity failure rather than a normal restart.
+The public GitHub repository contains code only. Do **not** commit `.elia/`, checkpoint archives, private memory, or checkpoint secrets.
+
+Create a long random secret once and store it in Kaggle Secrets as `ELIA_CHECKPOINT_KEY`. The same secret must be available in every session that exports, inspects, or restores ELIA state.
+
+Before ending a healthy session, stop the runtime and export:
+
+```bash
+python -m elia --verify
+python -m elia --checkpoint-export /kaggle/working/elia-genesis.eliacp
+```
+
+The command prints a `digest`. Preserve two separate things:
+
+1. `elia-genesis.eliacp` — private checkpoint payload; store it in a private persistence channel such as a private Kaggle Dataset or another private user-controlled store.
+2. the printed checkpoint `digest` — trusted rollback anchor; keep it separately from the checkpoint itself.
+
+The HMAC key is never placed in the archive. The checkpoint contains authenticated hashes of SQLite state, Chronicle, and workspace files.
+
+### Fresh Kaggle session
+
+Clone/install the repository, restore the same Kaggle secret, obtain the latest private checkpoint, then run **before loading Qwen**:
+
+```bash
+python -m elia \
+  --checkpoint-restore /path/to/elia-genesis.eliacp \
+  --expected-checkpoint-digest <TRUSTED_DIGEST>
+python -m elia --verify
+python -m elia --status
+```
+
+Only after all three commands succeed should the GPU brain start:
+
+```bash
+python -m elia --cycles 1
+```
+
+On an existing machine, `.elia/checkpoint.anchor.json` rejects checkpoints older than the locally trusted counter. On a completely fresh machine there is no local history, so `--expected-checkpoint-digest` is the external fact that prevents a valid-but-old checkpoint from masquerading as the latest state.
+
+If restore fails authentication, integrity, Chronicle, SQLite, identity-name, rollback, or expected-digest checks, **do not boot the model from that state**.
 
 ## 5. What a successful first GPU run proves
 
@@ -84,5 +123,6 @@ It proves only that:
 3. The action executes through the bounded tool layer.
 4. The result returns to persistent memory.
 5. The Chronicle remains valid afterward.
+6. The resulting identity state can be checkpointed and authenticated for the next session.
 
-It does **not** yet prove long-term autonomy, economic self-maintenance, identity continuity across machines, or unattended multi-session survival.
+It does **not** yet prove long-term autonomy, economic self-maintenance, identity continuity over long horizons, or unattended survival.
