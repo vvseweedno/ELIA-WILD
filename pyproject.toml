@@ -31,6 +31,7 @@ elia-supervisor = "elia.supervisor:main"
 elia-vitals = "elia.vitals:main"
 elia-doctor = "elia.doctor:main"
 elia-bootstrap = "elia.bootstrap:main"
+elia-fork = "elia.branching:main"
 
 [tool.setuptools.packages.find]
 include = ["elia*"]

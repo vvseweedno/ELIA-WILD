@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import sqlite3
 
 import yaml
 
@@ -67,6 +68,21 @@ def _resolve_project_path(config_path: Path, value: str | Path) -> Path:
     return (project_root / candidate).resolve()
 
 
+def _persisted_branch_id(state_dir: Path) -> str | None:
+    database = state_dir / "memory.sqlite3"
+    if not database.is_file():
+        return None
+    try:
+        with sqlite3.connect(database) as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key='branch_id'").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    value = str(row[0]).strip()
+    return value or None
+
+
 def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     path = Path(path).resolve()
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -78,6 +94,16 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     auto_checkpoint_raw = os.getenv(
         "ELIA_AUTO_CHECKPOINT_PATH", str(runtime.get("auto_checkpoint_path", "")).strip()
     ).strip()
+
+    state_dir = Path(os.getenv("ELIA_STATE_DIR", runtime["state_dir"]))
+    explicit_branch = os.getenv("ELIA_BRANCH_ID")
+    branch_id = (
+        explicit_branch.strip()
+        if explicit_branch is not None and explicit_branch.strip()
+        else _persisted_branch_id(state_dir)
+        or str(identity.get("branch_id", "main")).strip()
+        or "main"
+    )
 
     subject_core_raw = os.getenv(
         "ELIA_SUBJECT_CORE",
@@ -108,7 +134,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
             thinking=_env_bool("ELIA_THINKING", bool(brain.get("thinking", False))),
         ),
         runtime=RuntimeConfig(
-            state_dir=Path(os.getenv("ELIA_STATE_DIR", runtime["state_dir"])),
+            state_dir=state_dir,
             cycle_sleep_seconds=float(
                 os.getenv("ELIA_CYCLE_SLEEP_SECONDS", runtime["cycle_sleep_seconds"])
             ),
@@ -128,5 +154,5 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         continuity_constitution_path=_resolve_config_path(path, constitution_raw),
         system_prompt_path=_resolve_config_path(path, system_prompt_raw),
         skills_dir=_resolve_project_path(path, skills_raw),
-        branch_id=os.getenv("ELIA_BRANCH_ID", str(identity.get("branch_id", "main"))).strip() or "main",
+        branch_id=branch_id,
     )

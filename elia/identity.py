@@ -145,6 +145,8 @@ class LineageEvent:
 class IdentityStore:
     """Persistent self-model and lineage state sharing ELIA's SQLite database."""
 
+    BRANCH_TRANSITION_EVENTS = {"fork", "branch_fork", "recovery_fork"}
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,14 +332,27 @@ class IdentityStore:
     ) -> tuple[bool, str | None]:
         events = self.lineage(1000)
         previous_id = 0
+        active_branch: str | None = None
         for event in events:
             if event.id <= previous_id:
                 return False, f"non-monotonic lineage event id at {event.id}"
             previous_id = event.id
             if event.identity_fingerprint != expected_identity_fingerprint:
                 return False, f"lineage identity fingerprint mismatch at event {event.id}"
-            if event.branch_id != expected_branch_id:
-                return False, f"lineage branch mismatch at event {event.id}"
+            if active_branch is None:
+                active_branch = event.branch_id
+                continue
+            if event.branch_id != active_branch:
+                if event.event not in self.BRANCH_TRANSITION_EVENTS:
+                    return False, (
+                        f"lineage branch changed from {active_branch!r} to {event.branch_id!r} "
+                        f"without explicit fork at event {event.id}"
+                    )
+                active_branch = event.branch_id
+        if events and active_branch != expected_branch_id:
+            return False, (
+                f"lineage head branch mismatch: {active_branch!r} != expected {expected_branch_id!r}"
+            )
         return True, None
 
 
