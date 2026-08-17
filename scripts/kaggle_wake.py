@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from typing import Any
@@ -27,6 +26,7 @@ from elia.wake_transport import (
     mark_failure,
     mark_pending,
     mark_success,
+    parse_dataset_status,
     parse_kernel_status,
     read_digest,
     read_transport_state,
@@ -39,9 +39,13 @@ from elia.wake_transport import (
 
 FAILURE_THRESHOLD = 3
 PENDING_TIMEOUT_SECONDS = 8 * 3600
+DATASET_READY_TIMEOUT_SECONDS = 180
+DATASET_POLL_SECONDS = 5
 
 
-def command(args: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def command(
+    args: list[str], *, cwd: Path | None = None, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         args,
         cwd=str(cwd) if cwd else None,
@@ -83,6 +87,39 @@ def download_state_dataset(dataset: str, destination: Path) -> tuple[Path, Path,
         ]
     )
     return locate_state_bundle(destination)
+
+
+def dataset_status(dataset: str) -> tuple[str, str]:
+    result = command(
+        ["kaggle", "datasets", "status", dataset, "--format", "json"],
+        check=False,
+    )
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        return "unknown", output
+    return parse_dataset_status(output), output
+
+
+def wait_dataset_ready(
+    dataset: str,
+    *,
+    timeout_seconds: float = DATASET_READY_TIMEOUT_SECONDS,
+    poll_seconds: float = DATASET_POLL_SECONDS,
+) -> None:
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+    observations: list[str] = []
+    while time.monotonic() < deadline:
+        state, raw = dataset_status(dataset)
+        observations.append(f"{state}:{raw[-400:]}")
+        if state == "ready":
+            return
+        if state == "failed":
+            raise RuntimeError(f"Kaggle state Dataset entered a failed state: {raw[-2000:]}")
+        time.sleep(max(1.0, min(float(poll_seconds), 30.0)))
+    raise RuntimeError(
+        "Kaggle state Dataset did not become ready before timeout; last observations: "
+        + " | ".join(observations[-4:])
+    )
 
 
 def dataset_upload_dir(
@@ -131,6 +168,7 @@ def version_state_dataset(
             "skip",
         ]
     )
+    wait_dataset_ready(dataset)
 
 
 def pending_age_seconds(state: TransportState) -> float | None:
@@ -192,27 +230,24 @@ def accept_completed_output(
     *,
     kernel: str,
     state: TransportState,
-    source_checkpoint: Path,
     source_digest: str,
     source_counter: int,
     key: str,
     identity_name: str,
     dataset: str,
     root: Path,
-) -> tuple[Path, str, TransportState] | None:
+) -> tuple[Path, str, TransportState]:
     output_root = download_kernel_output(kernel, root / "kernel-output")
     output_checkpoint, output_digest_file, _ = locate_state_bundle(output_root)
-    report_path = output_root / RELAY_REPORT_NAME
-    if not report_path.is_file():
-        matches = [path for path in output_root.rglob(RELAY_REPORT_NAME) if path.is_file()]
-        if len(matches) != 1:
-            raise RuntimeError("completed kernel output has no unique relay-report.json")
-        report_path = matches[0]
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    matches = [path for path in output_root.rglob(RELAY_REPORT_NAME) if path.is_file()]
+    if len(matches) != 1:
+        raise RuntimeError("completed kernel output has no unique relay-report.json")
+    report = json.loads(matches[0].read_text(encoding="utf-8"))
     if not isinstance(report, dict):
         raise RuntimeError("relay-report.json must contain a JSON object")
     if not state.pending_launch_nonce:
         raise RuntimeError("completed output cannot be accepted without a pending launch nonce")
+
     report_digest, report_counter = validate_relay_report(
         report,
         expected_nonce=state.pending_launch_nonce,
@@ -226,6 +261,7 @@ def accept_completed_output(
     output_info = inspector.inspect(output_checkpoint, expected_digest=file_digest)
     if output_info.digest != report_digest or output_info.counter != report_counter:
         raise RuntimeError("output checkpoint metadata disagrees with relay report")
+
     cognition_started = bool(report.get("cognition_started"))
     if cognition_started and output_info.counter <= source_counter:
         raise RuntimeError("cognitive run did not advance the authenticated checkpoint counter")
@@ -301,6 +337,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repo-ref", default=os.getenv("ELIA_REPO_REF", "main"))
     parser.add_argument("--max-cycles", type=int, default=int(os.getenv("ELIA_WAKE_MAX_CYCLES", "8")))
+    parser.add_argument(
+        "--kernel-timeout-seconds",
+        type=int,
+        default=int(os.getenv("ELIA_KAGGLE_KERNEL_TIMEOUT", "3600")),
+        help="Hard Kaggle run-time ceiling for one wake burst; clamped to 10 min..2 h",
+    )
     return parser.parse_args()
 
 
@@ -312,6 +354,7 @@ def main() -> int:
         raise RuntimeError("--kernel / ELIA_KAGGLE_KERNEL must be owner/kernel-slug")
     require_env("KAGGLE_API_TOKEN")
     key = require_env("ELIA_CHECKPOINT_KEY")
+    kernel_timeout = max(600, min(int(args.kernel_timeout_seconds), 7200))
 
     repo_root = Path(__file__).resolve().parents[1]
     config = load_config(repo_root / args.config)
@@ -345,10 +388,9 @@ def main() -> int:
                 return 0
             if status == "complete":
                 try:
-                    accepted = accept_completed_output(
+                    source_checkpoint, source_digest, transport = accept_completed_output(
                         kernel=args.kernel,
                         state=transport,
-                        source_checkpoint=source_checkpoint,
                         source_digest=source_digest,
                         source_counter=source_info.counter,
                         key=key,
@@ -368,15 +410,13 @@ def main() -> int:
                     )
                     print_event("relay_rejected", error=str(exc), failures=failed.consecutive_kernel_failures)
                     return 0
-                if accepted is not None:
-                    source_checkpoint, source_digest, transport = accepted
-                    _, source_info = inspect_restore(
-                        checkpoint=source_checkpoint,
-                        digest=source_digest,
-                        key=key,
-                        identity_name=config.identity_name,
-                        state_dir=root / "restored-state-after-relay",
-                    )
+                _, source_info = inspect_restore(
+                    checkpoint=source_checkpoint,
+                    digest=source_digest,
+                    key=key,
+                    identity_name=config.identity_name,
+                    state_dir=root / "restored-state-after-relay",
+                )
             elif status == "failed":
                 failed = mark_failure(transport, raw_status or "Kaggle kernel reported failure")
                 version_state_dataset(
@@ -461,6 +501,8 @@ def main() -> int:
                     str(kernel_dir),
                     "--accelerator",
                     args.accelerator,
+                    "--timeout",
+                    str(kernel_timeout),
                 ]
             )
         except Exception as exc:
@@ -480,6 +522,7 @@ def main() -> int:
             "kernel_launched",
             kernel=args.kernel,
             accelerator=args.accelerator,
+            timeout_seconds=kernel_timeout,
             nonce=pending.pending_launch_nonce,
             output=(pushed.stdout or "")[-1000:],
         )
