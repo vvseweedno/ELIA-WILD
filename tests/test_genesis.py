@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from elia.brain import MockBrain
 from elia.chronicle import Chronicle
 from elia.config import BrainConfig, Config, RuntimeConfig
+from elia.memory import MemoryStore
 from elia.runtime import EliaRuntime
 from elia.tools import ToolRegistry
 
@@ -41,12 +44,36 @@ def test_mock_runtime_survives_restart(tmp_path: Path) -> None:
     report = first.cycle()
     assert report["result"]["ok"] is True
     assert first.memory.get_meta("boot_count") == "1"
+    assert len(first.memory.active_goals()) == 1
     memories_before = len(first.memory.recent(100))
 
     second = EliaRuntime(config, brain=MockBrain())
     assert second.memory.get_meta("boot_count") == "2"
     assert len(second.memory.recent(100)) >= memories_before
     assert second.chronicle.verify() == (True, None)
+
+    second_report = second.cycle()
+    assert second_report["goal_changes"][0]["deduplicated"] is True
+    assert len(second.memory.active_goals()) == 1
+    assert second.memory.active_goals()[0].title == "Validate continuity after restart"
+
+
+def test_goal_completion_requires_evidence(tmp_path: Path) -> None:
+    memory = MemoryStore(tmp_path / "memory.sqlite3")
+    goal_id = memory.create_goal("Test an explicit result", priority=0.8)
+    goal = memory.update_goal(goal_id, status="completed", event="complete", evidence="Test passed")
+    assert goal.status == "completed"
+    assert memory.active_goals() == []
+    events = memory.goal_events(goal_id)
+    assert events[-1]["kind"] == "complete"
+    assert events[-1]["content"] == "Test passed"
+
+
+def test_invalid_goal_status_is_rejected(tmp_path: Path) -> None:
+    memory = MemoryStore(tmp_path / "memory.sqlite3")
+    goal_id = memory.create_goal("Keep goal states bounded")
+    with pytest.raises(ValueError, match="invalid goal status"):
+        memory.update_goal(goal_id, status="imaginary")
 
 
 def test_chronicle_detects_tampering(tmp_path: Path) -> None:
