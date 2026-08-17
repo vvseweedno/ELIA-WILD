@@ -17,6 +17,7 @@ class Decision:
     skill_name: str | None = None
     action_args: dict[str, Any] = field(default_factory=dict)
     memories: list[dict[str, Any]] = field(default_factory=list)
+    self_updates: list[dict[str, Any]] = field(default_factory=list)
     goal_updates: list[dict[str, Any]] = field(default_factory=list)
     opportunity_updates: list[dict[str, Any]] = field(default_factory=list)
     sleep_seconds: float | None = None
@@ -60,6 +61,9 @@ def _decision_from_item(item: dict[str, Any]) -> Decision:
     memories = item.get("memories") or []
     if not isinstance(memories, list):
         memories = []
+    self_updates = item.get("self_updates") or []
+    if not isinstance(self_updates, list):
+        self_updates = []
     goal_updates = item.get("goal_updates") or []
     if not isinstance(goal_updates, list):
         goal_updates = []
@@ -74,6 +78,7 @@ def _decision_from_item(item: dict[str, Any]) -> Decision:
         skill_name=(str(skill)[:128] if skill not in {None, "", "null"} else None),
         action_args=dict(action.get("args") or {}),
         memories=[m for m in memories if isinstance(m, dict)][:8],
+        self_updates=[g for g in self_updates if isinstance(g, dict)][:4],
         goal_updates=[g for g in goal_updates if isinstance(g, dict)][:4],
         opportunity_updates=[g for g in opportunity_updates if isinstance(g, dict)][:4],
         sleep_seconds=(
@@ -159,12 +164,7 @@ class OpenAICompatibleBrain:
 
 
 class Transformers4BitBrain:
-    """Loads Qwen directly with bitsandbytes 4-bit quantization.
-
-    Heavy GPU dependencies are imported lazily so CPU tests stay lightweight.
-    This backend is intended for constrained notebook GPUs where running a separate
-    serving engine is undesirable.
-    """
+    """Loads Qwen directly with bitsandbytes 4-bit quantization."""
 
     def __init__(self, config: BrainConfig):
         self.config = config
