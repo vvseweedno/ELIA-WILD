@@ -7,6 +7,7 @@ import pytest
 
 from elia.checkpoint import (
     CheckpointAuthenticationError,
+    CheckpointError,
     CheckpointManager,
     CheckpointRollbackError,
 )
@@ -77,7 +78,7 @@ def test_checkpoint_payload_tampering_is_rejected(tmp_path: Path) -> None:
                 data = b"tampered"
             target.writestr(item, data)
 
-    with pytest.raises(Exception, match="hash mismatch"):
+    with pytest.raises(CheckpointError, match="(size|hash) mismatch"):
         CheckpointManager(tmp_path / "fresh", "ELIA", KEY).inspect(tampered)
 
 
