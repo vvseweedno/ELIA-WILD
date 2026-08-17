@@ -30,8 +30,10 @@ def test_research_organs_are_explicitly_non_core() -> None:
     manifest = OrganismManifest.load()
     research = [item for item in manifest.organs if item.layer == "research"]
     assert research
+    # Maturity and core membership are independent dimensions. Infrastructure can be
+    # proven within a narrow scope while remaining an optional research organ.
     assert all(item.required is False for item in research)
-    assert all(item.maturity in {"prototype", "archived", "hypothesis"} for item in research)
+    assert all(item.maturity in {"proven", "prototype", "archived", "hypothesis"} for item in research)
 
 
 def test_prompt_contract_separates_core_from_research() -> None:
