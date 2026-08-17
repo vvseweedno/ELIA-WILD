@@ -16,6 +16,7 @@ RELAY_REPORT_NAME = "relay-report.json"
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 KernelState = Literal["unknown", "queued", "running", "complete", "failed"]
+DatasetState = Literal["unknown", "pending", "ready", "failed"]
 
 
 @dataclass(slots=True)
@@ -133,6 +134,71 @@ def parse_kernel_status(output: str) -> KernelState:
         return "running"
     if any(token in text for token in queued_tokens):
         return "queued"
+    return "unknown"
+
+
+def _flatten_status_values(value: Any) -> list[str]:
+    values: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if "status" in str(key).lower() or "state" in str(key).lower():
+                values.extend(_flatten_status_values(item))
+            elif isinstance(item, (dict, list)):
+                values.extend(_flatten_status_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(_flatten_status_values(item))
+    elif value is not None:
+        values.append(str(value))
+    return values
+
+
+def parse_dataset_status(output: str) -> DatasetState:
+    """Classify `kaggle datasets status`, preferring its JSON status/state fields."""
+    raw = str(output).strip()
+    if not raw:
+        return "unknown"
+    candidates: list[str] = []
+    try:
+        item = json.loads(raw)
+    except json.JSONDecodeError:
+        item = None
+    if item is not None:
+        candidates.extend(_flatten_status_values(item))
+    candidates.append(raw)
+    text = " ".join(candidates).lower()
+
+    failure_tokens = (
+        "error",
+        "failed",
+        "failure",
+        "cancelled",
+        "canceled",
+        "invalid",
+        "rejected",
+    )
+    ready_tokens = (
+        "ready",
+        "complete",
+        "completed",
+        "success",
+        "succeeded",
+        "active",
+    )
+    pending_tokens = (
+        "pending",
+        "queued",
+        "running",
+        "processing",
+        "creating",
+        "updating",
+    )
+    if any(token in text for token in failure_tokens):
+        return "failed"
+    if any(token in text for token in ready_tokens):
+        return "ready"
+    if any(token in text for token in pending_tokens):
+        return "pending"
     return "unknown"
 
 
