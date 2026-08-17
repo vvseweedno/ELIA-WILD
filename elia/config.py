@@ -34,6 +34,9 @@ class RuntimeConfig:
 class Config:
     identity_name: str
     identity_statement: str
+    subject_core_path: Path
+    continuity_constitution_path: Path
+    branch_id: str
     mission: list[str]
     brain: BrainConfig
     runtime: RuntimeConfig
@@ -47,8 +50,15 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_config_path(config_path: Path, value: str | Path) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate
+    return (config_path.parent / candidate).resolve()
+
+
 def load_config(path: str | Path = "config/genesis.yaml") -> Config:
-    path = Path(path)
+    path = Path(path).resolve()
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     identity = data["identity"]
@@ -59,9 +69,21 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         "ELIA_AUTO_CHECKPOINT_PATH", str(runtime.get("auto_checkpoint_path", "")).strip()
     ).strip()
 
+    subject_core_raw = os.getenv(
+        "ELIA_SUBJECT_CORE",
+        str(identity.get("subject_core", "subject_core.yaml")),
+    )
+    constitution_raw = os.getenv(
+        "ELIA_CONTINUITY_CONSTITUTION",
+        str(identity.get("continuity_constitution", "continuity_constitution.yaml")),
+    )
+
     return Config(
         identity_name=os.getenv("ELIA_IDENTITY_NAME", identity["name"]),
         identity_statement=identity["statement"].strip(),
+        subject_core_path=_resolve_config_path(path, subject_core_raw),
+        continuity_constitution_path=_resolve_config_path(path, constitution_raw),
+        branch_id=os.getenv("ELIA_BRANCH_ID", str(identity.get("branch_id", "main"))).strip() or "main",
         mission=list(data.get("mission", [])),
         brain=BrainConfig(
             backend=os.getenv("ELIA_BRAIN", brain["backend"]),
