@@ -330,6 +330,7 @@ class CheckpointManager:
         parent.mkdir(parents=True, exist_ok=True)
         staging = parent / f".{self.state_dir.name}.restore-{uuid4().hex}"
         backup = parent / f".{self.state_dir.name}.backup-{uuid4().hex}"
+        swapped = False
 
         try:
             staging.mkdir(parents=True)
@@ -366,6 +367,7 @@ class CheckpointManager:
             if self.state_dir.exists():
                 os.replace(self.state_dir, backup)
             os.replace(staging, self.state_dir)
+            swapped = True
 
             restored_memory = MemoryStore(self.state_dir / "memory.sqlite3")
             restored_memory.set_meta("checkpoint_counter", str(counter))
@@ -387,6 +389,8 @@ class CheckpointManager:
         except Exception:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
+            if swapped and self.state_dir.exists():
+                shutil.rmtree(self.state_dir, ignore_errors=True)
             if backup.exists() and not self.state_dir.exists():
                 os.replace(backup, self.state_dir)
             raise
