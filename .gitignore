@@ -4,6 +4,12 @@ __pycache__/
 .venv/
 .env
 .elia/
+.bootstrap/
+.wake/
+*.eliacp
+trusted-digest.txt
+transport-state.json
+relay-report.json
 dist/
 build/
 *.egg-info/
