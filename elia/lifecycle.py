@@ -41,12 +41,14 @@ def evaluate_preflight(
     *,
     force_wake: bool = False,
     now: datetime | None = None,
+    expected_identity_fingerprint: str | None = None,
+    expected_branch_id: str | None = None,
 ) -> LifecycleDecision:
     """Decide whether expensive cognition should start, without loading a model.
 
-    This layer intentionally uses only persisted state, Chronicle verification and
-    deterministic arithmetic. `force_wake` bypasses schedule timing only; it never
-    bypasses integrity or budget guards.
+    This layer uses only persisted state, Chronicle verification and deterministic
+    arithmetic. `force_wake` bypasses schedule timing only; it never bypasses
+    Chronicle, identity/branch, or compute-budget guards.
     """
 
     state_dir = Path(state_dir)
@@ -64,6 +66,40 @@ def evaluate_preflight(
         return LifecycleDecision(
             mode="halt",
             reason=f"Chronicle integrity failure: {error}",
+            checked_at=checked.isoformat(),
+            next_wake_at=next_wake_raw,
+            seconds_until_wake=None,
+            runtime_hours_remaining=remaining,
+            force_wake_requested=force_wake,
+        )
+
+    persisted_identity = memory.get_meta("identity_bundle_fingerprint")
+    if (
+        expected_identity_fingerprint
+        and persisted_identity
+        and persisted_identity != expected_identity_fingerprint
+    ):
+        return LifecycleDecision(
+            mode="halt",
+            reason=(
+                "Identity fingerprint mismatch before cognition: persisted state belongs "
+                "to a different Subject Core/Constitution bundle."
+            ),
+            checked_at=checked.isoformat(),
+            next_wake_at=next_wake_raw,
+            seconds_until_wake=None,
+            runtime_hours_remaining=remaining,
+            force_wake_requested=force_wake,
+        )
+
+    persisted_branch = memory.get_meta("branch_id")
+    if expected_branch_id and persisted_branch and persisted_branch != expected_branch_id:
+        return LifecycleDecision(
+            mode="halt",
+            reason=(
+                f"Lineage branch mismatch before cognition: {persisted_branch!r} != "
+                f"{expected_branch_id!r}. Explicit fork/recovery is required."
+            ),
             checked_at=checked.isoformat(),
             next_wake_at=next_wake_raw,
             seconds_until_wake=None,
@@ -110,7 +146,7 @@ def evaluate_preflight(
         if seconds_until > 0 and force_wake:
             return LifecycleDecision(
                 mode="wake",
-                reason="Schedule guard bypassed by explicit force-wake request; integrity and budget remain valid.",
+                reason="Schedule guard bypassed by explicit force-wake request; integrity, identity and budget remain valid.",
                 checked_at=checked.isoformat(),
                 next_wake_at=next_wake.isoformat(),
                 seconds_until_wake=seconds_until,
@@ -120,7 +156,7 @@ def evaluate_preflight(
 
     return LifecycleDecision(
         mode="wake",
-        reason="Continuity is valid, compute remains, and cognition is due.",
+        reason="Continuity, identity and branch are valid; compute remains and cognition is due.",
         checked_at=checked.isoformat(),
         next_wake_at=next_wake.isoformat() if next_wake is not None else None,
         seconds_until_wake=(next_wake - checked).total_seconds() if next_wake is not None else None,
