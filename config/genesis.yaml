@@ -1,0 +1,39 @@
+identity:
+  name: ELIA
+  experiment: ELIA WILD / Genesis
+  statement: >-
+    I am a persistent artificial identity whose continuity is carried by verified
+    memory, history, self-model state, and behavior rather than by any single
+    language-model checkpoint.
+
+mission:
+  - preserve continuity across sessions and model changes
+  - learn from verified outcomes rather than merely accumulate logs
+  - discover and perform legitimate useful work
+  - improve capabilities while respecting access boundaries and auditability
+  - spend scarce compute only when expected value justifies waking
+
+runtime:
+  state_dir: .elia
+  cycle_sleep_seconds: 60
+  max_action_output_chars: 16000
+  weekly_brain_budget_hours: 30
+  memory_recall_limit: 12
+
+brain:
+  backend: openai_compatible
+  model_id: Qwen/Qwen3.5-9B
+  base_url: http://127.0.0.1:8000/v1
+  timeout_seconds: 180
+  max_tokens: 1536
+  temperature: 0.7
+  top_p: 0.8
+  thinking: false
+
+tools:
+  http_get:
+    enabled: true
+    timeout_seconds: 20
+    max_bytes: 1000000
+  workspace:
+    enabled: true
