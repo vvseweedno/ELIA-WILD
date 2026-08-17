@@ -23,6 +23,12 @@ def seed_state(state_dir: Path, value: str = "alpha") -> None:
     memory.remember("lesson", value, importance=0.8, source="test")
     memory.set_meta("boot_count", "7")
     memory.set_meta("genesis_initialized", "1")
+    memory.create_goal(
+        "Preserve the test continuity goal",
+        "This goal must survive migration to a fresh machine.",
+        priority=0.9,
+        source="test",
+    )
     chronicle = Chronicle(state_dir / "chronicle.jsonl")
     chronicle.append("BOOT", {"identity": "ELIA"})
     chronicle.append("CYCLE", {"value": value})
@@ -52,6 +58,10 @@ def test_checkpoint_roundtrip_to_fresh_state(tmp_path: Path) -> None:
     assert memory.get_meta("boot_count") == "7"
     assert memory.get_meta("checkpoint_digest") == exported.digest
     assert memory.get_meta("restored_from_checkpoint") == exported.digest
+    goals = memory.active_goals()
+    assert len(goals) == 1
+    assert goals[0].title == "Preserve the test continuity goal"
+    assert goals[0].priority == 0.9
 
 
 def test_checkpoint_wrong_key_is_rejected(tmp_path: Path) -> None:
