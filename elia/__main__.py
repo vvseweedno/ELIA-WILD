@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import argparse
 import json
 import os
 from pathlib import Path
 
+from .autonomy import derive_needs
 from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
@@ -89,6 +91,23 @@ def main() -> None:
         limit = config.runtime.weekly_gpu_budget_hours
         runtime_hours = memory.runtime_seconds_this_week() / 3600.0
         brain_hours = memory.brain_seconds_this_week() / 3600.0
+        resources = {
+            "weekly_limit_hours": limit,
+            "runtime_hours_used": runtime_hours,
+            "brain_hours_used": brain_hours,
+            "runtime_hours_remaining": max(0.0, limit - runtime_hours),
+        }
+        active_goals = memory.active_goals(16)
+        chronicle_valid, chronicle_error = Chronicle(state_dir / "chronicle.jsonl").verify()
+        needs = [
+            need.as_dict()
+            for need in derive_needs(
+                memory,
+                chronicle_valid=chronicle_valid,
+                budget=resources,
+                active_goals=active_goals,
+            )
+        ]
         anchor_path = state_dir / "checkpoint.anchor.json"
         anchor = None
         if anchor_path.exists():
@@ -101,11 +120,15 @@ def main() -> None:
                 {
                     "identity": config.identity_name,
                     "boot_count": int(memory.get_meta("boot_count", "0") or "0"),
-                    "weekly_gpu_budget_hours": limit,
-                    "gpu_runtime_hours_used": runtime_hours,
-                    "gpu_runtime_hours_remaining": max(0.0, limit - runtime_hours),
-                    "brain_inference_hours_used": brain_hours,
+                    "chronicle": {"valid": chronicle_valid, "error": chronicle_error},
+                    "resources": resources,
                     "memory_records": len(memory.recent(1000000)),
+                    "active_goals": [asdict(goal) for goal in active_goals],
+                    "needs": needs,
+                    "scheduler": {
+                        "next_wake_at": memory.get_meta("next_wake_at"),
+                        "last_sleep_seconds": memory.get_meta("last_sleep_seconds"),
+                    },
                     "checkpoint_anchor": anchor,
                 },
                 ensure_ascii=False,
