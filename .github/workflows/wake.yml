@@ -23,6 +23,7 @@ jobs:
       ELIA_KAGGLE_STATE_DATASET: ${{ vars.ELIA_KAGGLE_STATE_DATASET }}
       ELIA_KAGGLE_KERNEL: ${{ vars.ELIA_KAGGLE_KERNEL }}
       ELIA_KAGGLE_ACCELERATOR: ${{ vars.ELIA_KAGGLE_ACCELERATOR }}
+      ELIA_KAGGLE_KERNEL_TIMEOUT: ${{ vars.ELIA_KAGGLE_KERNEL_TIMEOUT }}
       ELIA_WAKE_MAX_CYCLES: ${{ vars.ELIA_WAKE_MAX_CYCLES }}
       ELIA_REPO_REF: ${{ github.sha }}
     steps:
@@ -36,7 +37,7 @@ jobs:
           cache: pip
 
       - name: Install wake transport
-        run: python -m pip install -e . kaggle
+        run: python -m pip install -e . 'kaggle>=2.2.4,<3'
 
       - name: Heartbeat
         run: python scripts/kaggle_wake.py
