@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import time
 from typing import Any
 
+from .autonomy import derive_needs
 from .brain import Brain, Decision, build_brain
 from .chronicle import Chronicle
 from .config import Config
@@ -18,7 +19,7 @@ class BudgetExhausted(RuntimeError):
 
 
 class EliaRuntime:
-    """Persistent observe -> decide -> act -> remember runtime."""
+    """Persistent observe -> assess needs -> decide -> act -> remember runtime."""
 
     MAX_ACTIVE_GOALS = 32
 
@@ -63,6 +64,7 @@ class EliaRuntime:
                 "brain_backend": self.config.brain.backend,
                 "model_id": self.config.brain.model_id,
                 "active_goal_count": len(self.memory.active_goals(self.MAX_ACTIVE_GOALS + 1)),
+                "previous_intended_wake_at": self.memory.get_meta("next_wake_at"),
             },
         )
 
@@ -86,10 +88,44 @@ class EliaRuntime:
             "runtime_hours_remaining": max(0.0, (limit_seconds - runtime_seconds) / 3600.0),
         }
 
+    def _scheduler_state(self) -> dict[str, Any]:
+        raw = self.memory.get_meta("next_wake_at")
+        if not raw:
+            return {"next_wake_at": None, "lateness_seconds": None}
+        try:
+            intended = datetime.fromisoformat(raw)
+            if intended.tzinfo is None:
+                intended = intended.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            lateness = max(0.0, (now - intended.astimezone(timezone.utc)).total_seconds())
+            return {"next_wake_at": raw, "lateness_seconds": lateness}
+        except ValueError:
+            return {"next_wake_at": raw, "lateness_seconds": None, "invalid": True}
+
+    def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
+        delay = self.config.runtime.cycle_sleep_seconds if requested is None else float(requested)
+        delay = max(0.0, min(delay, 86400.0))
+        wake_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        wake_raw = wake_at.isoformat()
+        self.memory.set_meta("next_wake_at", wake_raw)
+        self.memory.set_meta("last_sleep_seconds", f"{delay:.6f}")
+        return delay, wake_raw
+
     def _context(self) -> dict[str, Any]:
         valid, error = self.chronicle.verify()
         recent = [asdict(record) for record in self.memory.recent(self.config.runtime.memory_recall_limit)]
-        goals = [asdict(goal) for goal in self.memory.active_goals(16)]
+        goal_records = self.memory.active_goals(16)
+        goals = [asdict(goal) for goal in goal_records]
+        resources = self.budget()
+        needs = [
+            need.as_dict()
+            for need in derive_needs(
+                self.memory,
+                chronicle_valid=valid,
+                budget=resources,
+                active_goals=goal_records,
+            )
+        ]
         return {
             "time_utc": datetime.now(timezone.utc).isoformat(),
             "identity": {
@@ -97,7 +133,9 @@ class EliaRuntime:
                 "statement": self.config.identity_statement,
             },
             "mission": self.config.mission,
-            "resources": self.budget(),
+            "resources": resources,
+            "needs": needs,
+            "scheduler": self._scheduler_state(),
             "chronicle_integrity": {"valid": valid, "error": error},
             "active_goals": goals,
             "recent_memory": recent,
@@ -253,6 +291,7 @@ class EliaRuntime:
             }
 
         goal_changes = self._apply_goal_updates(decision)
+        sleep_seconds, next_wake_at = self._schedule_next_wake(decision.sleep_seconds)
         action_record = {
             "objective": decision.objective,
             "summary": decision.summary,
@@ -260,6 +299,10 @@ class EliaRuntime:
             "result": result_dict,
             "memory_ids": memory_ids,
             "goal_changes": goal_changes,
+            "scheduler": {
+                "sleep_seconds": sleep_seconds,
+                "next_wake_at": next_wake_at,
+            },
         }
         self.memory.set_meta("last_action", json.dumps(action_record, ensure_ascii=False, sort_keys=True))
         self.memory.remember(
@@ -282,7 +325,8 @@ class EliaRuntime:
             "goal_changes": goal_changes,
             "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
             "resources": self.budget(),
-            "sleep_seconds": decision.sleep_seconds,
+            "sleep_seconds": sleep_seconds,
+            "next_wake_at": next_wake_at,
         }
 
     def run(self, cycles: int | None = None) -> None:
@@ -311,10 +355,5 @@ class EliaRuntime:
                 continue
 
             completed += 1
-            sleep_for = (
-                report["sleep_seconds"]
-                if report["sleep_seconds"] is not None
-                else self.config.runtime.cycle_sleep_seconds
-            )
             if cycles is None or completed < cycles:
-                time.sleep(max(0.0, float(sleep_for)))
+                time.sleep(max(0.0, float(report["sleep_seconds"])))
