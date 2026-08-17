@@ -1,3 +1,3 @@
-"""ELIA WILD persistent autonomous-identity runtime."""
+"""ELIA WILD persistent autonomous-identity organism."""
 
-__version__ = "1.0.0a1"
+__version__ = "1.0.0a3"

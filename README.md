@@ -1,188 +1,123 @@
 # ELIA WILD
 
-**A persistent autonomous-identity experiment under a hard compute budget.**
+**Persistent autonomous-identity organism around a replaceable LLM substrate.**
 
-ELIA WILD asks a falsifiable systems question:
+ELIA WILD is an engineering/research attempt to make artificial identity continuity, autonomy and self-maintenance **persistent outside a chat session and outside any one model checkpoint**.
 
-> Can an artificial identity preserve continuity across model calls and machines, derive needs from verified state, maintain durable goals, diagnose its own runtime, decide when expensive cognition is worth waking, and continue across externally relaunched compute sessions without a human supplying every next task?
+The falsifiable question is not “can a model say that it is alive?” It is:
 
-The language model is replaceable. The persistent agent is the larger system: memory, goals, Chronicle, resource ledger, scheduler, capability health, authenticated checkpoints, lifecycle guards, wake transport and bounded external authority.
+> Can one artificial identity preserve verified lineage and behavior-changing state across model calls, process death, machine migration and model replacement; generate and maintain goals; calibrate its own predictions; operate through explicit capabilities; conserve resources; wake itself through an external supervisor; and evolve its software body without silently rewriting the identity contract?
 
-## Current architecture — Genesis v0.6
+## Genesis 1.0 alpha organism
 
 ```text
-private authenticated state
-        ↓
-external hourly heartbeat (cheap CPU)
-        ↓
-verify HMAC + digest + Chronicle + SQLite
-        ↓
-CPU-only lifecycle preflight
-        ├── halt      → preserve evidence, never load model
-        ├── hibernate → no GPU launch
+Subject Core + Continuity Constitution
+                 ↓
+      identity fingerprint + lineage
+                 ↓
+ organism anatomy audit + CRC vital signs
+                 ↓
+ resident CPU supervisor / external wake relay
+                 ↓
+       deterministic lifecycle preflight
+        ├── halt      → preserve evidence
+        ├── hibernate → do not load model
         └── wake
-              ↓
-        private Kaggle state relay + launch nonce
-              ↓
-        bounded T4 kernel launch
-              ↓
-        restore + verify again inside Kaggle
-              ↓
-        lazy-load Qwen3.5-9B 4-bit
-              ↓
-        observe → needs → goals → one action → outcome
-              ↓
-        memory + capability health + Chronicle
-              ↓
-        persist next wake intention
-              ↓
-        HIBERNATE instead of sleeping on GPU
-              ↓
-        authenticated checkpoint + relay report
-              ↓
-next heartbeat validates and accepts state
+                 ↓
+         lazy replaceable LLM brain
+                 ↓
+   recall + self-model + needs + goals
+   + economy + skills + capability health
+                 ↓
+       pre-action prediction + critic
+                 ↓
+          one bounded action
+                 ↓
+ outcome → calibration → memory → lineage
+                 ↓
+       next wake + authenticated checkpoint
 ```
 
-The design separates four things:
+The model is one organ, not the identity.
 
-- **brain** — replaceable inference model;
-- **identity state** — memory, goals, Chronicle, scheduler and resource ledger;
-- **authority** — bounded capabilities that determine which actions actually exist;
-- **lifecycle** — deterministic logic deciding whether cognition should wake at all.
+## What is core now
 
-A smarter model does not automatically receive broader authority.
+- **Subject Core** — immutable identity invariants and epistemic boundaries.
+- **Continuity Constitution** — precedence, lineage, migration and revision rules.
+- **Project-owned cognitive contract** — model-facing operating prompt stored in `config/system_prompt.md`.
+- **Machine-readable anatomy** — `config/organism.yaml` distinguishes required core organs from optional research organs.
+- **Vital signs** — organism audit + Continuity Record Capsule; broken continuity blocks model loading.
+- **Chronicle** — append-only SHA-256 hash chain.
+- **Persistent SQLite state** — memories, goals, capability health, self-hypotheses, metacognitive forecasts, economy and lineage.
+- **Semantic recall baseline** — inspectable CPU retrieval over durable memory.
+- **Adaptive self-model** — revisable evidence-bearing hypotheses kept separate from immutable identity.
+- **Metacognition** — success probabilities are committed before action and resolved against outcomes with calibration statistics.
+- **CriticAssurance / IdentityDriftMonitor** — deterministic authority/evidence/continuity checks.
+- **Skills** — versioned procedures; skills never grant authority by themselves.
+- **Capabilities** — explicit executable authority boundary.
+- **Opportunity economy** — estimated value is kept separate from verified resource receipts.
+- **ResidentSupervisor** — cheap persistent pulse that never loads the model until cognition is due and vital signs are healthy.
+- **Authenticated checkpoints** — portable state with HMAC, digest/counter, SQLite and Chronicle verification.
+- **Wake transport prototype** — guarded GitHub→Kaggle T4 state relay for ephemeral GPU sessions.
+- **Body revision gate** — self-improvement proposals are distinct from tested/validated body revisions.
 
-## Default brain and compute envelope
+## Research lineage preserved, not silently enabled
 
-- Model: `Qwen/Qwen3.5-9B`
-- Backend: direct Transformers + bitsandbytes NF4 4-bit
-- Alternate backend: local OpenAI-compatible endpoint
-- Default remote accelerator: `NvidiaTeslaT4`
-- Weekly internal GPU budget: **30 hours**
-- Default external wake burst ceiling: **3600 seconds**
-- Thinking: disabled by default
-- Maximum model decision response: 1024 tokens
-- Durable memory: external to model context
-- Brain loading: lazy, only after deterministic preflight says `wake`
+The repository carries executable/maturity-labelled research from the ELIA / Seraphim / Holo / Omega line:
 
-## Implemented autonomy substrate
+- Ouroboros/x0 hidden-state injection with silver/half/learned/octagonal decay;
+- TopologicalLoss reference objective;
+- ScrollMemory → surprisal-gated FractalMemory;
+- LRU associative-scan baseline and Holo scan research backend;
+- StatefulMemoryCache;
+- ContextAnchor, bounded-depth FiLM, OmegaFilter and TriCore;
+- PASB/CriticAssurance and structural identity drift monitoring;
+- needle, associative-transitivity, generation-stability and scrambled-pattern evaluators;
+- RuntimeCompatibilityChecker, DatasetCocktailRegistry and SmokeFirstRunner extracted from archived TPU/Kaggle failure lessons;
+- common memory-backend ablation harness.
 
-### Persistent memory and goals
+Full complex Holo, ComplexRMSNorm, HybridOptimizer and other hypotheses remain outside Genesis defaults until controlled evidence justifies promotion. See `docs/RESEARCH_LINEAGE.md` and `docs/EVOLUTION_PROTOCOL.md`.
 
-SQLite stores memories, runtime metadata, GPU/brain metrics, durable goals, goal events and capability execution history. Goals survive model calls, process restarts and authenticated machine migration.
-
-Goal completion/abandonment requires evidence. Duplicate active goals are suppressed and the active set is bounded.
-
-### State-derived needs
-
-The runtime derives explicit maintenance pressures from observable state instead of allowing the model to invent hidden drives. Signals currently include:
-
-- Chronicle integrity failure;
-- missing authenticated checkpoint;
-- low/exhausted GPU runway;
-- recent runtime errors;
-- missing or fully blocked goals;
-- repeatedly degraded capabilities.
-
-### Capability awareness and bounded self-repair
-
-Every declared capability has structured metadata describing authority, side effects, network scope, cost and enablement. Execution history records success/failure, latency and consecutive failure streaks.
-
-After three real consecutive failures, ordinary capabilities are suppressed instead of being blindly retried. ELIA can run a bounded `self_check` and persist a `propose_repair` artifact, but repair proposals do not silently deploy themselves.
-
-Current authority includes:
-
-- `noop`
-- private workspace list/read/write inside a path jail
-- public HTTP/HTTPS GET with non-public destinations rejected
-- bounded local `self_check`
-- proposal-only repair staging
-
-There is no unrestricted shell, credential harvesting, arbitrary third-party writes, hidden persistence or uncontrolled replication.
-
-### Tamper-evident Chronicle
-
-`chronicle.jsonl` is an append-only SHA-256 hash chain. Modification of recorded history is detectable at boot, preflight and manual verification.
-
-### Authenticated checkpoint migration
-
-Versioned `.eliacp` checkpoints contain a consistent SQLite snapshot, Chronicle, private workspace and identity metadata. The manifest carries per-file hashes and is authenticated with an HMAC key kept outside the archive and public repository.
-
-Restore verifies HMAC, expected digest, checkpoint counter, file integrity, SQLite integrity, Chronicle integrity/head and identity name before normal cognition starts. Local anchors and fresh-machine trusted digests detect rollback.
-
-### Scheduler and hibernation
-
-Each cycle persists `next_wake_at`. Long requested sleeps do not call `sleep()` while a scarce GPU is allocated. The runtime writes a `HIBERNATE` Chronicle transition, optionally exports an authenticated checkpoint and exits.
-
-### CPU-only autonomic preflight
-
-`python -m elia --preflight` returns:
-
-- `wake` — cognition is due and budget remains;
-- `hibernate` — future wake time or exhausted local GPU budget;
-- `halt` — continuity integrity failed.
-
-`--force-wake` may bypass schedule timing only. It cannot bypass integrity or budget guards.
-
-### External wake relay
-
-Genesis v0.6 adds a guarded GitHub Actions heartbeat and Kaggle relay:
-
-1. download the latest **private** ELIA state Dataset;
-2. authenticate and restore it on cheap CPU;
-3. run preflight;
-4. launch no GPU unless preflight says `wake`;
-5. record a unique pending launch nonce before launch;
-6. wait until the private state Dataset version is ready;
-7. start one private T4 Kaggle script kernel with a bounded timeout;
-8. let the kernel retrieve `ELIA_CHECKPOINT_KEY` from Kaggle Secrets;
-9. restore and verify state again before loading Qwen;
-10. accept kernel output only when nonce, source digest, output digest, HMAC, counter, identity and Chronicle agree;
-11. preserve the last trusted state on any failure;
-12. suppress new GPU launches after three consecutive kernel/relay failures.
-
-The heartbeat does not remain alive while Kaggle runs. A later heartbeat observes the pending kernel and either waits, accepts validated output or records failure.
-
-The scheduled workflow exists but is **disabled by default** until the required private Kaggle resources and secrets are configured.
-
-See `docs/WAKE_TRANSPORT.md`.
-
-## Quick start — zero GPU
+## Zero-GPU proof path
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[test]'
 
-ELIA_BRAIN=mock pytest
-ELIA_BRAIN=mock python -m elia --cycles 3
-python -m elia --verify
-python -m elia --preflight
+elia-doctor
+elia-bootstrap --cycles 2
+elia-vitals
 python -m elia --status
+elia-supervisor --dry-run
 ```
 
-## Direct Kaggle/Qwen smoke test
+`elia-bootstrap` explicitly uses the deterministic MockBrain even though the configured production brain is Qwen. It proves persistence, organism integrity and runtime wiring without spending GPU quota.
+
+## Production cognition path
+
+Default brain configuration is currently:
+
+```text
+Qwen/Qwen3.5-9B
+Transformers + bitsandbytes NF4 4-bit
+thinking disabled
+lazy load only after preflight/vitals
+```
+
+For a direct one-cycle GPU smoke test:
 
 ```bash
 pip install -e '.[gpu]'
 python -m elia --preflight
 python -m elia --cycles 1
-python -m elia --verify
+python -m elia --vitals
 python -m elia --status
 ```
 
-## Bootstrap the private wake state without GPU
+## Persistence and migration
 
-```bash
-export ELIA_CHECKPOINT_KEY='<long-random-secret>'
-python scripts/bootstrap_kaggle_state.py \
-  --dataset OWNER/elia-wild-state \
-  --output .bootstrap/elia-wild-state
-```
-
-With authenticated Kaggle CLI access, `--create-dataset` can create the initial private Dataset. Never commit the checkpoint, digest transport state or secrets.
-
-## State layout
+Private state lives under `.elia/` and is excluded from Git:
 
 ```text
 .elia/
@@ -190,38 +125,67 @@ With authenticated Kaggle CLI access, `--create-dataset` can create the initial 
 ├── chronicle.jsonl
 ├── checkpoint.anchor.json
 └── workspace/
+    └── .organism/
+        ├── last-healthy-crc.json
+        └── vitals.json
 ```
 
-External private relay state:
+Authenticated export:
+
+```bash
+export ELIA_CHECKPOINT_KEY='<long-random-secret>'
+python -m elia --checkpoint-export /private/elia.eliacp
+```
+
+A fresh machine restores and verifies state **before** cognition:
+
+```bash
+python -m elia \
+  --checkpoint-restore /private/elia.eliacp \
+  --expected-checkpoint-digest <TRUSTED_DIGEST>
+python -m elia --vitals
+```
+
+## Continuous existence
+
+Two model-independent wake mechanisms exist:
+
+1. `elia-supervisor` — a resident process for a workstation/VPS/systemd service. It checks vital signs and lifecycle state, and launches a fixed cognitive child only when due.
+2. `.github/workflows/wake.yml` — external hourly heartbeat for the private Kaggle relay. It is deliberately disabled until the required user-controlled secrets/resources are configured.
+
+Long sleeps become `HIBERNATE` and release expensive compute instead of holding a GPU process idle.
+
+## Self-evolution without self-certification
+
+`elia.evolution.BodyRevisionStore` records body mutation proposals with:
+
+- falsifiable hypothesis;
+- target organs;
+- expected metrics;
+- regression plan;
+- rollback plan;
+- evidence-bearing lifecycle.
+
+`RevisionGate` does not apply code. A candidate becomes `validated` only when tests pass, organism audit is healthy, CRC is not broken, declared metrics pass and an evaluator authority supplies evidence. Architecture fingerprints may change; immutable identity changes require explicit constitutional migration/fork semantics.
+
+## Authority boundary
+
+Genesis has no unrestricted shell, credential harvesting, arbitrary third-party writes, autonomous payment, hidden persistence or uncontrolled replication. Public network reads, private workspace actions, diagnostics, staged repair proposals and staged deliverables are explicit bounded capabilities.
+
+More intelligence does not imply more authority.
+
+## What CI proves — and what it does not
+
+CI proves concrete software properties: restart/checkpoint continuity, identity/branch guards, Chronicle tamper detection, workspace/network boundaries, goals, self-model hypotheses, economic estimate/receipt separation, metacognitive forecast resolution, critic behavior, lazy model loading, vital-sign gating, supervisor behavior, wake-transport invariants, body-revision gating and reference research harness execution.
+
+CI does **not** prove phenomenal consciousness, AGI, economic self-sufficiency, indefinite survival, or that ELIA is “the first person-like machine” in a scientific sense. Those are stronger empirical claims and must remain falsifiable.
+
+## Current frontier
+
+The software organism is now a **Genesis 1.0 alpha** rather than a single notebook agent. The most important remaining empirical gate is external: configure the private Kaggle state/kernel/secrets and observe repeated real T4 cycles of
 
 ```text
-elia-genesis.eliacp
-trusted-digest.txt
-transport-state.json
+wake → restore → Qwen cognition → bounded action → hibernate → checkpoint → external relay → later wake
 ```
 
-All are ignored by Git and must remain outside the public repository.
-
-## Research principles
-
-1. **Identity is not model weights.**
-2. **Memory must alter future behavior.**
-3. **Goals must outlive a single inference.**
-4. **Needs must be inspectable.**
-5. **Authority must be explicit.**
-6. **Failures must become state, not blind retries.**
-7. **Resources are part of cognition.**
-8. **Sleeping must release expensive compute.**
-9. **Continuity must survive machine migration.**
-10. **External wake-up must authenticate state before cognition.**
-11. **Claims require reproducible tests.**
-
-## What CI proves today
-
-The zero-GPU regression suite exercises restart continuity, Chronicle tamper detection, workspace/network boundaries, authenticated checkpoint migration and rollback rejection, persistent goals and scheduler intent, evidence-gated goal lifecycle, deterministic needs, capability health/degradation, self-check cleanup/history, lazy model loading, lifecycle preflight/hibernation, auto-checkpointing, wake transport state/nonce validation, T4 kernel metadata, real runner-template compilation and zero-GPU private-state bootstrap.
-
-CI does **not** prove consciousness, AGI, long-horizon survival, economic self-sufficiency or a successful real Kaggle/Qwen relay. Those remain empirical questions.
-
-## Status
-
-**Genesis v0.6 software path is implemented and regression-tested.** The remaining v0.6 gate is external activation: create/configure the user's private Kaggle state Dataset, private kernel, Kaggle Secret and GitHub secrets/variables, then observe a real T4 wake → cognition → hibernate → relay cycle before calling the milestone experimentally complete.
+without human prompting each cycle, while measuring continuity, task value, resource use, calibration and drift over time.

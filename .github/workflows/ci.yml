@@ -31,8 +31,17 @@ jobs:
           name: pytest-report
           path: pytest-report.xml
           if-no-files-found: ignore
-      - name: Smoke runtime
+      - name: Zero-GPU bootstrap and doctor
         run: |
-          ELIA_BRAIN=mock python -m elia --cycles 3
-          python -m elia --verify
-          python -m elia --status
+          ELIA_STATE_DIR=.elia-bootstrap elia-bootstrap --cycles 2
+          ELIA_STATE_DIR=.elia-doctor elia-doctor
+      - name: Smoke runtime + vital signs + resident supervisor
+        run: |
+          ELIA_STATE_DIR=.elia-smoke ELIA_BRAIN=mock python -m elia --cycles 3
+          ELIA_STATE_DIR=.elia-smoke python -m elia --verify
+          ELIA_STATE_DIR=.elia-smoke python -m elia --vitals
+          ELIA_STATE_DIR=.elia-smoke python -m elia --status
+          ELIA_STATE_DIR=.elia-smoke elia-supervisor --dry-run
+      - name: Reference research smoke
+        run: |
+          python -c "from elia.research.bench import run_reference_cognitive_stress as r; x=r(); assert x['needle']==1.0 and x['scrambled_pattern']==1.0 and all(i['finite'] for i in x['memory_backends'])"
