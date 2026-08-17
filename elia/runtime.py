@@ -33,10 +33,27 @@ class EliaRuntime:
         self.memory = MemoryStore(state_dir / "memory.sqlite3")
         self.chronicle = Chronicle(state_dir / "chronicle.jsonl")
         self.tools = ToolRegistry(state_dir / "workspace", config.raw_tools)
-        self.brain = brain or build_brain(config.brain)
+        self._brain: Brain | None = brain
 
         self._last_runtime_accounting = time.monotonic()
         self._boot()
+
+    @property
+    def brain_loaded(self) -> bool:
+        return self._brain is not None
+
+    def _get_brain(self) -> Brain:
+        if self._brain is None:
+            self._brain = build_brain(self.config.brain)
+            self.memory.set_meta("last_brain_loaded_at", datetime.now(timezone.utc).isoformat())
+            self.chronicle.append(
+                "BRAIN_LOAD",
+                {
+                    "backend": self.config.brain.backend,
+                    "model_id": self.config.brain.model_id,
+                },
+            )
+        return self._brain
 
     def _boot(self) -> None:
         valid, error = self.chronicle.verify()
@@ -45,6 +62,7 @@ class EliaRuntime:
 
         boot_count = int(self.memory.get_meta("boot_count", "0") or "0") + 1
         self.memory.set_meta("boot_count", str(boot_count))
+        self.memory.set_meta("lifecycle_state", "awake")
 
         first_boot = self.memory.get_meta("genesis_initialized") != "1"
         if first_boot:
@@ -65,6 +83,7 @@ class EliaRuntime:
                 "identity": self.config.identity_name,
                 "brain_backend": self.config.brain.backend,
                 "model_id": self.config.brain.model_id,
+                "brain_loaded": self.brain_loaded,
                 "active_goal_count": len(self.memory.active_goals(self.MAX_ACTIVE_GOALS + 1)),
                 "previous_intended_wake_at": self.memory.get_meta("next_wake_at"),
                 "declared_capabilities": sorted(self.tools.catalog()),
@@ -170,9 +189,10 @@ class EliaRuntime:
 
     def _think(self, context: dict[str, Any]) -> Decision:
         self._check_budget()
+        brain = self._get_brain()
         started = time.monotonic()
         try:
-            return self.brain.decide(context)
+            return brain.decide(context)
         finally:
             elapsed = time.monotonic() - started
             self.memory.add_brain_seconds(elapsed)
@@ -378,16 +398,36 @@ class EliaRuntime:
             "next_wake_at": next_wake_at,
         }
 
-    def run(self, cycles: int | None = None) -> None:
+    def _hibernate(self, report: dict[str, Any], reason: str) -> dict[str, Any]:
+        self._account_runtime()
+        payload = {
+            "reason": reason,
+            "next_wake_at": report.get("next_wake_at"),
+            "requested_sleep_seconds": report.get("sleep_seconds"),
+            "resources": self.budget(),
+        }
+        self.memory.set_meta("lifecycle_state", "hibernating")
+        self.memory.set_meta("last_hibernated_at", datetime.now(timezone.utc).isoformat())
+        self.chronicle.append("HIBERNATE", payload)
+        return {"state": "hibernating", **payload}
+
+    def run(self, cycles: int | None = None) -> dict[str, Any]:
         completed = 0
+        last_report: dict[str, Any] | None = None
         while cycles is None or completed < cycles:
             try:
                 report = self.cycle()
+                last_report = report
             except BudgetExhausted:
-                return
+                synthetic = {
+                    "next_wake_at": self.memory.get_meta("next_wake_at"),
+                    "sleep_seconds": None,
+                }
+                return self._hibernate(synthetic, "weekly GPU budget exhausted")
             except KeyboardInterrupt:
+                self.memory.set_meta("lifecycle_state", "stopped")
                 self.chronicle.append("SHUTDOWN", {"reason": "keyboard_interrupt"})
-                return
+                return {"state": "stopped", "reason": "keyboard_interrupt"}
             except Exception as exc:
                 error = {"type": type(exc).__name__, "message": str(exc)[:4000]}
                 self.memory.remember(
@@ -400,9 +440,29 @@ class EliaRuntime:
                 if cycles is not None:
                     raise
                 sleep_for = min(max(self.config.runtime.cycle_sleep_seconds, 1.0), 300.0)
+                if sleep_for > self.config.runtime.max_in_session_sleep_seconds:
+                    synthetic = {
+                        "next_wake_at": self.memory.get_meta("next_wake_at"),
+                        "sleep_seconds": sleep_for,
+                    }
+                    return self._hibernate(synthetic, "runtime error backoff exceeds in-session sleep budget")
                 time.sleep(sleep_for)
                 continue
 
             completed += 1
             if cycles is None or completed < cycles:
-                time.sleep(max(0.0, float(report["sleep_seconds"])))
+                sleep_for = max(0.0, float(report["sleep_seconds"]))
+                if sleep_for > self.config.runtime.max_in_session_sleep_seconds:
+                    return self._hibernate(
+                        report,
+                        "requested sleep exceeds in-session threshold; release scarce GPU session",
+                    )
+                time.sleep(sleep_for)
+
+        self.memory.set_meta("lifecycle_state", "paused")
+        return {
+            "state": "paused",
+            "reason": "requested finite cycle count completed",
+            "cycles_completed": completed,
+            "last_report": last_report,
+        }
