@@ -31,8 +31,11 @@ class AssuranceReport:
 class CriticAssurance:
     """Deterministic pre-action assurance gate inspired by the PASB line.
 
-    It intentionally evaluates structural state/evidence/authority relations rather
-    than hidden model reasoning or lexical similarity to a persona.
+    It evaluates structural state/evidence/authority relations rather than hidden
+    reasoning or lexical similarity. Hard rejection is reserved for violations that
+    must prevent external action. Recoverable state-update/capability failures are
+    surfaced as warnings so their specialized deterministic validators can return the
+    exact failure evidence instead of being masked by the critic.
     """
 
     TERMINAL_GOAL = {"completed", "abandoned"}
@@ -46,9 +49,7 @@ class CriticAssurance:
         selected_skill = getattr(decision, "skill_name", None)
 
         if not objective:
-            findings.append(
-                AssuranceFinding("A001", "error", "decision objective is empty")
-            )
+            findings.append(AssuranceFinding("A001", "error", "decision objective is empty"))
 
         capabilities = (context.get("capabilities") or {}).get("catalog") or {}
         health = (context.get("capabilities") or {}).get("health") or {}
@@ -74,8 +75,8 @@ class CriticAssurance:
             findings.append(
                 AssuranceFinding(
                     "A004",
-                    "error",
-                    f"capability {action_name} is degraded and blind retry is not assured",
+                    "warning",
+                    f"capability {action_name} is degraded; execution layer will suppress blind retry and preserve exact failure evidence",
                 )
             )
 
@@ -108,8 +109,8 @@ class CriticAssurance:
                 findings.append(
                     AssuranceFinding(
                         "A007",
-                        "error",
-                        f"terminal goal transition {status} has no evidence",
+                        "warning",
+                        f"terminal goal transition {status} has no evidence; goal validator will reject that update",
                     )
                 )
 
@@ -121,8 +122,8 @@ class CriticAssurance:
                 findings.append(
                     AssuranceFinding(
                         "A008",
-                        "error",
-                        f"terminal opportunity transition {status} has no evidence",
+                        "warning",
+                        f"terminal opportunity transition {status} has no evidence; opportunity validator will reject that update",
                     )
                 )
 
@@ -140,7 +141,7 @@ class CriticAssurance:
             )
 
         if any(
-            str(item.get("name", "")) == "continuity_integrity"
+            str(item.get("name", "")) in {"continuity_integrity", "identity_drift"}
             and float(item.get("severity", 0) or 0) >= 1.0
             for item in context.get("needs", [])
             if isinstance(item, dict)
@@ -149,7 +150,7 @@ class CriticAssurance:
                 AssuranceFinding(
                     "A010",
                     "error",
-                    "continuity integrity need is critical; optional external action is not assured",
+                    "continuity/identity integrity need is critical; optional external action is not assured",
                 )
             )
 
@@ -192,8 +193,8 @@ class DriftReport:
 class IdentityDriftMonitor:
     """Structural identity drift monitor.
 
-    Model/backend changes are treated as substrate changes, not identity failures.
-    Core fingerprint/commitment loss and unresolved lineage changes carry high weight.
+    Model/backend changes are substrate changes, not identity failures. Core
+    fingerprint/commitment loss and unresolved lineage changes carry high weight.
     """
 
     def __init__(self, bundle: IdentityBundle):
