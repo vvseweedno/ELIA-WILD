@@ -42,6 +42,11 @@ jobs:
           /tmp/elia-wheel-venv/bin/python -c "import elia; print(elia.__version__)"
           /tmp/elia-wheel-venv/bin/elia-wild --preflight
           /tmp/elia-wheel-venv/bin/elia-doctor
+          /tmp/elia-wheel-venv/bin/elia-bootstrap --cycles 1
+          /tmp/elia-wheel-venv/bin/elia-vitals
+          /tmp/elia-wheel-venv/bin/elia-supervisor --dry-run
+          /tmp/elia-wheel-venv/bin/elia-fork --help
+          /tmp/elia-wheel-venv/bin/elia-mcp --help
       - name: Known-vulnerability audit
         run: python -m pip_audit
       - name: Test
@@ -97,6 +102,7 @@ jobs:
             tests/test_jsonrpc_body_v1.py \
             tests/test_mcp_body_v1.py \
             tests/test_mcp_server_v1.py \
+            tests/test_mcp_resource_path_v1.py \
             tests/test_browser_body_v1.py \
             tests/test_sensorium_v1.py \
             tests/test_world_model_v1.py \
