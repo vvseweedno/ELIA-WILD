@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from .brain import Decision
@@ -29,7 +30,9 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        policy = executive_policy or ExecutivePolicy()
+        configured = asdict(self.config.executive)
+        self.executive_enabled = bool(configured.pop("enabled", True))
+        policy = executive_policy or ExecutivePolicy(**configured)
         self.executive = ExecutiveController(policy)
         self.cognitive_energy = CognitiveEnergyController(policy)
         self.executive_store = ExecutiveStore(self.config.runtime.state_dir / "memory.sqlite3")
@@ -39,6 +42,14 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
 
     def _context(self) -> dict[str, Any]:
         context = super()._context()
+        if not self.executive_enabled:
+            context["executive"] = {"enabled": False}
+            context["executive_energy"] = self.cognitive_energy.summarize(
+                self.executive_store.recent(self.EXECUTIVE_HISTORY_LIMIT)
+            ).as_dict()
+            context["_system_prompt"] = self.prompt_template.render(context)
+            return context
+
         history = self.executive_store.recent(self.EXECUTIVE_HISTORY_LIMIT)
         energy = self.cognitive_energy.summarize(history)
         plan = self.cognitive_energy.constrain(self.executive.plan(context), energy)
@@ -74,6 +85,8 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
         )
 
     def _think(self, context: dict[str, Any]) -> Decision:
+        if not self.executive_enabled:
+            return super()._think(context)
         plan = self._current_executive_plan or self.executive.plan(context)
         if not plan.cognitive_budget.wake_brain:
             return self._no_brain_decision(plan)
@@ -114,6 +127,15 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
                 )
             raise
 
+        if not self.executive_enabled:
+            report["executive"] = {
+                "enabled": False,
+                "energy_feedback": self.cognitive_energy.summarize(
+                    self.executive_store.recent(self.EXECUTIVE_HISTORY_LIMIT)
+                ).as_dict(),
+            }
+            return report
+
         plan = self._current_executive_plan
         energy = self._current_executive_energy
         row_id = self._current_executive_row_id
@@ -136,6 +158,7 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
         if plan is not None:
             report["executive"] = {
                 **plan.as_dict(),
+                "enabled": True,
                 "record_id": row_id,
                 "brain_seconds_used": brain_seconds_used,
                 "energy_feedback": energy.as_dict() if energy is not None else None,
