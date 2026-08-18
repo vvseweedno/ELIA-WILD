@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import json
 import math
 from pathlib import Path
 import sqlite3
 from typing import Any
 from urllib.parse import urlparse
+
+from .verification import VerificationReceipt, VerificationRegistry
 
 
 @dataclass(slots=True)
@@ -60,9 +63,10 @@ class Opportunity:
 class EconomyStore:
     """Audited resource and opportunity state sharing ELIA's SQLite database.
 
-    The language model may propose opportunities through the runtime, but it has no
-    path to `record_resource_event`. Verified balances therefore require a trusted
-    runtime/adapter call with an explicit verification authority and evidence.
+    Model-created opportunities are estimates only. A verified resource mutation is
+    accepted only when a cryptographic VerificationReceipt authenticates the exact
+    normalized claim and evidence against a registry supplied by trusted runtime code.
+    A caller-provided authority string is never sufficient to mint verified balance.
     """
 
     OPPORTUNITY_STATUSES = {
@@ -76,15 +80,21 @@ class EconomyStore:
     }
     TERMINAL_STATUSES = {"won", "lost", "expired", "abandoned"}
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        verification_registry: VerificationRegistry | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.verification_registry = verification_registry
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -101,7 +111,8 @@ class EconomyStore:
                     verified INTEGER NOT NULL DEFAULT 0,
                     source TEXT NOT NULL,
                     evidence TEXT NOT NULL DEFAULT '',
-                    verification_authority TEXT NULL
+                    verification_authority TEXT NULL,
+                    verification_receipt_json TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_resource_events_asset_unit
                     ON resource_events(asset, unit, id ASC);
@@ -143,6 +154,14 @@ class EconomyStore:
                     ON opportunity_events(opportunity_id, id ASC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(resource_events)").fetchall()
+            }
+            if "verification_receipt_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE resource_events ADD COLUMN verification_receipt_json TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def now() -> str:
@@ -181,6 +200,19 @@ class EconomyStore:
             raise ValueError("source_url must not contain credentials")
         return url
 
+    @staticmethod
+    def resource_claim(
+        *, asset: str, unit: str, amount: float, kind: str, source: str
+    ) -> dict[str, Any]:
+        return {
+            "type": "resource_event",
+            "asset": str(asset),
+            "unit": str(unit),
+            "amount": float(amount),
+            "kind": str(kind),
+            "source": str(source),
+        }
+
     def record_resource_event(
         self,
         *,
@@ -191,6 +223,7 @@ class EconomyStore:
         source: str,
         evidence: str = "",
         verified: bool = False,
+        verification_receipt: VerificationReceipt | None = None,
         verification_authority: str | None = None,
     ) -> int:
         asset = self._clean_name(asset, field="asset", maximum=128)
@@ -201,18 +234,45 @@ class EconomyStore:
         if not math.isfinite(amount) or amount == 0:
             raise ValueError("resource amount must be a finite non-zero number")
         evidence = str(evidence).strip()[:8000]
-        authority = str(verification_authority).strip()[:256] if verification_authority else None
-        if verified and (not authority or not evidence):
-            raise ValueError(
-                "verified resource events require both verification_authority and evidence"
+
+        authority: str | None = None
+        receipt_json = ""
+        if verified:
+            if verification_authority is not None and verification_receipt is None:
+                raise ValueError(
+                    "verification_authority strings cannot verify resources; a signed VerificationReceipt is required"
+                )
+            if self.verification_registry is None or verification_receipt is None:
+                raise ValueError(
+                    "verified resource events require a trusted verification registry and signed VerificationReceipt"
+                )
+            claim = self.resource_claim(
+                asset=asset,
+                unit=unit,
+                amount=amount,
+                kind=kind,
+                source=source,
             )
+            authority = self.verification_registry.verify(
+                verification_receipt,
+                claim=claim,
+                evidence=evidence,
+            )
+            receipt_json = json.dumps(
+                verification_receipt.as_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        elif verification_receipt is not None or verification_authority is not None:
+            raise ValueError("unverified resource events must not carry verification credentials")
+
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO resource_events(
                     timestamp, asset, unit, amount, kind, verified, source,
-                    evidence, verification_authority
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence, verification_authority, verification_receipt_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.now(),
@@ -224,6 +284,7 @@ class EconomyStore:
                     source,
                     evidence,
                     authority,
+                    receipt_json,
                 ),
             )
             return int(cur.lastrowid)
