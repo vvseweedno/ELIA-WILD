@@ -9,7 +9,12 @@ import sqlite3
 from typing import Any
 from urllib.parse import urlparse
 
-from .verification import VerificationReceipt, VerificationRegistry
+from .verification import (
+    VerificationReceipt,
+    VerificationRegistry,
+    consume_verified_receipt,
+    ensure_receipt_ledger,
+)
 
 
 @dataclass(slots=True)
@@ -67,6 +72,8 @@ class EconomyStore:
     accepted only when a cryptographic VerificationReceipt authenticates the exact
     normalized claim and evidence against a registry supplied by trusted runtime code.
     A caller-provided authority string is never sufficient to mint verified balance.
+    Every verified receipt is consumed exactly once in the same transaction that
+    creates the resource event.
     """
 
     OPPORTUNITY_STATUSES = {
@@ -162,6 +169,14 @@ class EconomyStore:
                 conn.execute(
                     "ALTER TABLE resource_events ADD COLUMN verification_receipt_json TEXT NOT NULL DEFAULT ''"
                 )
+            ensure_receipt_ledger(conn)
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_resource_event_receipt
+                ON resource_events(verification_receipt_json)
+                WHERE verified=1 AND verification_receipt_json<>''
+                """
+            )
 
     @staticmethod
     def now() -> str:
@@ -235,7 +250,7 @@ class EconomyStore:
             raise ValueError("resource amount must be a finite non-zero number")
         evidence = str(evidence).strip()[:8000]
 
-        authority: str | None = None
+        claim: dict[str, Any] | None = None
         receipt_json = ""
         if verified:
             if verification_authority is not None and verification_receipt is None:
@@ -253,11 +268,6 @@ class EconomyStore:
                 kind=kind,
                 source=source,
             )
-            authority = self.verification_registry.verify(
-                verification_receipt,
-                claim=claim,
-                evidence=evidence,
-            )
             receipt_json = json.dumps(
                 verification_receipt.as_dict(),
                 ensure_ascii=False,
@@ -267,6 +277,20 @@ class EconomyStore:
             raise ValueError("unverified resource events must not carry verification credentials")
 
         with self._connect() as conn:
+            authority: str | None = None
+            if verified:
+                assert self.verification_registry is not None
+                assert verification_receipt is not None
+                assert claim is not None
+                authority = consume_verified_receipt(
+                    conn,
+                    self.verification_registry,
+                    verification_receipt,
+                    claim=claim,
+                    evidence=evidence,
+                    purpose="economy.resource_event",
+                    subject_ref=f"{asset}:{unit}:{kind}:{source}",
+                )
             cur = conn.execute(
                 """
                 INSERT INTO resource_events(
