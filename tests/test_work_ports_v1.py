@@ -25,7 +25,11 @@ def _config(monkeypatch, tmp_path: Path):
             "market": {
                 "enabled": True,
                 "allow_tool_calls": True,
-                "allowed_tools": ["submit_candidate", "candidate_status"],
+                "allowed_tools": [
+                    "submit_candidate",
+                    "candidate_status",
+                    "candidate_lookup",
+                ],
                 "allowed_resources": [],
                 "timeout_seconds": 10,
             }
@@ -39,6 +43,8 @@ def _config(monkeypatch, tmp_path: Path):
                 "server": "market",
                 "submit_tool": "submit_candidate",
                 "outcome_tool": "candidate_status",
+                "lookup_tool": "candidate_lookup",
+                "supports_idempotency": True,
                 "max_artifact_bytes": 100_000,
             }
         },
@@ -48,7 +54,12 @@ def _config(monkeypatch, tmp_path: Path):
 
 def _server():
     server = MCPServer("test-work-port")
-    state = {"status": "pending"}
+    state = {
+        "status": "pending",
+        "submissions": {},
+        "submit_calls": 0,
+        "fail_after_effect": False,
+    }
 
     @server.tool()
     def submit_candidate(
@@ -57,6 +68,7 @@ def _server():
         objective: str,
         deliverable: dict,
         acceptance_criteria: str,
+        idempotency_key: str,
     ) -> dict:
         assert work_item_id > 0
         assert opportunity_id > 0
@@ -64,7 +76,42 @@ def _server():
         assert acceptance_criteria
         assert deliverable["text"] == "ready deliverable"
         assert len(deliverable["sha256"]) == 64
-        return {"submission_ref": f"submission-{work_item_id}", "status": "submitted"}
+        assert len(idempotency_key) == 64
+        state["submit_calls"] += 1
+        existing = state["submissions"].get(idempotency_key)
+        if existing is None:
+            existing = {
+                "submission_ref": f"submission-{work_item_id}",
+                "work_item_id": work_item_id,
+            }
+            state["submissions"][idempotency_key] = existing
+        if state["fail_after_effect"]:
+            raise RuntimeError("simulated response loss after remote side effect")
+        return {
+            "submission_ref": existing["submission_ref"],
+            "status": "submitted",
+            "idempotency_key": idempotency_key,
+        }
+
+    @server.tool()
+    def candidate_lookup(work_item_id: int, idempotency_key: str) -> dict:
+        existing = state["submissions"].get(idempotency_key)
+        if existing is None:
+            return {
+                "status": "not_found",
+                "idempotency_key": idempotency_key,
+            }
+        assert existing["work_item_id"] == work_item_id
+        payload = {
+            "status": "submitted" if state["status"] == "pending" else state["status"],
+            "submission_ref": existing["submission_ref"],
+            "idempotency_key": idempotency_key,
+        }
+        if state["status"] == "accepted":
+            payload["evidence"] = "External reviewer accepted the submitted work."
+        elif state["status"] == "rejected":
+            payload["evidence"] = "External reviewer rejected the submitted work."
+        return payload
 
     @server.tool()
     def candidate_status(work_item_id: int, submission_ref: str) -> dict:
@@ -143,6 +190,7 @@ def test_real_mcp_work_port_submission_and_outcome_do_not_mint_payment(
     )
     assert registry.enabled is True
     assert registry.catalog()["submit_work"]["enabled"] is True
+    assert registry.catalog()["reconcile_work_submission"]["enabled"] is True
 
     submitted = registry.execute(
         "submit_work",
@@ -155,10 +203,13 @@ def test_real_mcp_work_port_submission_and_outcome_do_not_mint_payment(
         },
     )
     assert submitted.ok is True
+    assert len(submitted.data["idempotency_key"]) == 64
+    assert remote["submit_calls"] == 1
     submission = registry.store.submission_for_work(work_id)
     assert submission is not None
     assert submission.port_name == "marketplace"
     assert submission.submission_ref == f"submission-{work_id}"
+    assert registry.store.intent_for_work(work_id).status == "submitted"
     ecology = ResourceEcologyStore(config.runtime.state_dir / "memory.sqlite3")
     assert ecology.work_item(work_id).status == "submitted"
     assert EconomyStore(config.runtime.state_dir / "memory.sqlite3").verified_balance("cash", "USD") == 0
@@ -177,9 +228,63 @@ def test_real_mcp_work_port_submission_and_outcome_do_not_mint_payment(
     assert EconomyStore(config.runtime.state_dir / "memory.sqlite3").verified_balance("cash", "USD") == 0
 
 
-def test_work_port_rejects_unknown_port_without_external_call(monkeypatch, tmp_path: Path) -> None:
+def test_ambiguous_remote_success_is_never_blindly_resubmitted(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = _config(monkeypatch, tmp_path)
+    server, remote = _server()
+    _, work_id = _staged_work(config)
+    registry = WorkPortRegistry(
+        config.runtime.state_dir / "workspace",
+        config.raw_tools,
+        mcp_target_overrides={"market": server},
+    )
+
+    remote["fail_after_effect"] = True
+    first = registry.execute(
+        "submit_work", {"port": "marketplace", "work_item_id": work_id}
+    )
+    assert first.ok is False
+    assert remote["submit_calls"] == 1
+    assert registry.store.intent_for_work(work_id).status == "indeterminate"
+    assert registry.store.submission_for_work(work_id) is None
+    assert ResourceEcologyStore(config.runtime.state_dir / "memory.sqlite3").work_item(work_id).status == "staged"
+
+    second = registry.execute(
+        "submit_work", {"port": "marketplace", "work_item_id": work_id}
+    )
+    assert second.ok is False
+    assert "reconcile_work_submission" in str(second.error)
+    assert remote["submit_calls"] == 1
+
+    # Reconciliation performs a read-only lookup by the persisted idempotency key.
+    remote["fail_after_effect"] = False
+    recovered = registry.execute(
+        "reconcile_work_submission", {"work_item_id": work_id}
+    )
+    assert recovered.ok is True, recovered.error
+    assert recovered.data["submission_ref"] == f"submission-{work_id}"
+    assert remote["submit_calls"] == 1
+    assert registry.store.intent_for_work(work_id).status == "submitted"
+    assert ResourceEcologyStore(config.runtime.state_dir / "memory.sqlite3").work_item(work_id).status == "submitted"
+
+
+def test_work_port_without_idempotency_contract_is_not_enabled(monkeypatch, tmp_path: Path) -> None:
     config = _config(monkeypatch, tmp_path)
     server, _ = _server()
+    del config.raw_tools["work_ports"]["ports"]["marketplace"]["supports_idempotency"]
+    registry = WorkPortRegistry(
+        config.runtime.state_dir / "workspace",
+        config.raw_tools,
+        mcp_target_overrides={"market": server},
+    )
+    assert registry.enabled is False
+    assert registry.diagnostics()["readiness"] == "idempotency_and_lookup_contract_required"
+
+
+def test_work_port_rejects_unknown_port_without_external_call(monkeypatch, tmp_path: Path) -> None:
+    config = _config(monkeypatch, tmp_path)
+    server, remote = _server()
     _, work_id = _staged_work(config)
     registry = WorkPortRegistry(
         config.runtime.state_dir / "workspace",
@@ -189,6 +294,7 @@ def test_work_port_rejects_unknown_port_without_external_call(monkeypatch, tmp_p
     result = registry.execute("submit_work", {"port": "unknown", "work_item_id": work_id})
     assert result.ok is False
     assert "unknown or disabled work port" in str(result.error)
+    assert remote["submit_calls"] == 0
     assert ResourceEcologyStore(config.runtime.state_dir / "memory.sqlite3").work_item(work_id).status == "staged"
 
 
