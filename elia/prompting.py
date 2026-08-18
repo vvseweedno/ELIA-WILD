@@ -73,6 +73,58 @@ DECISION_SCHEMA = {
 }
 
 
+def _bounded_sensorium(items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in items[:8]:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "id",
+                    "observed_at",
+                    "transaction_id",
+                    "source_kind",
+                    "source_ref",
+                    "modality",
+                    "trust",
+                    "success",
+                    "summary",
+                    "payload_sha256",
+                )
+                if key in item
+            }
+        )
+    return result
+
+
+def _bounded_homeostasis(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    signals = []
+    for item in list(value.get("signals") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        signals.append(
+            {
+                key: item.get(key)
+                for key in ("name", "severity", "reason", "response_hint")
+                if key in item
+            }
+        )
+    return {
+        "mode": value.get("mode"),
+        "signals": signals,
+        "storage": value.get("storage") or {},
+        "state_bus": value.get("state_bus") or {},
+        "sensorium": value.get("sensorium") or {},
+        "epistemics": value.get("epistemics") or {},
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     path: Path
@@ -102,6 +154,9 @@ class PromptTemplate:
             for name, item in skills.items()
             if item.get("available")
         }
+
+        world = context.get("world_model") or {}
+        causal = context.get("causal_memory") or {}
         contract = {
             "identity": identity_contract,
             "organism": default_organism_contract(),
@@ -116,6 +171,7 @@ class PromptTemplate:
                     "lifecycle_state",
                     "degraded_capabilities",
                     "needs",
+                    "homeostasis_mode",
                     "commitments",
                     "uncertainties",
                     "narrative",
@@ -123,12 +179,22 @@ class PromptTemplate:
                 if key in self_model
             },
             "adaptive_self_hypotheses": context.get("self_hypotheses") or [],
+            "world_model": {
+                "beliefs": list(world.get("beliefs") or [])[:16],
+                "contradictions": list(world.get("contradictions") or [])[:8],
+                "epistemic_rule": world.get("epistemic_rule"),
+            },
+            "recent_sensorium": _bounded_sensorium(context.get("sensorium")),
+            "causal_strategy_statistics": list(causal.get("strategy_statistics") or [])[:16],
+            "homeostasis": _bounded_homeostasis(context.get("homeostasis")),
+            "digital_body": context.get("digital_body") or {},
+            "organism_state_bus": context.get("organism_state_bus") or {},
             "metacognitive_calibration": context.get("metacognition") or {},
             "available_skills": available_skills,
         }
         return (
             self.text
-            + "\n\n## Verified identity/organism/skill contract for this cycle\n"
+            + "\n\n## Verified identity/organism/world/skill contract for this cycle\n"
             + json.dumps(contract, ensure_ascii=False, sort_keys=True)
             + "\n\n## Decision JSON schema\n"
             + json.dumps(DECISION_SCHEMA, ensure_ascii=False, sort_keys=True)

@@ -10,7 +10,7 @@ from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
 from .identity import IdentityBundle
-from .runtime import EliaRuntime
+from .organism_runtime import OrganismRuntime
 from .vitals import VitalSigns
 
 
@@ -18,8 +18,8 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
     """Initialize/continue a zero-GPU ELIA state and prove the organism path.
 
     The bootstrap uses the deterministic MockBrain explicitly, so it never imports the
-    configured expensive model backend. It is safe for a fresh CPU machine and useful
-    before any Kaggle/GPU activation.
+    configured expensive model backend. It exercises the current OrganismRuntime,
+    including durable sensorium/world/causal wiring, on a fresh CPU machine.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -31,7 +31,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = EliaRuntime(config, brain=MockBrain())
+    runtime = OrganismRuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
@@ -41,6 +41,11 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
         "vitals": after.as_dict(),
         "brain_backend_used": "mock",
         "configured_brain_backend_not_loaded": config.brain.backend,
+        "world_model": runtime.tools.world_model.snapshot(12),
+        "sensorium": runtime.tools.observations.snapshot(8),
+        "causal_memory": runtime.tools.causal.snapshot(8),
+        "digital_body": runtime.tools.body.diagnostics(),
+        "state_bus_incomplete": runtime.tools.state_bus.incomplete(16),
     }
 
     if checkpoint_path is not None:

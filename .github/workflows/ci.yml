@@ -22,6 +22,11 @@ jobs:
           cache: pip
       - name: Install
         run: python -m pip install -e '.[test]'
+      - name: Static correctness gates
+        run: |
+          python -m pip check
+          python -m compileall -q elia tests
+          ruff check elia tests
       - name: Test
         run: pytest -q --junitxml=pytest-report.xml
       - name: Upload pytest report
@@ -45,3 +50,44 @@ jobs:
       - name: Reference research smoke
         run: |
           python -c "from elia.research.bench import run_reference_cognitive_stress as r; x=r(); assert x['needle']==1.0 and x['scrambled_pattern']==1.0 and all(i['finite'] for i in x['memory_backends'])"
+
+  sensorimotor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install sensorimotor dependencies
+        run: python -m pip install -e '.[test,sensorimotor]'
+      - name: Dependency consistency
+        run: python -m pip check
+      - name: Install Chromium runtime
+        run: python -m playwright install --with-deps chromium
+      - name: Sensorimotor integration tests
+        run: |
+          pytest -q \
+            tests/test_asyncio_bridge_v1.py \
+            tests/test_process_body_v1.py \
+            tests/test_jsonrpc_body_v1.py \
+            tests/test_mcp_body_v1.py \
+            tests/test_mcp_server_v1.py \
+            tests/test_browser_body_v1.py \
+            tests/test_sensorium_v1.py \
+            tests/test_world_model_v1.py \
+            tests/test_state_bus_v1.py \
+            tests/test_organism_runtime_v1.py \
+            tests/test_homeostasis_v1.py \
+            tests/test_action_log_redaction_v1.py \
+            --junitxml=sensorimotor-report.xml
+      - name: Upload sensorimotor report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sensorimotor-report
+          path: sensorimotor-report.xml
+          if-no-files-found: ignore

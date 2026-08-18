@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("mcp")
+
+from mcp import Client
+
+from elia.mcp_server import build_mcp_server
+
+
+def _config_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "config" / "genesis.yaml"
+
+
+def _structured(result) -> dict:
+    payload = result.structured_content
+    if isinstance(payload, dict):
+        if set(payload) == {"result"} and isinstance(payload["result"], dict):
+            return payload["result"]
+        return payload
+    for block in result.content or []:
+        text = getattr(block, "text", None)
+        if text:
+            item = json.loads(text)
+            if isinstance(item, dict):
+                return item
+    raise AssertionError("MCP result contained no structured dictionary")
+
+
+def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ELIA_STATE_DIR", str(tmp_path / ".elia"))
+    server = build_mcp_server(_config_path())
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            tools = await client.list_tools()
+            names = {tool.name for tool in tools.tools}
+            assert {
+                "elia_status",
+                "elia_preflight",
+                "elia_world_query",
+                "elia_sensorium_recent",
+                "elia_body_diagnostics",
+                "elia_homeostasis",
+            }.issubset(names)
+
+            status_result = await client.call_tool("elia_status", {})
+            assert status_result.is_error is False
+            status = _structured(status_result)
+            assert status["identity"]["identity_id"] == "elia-wild"
+            assert "homeostasis" in status
+            assert "digital_body" in status
+            assert "sensorium" in status
+
+            world_result = await client.call_tool(
+                "elia_world_query",
+                {"text": "anything", "limit": 4},
+            )
+            assert world_result.is_error is False
+            world = _structured(world_result)
+            assert "beliefs" in world
+            assert "verified facts" in world["epistemic_rule"]
+
+            sensor_result = await client.call_tool("elia_sensorium_recent", {"limit": 4})
+            sensor = _structured(sensor_result)
+            assert "observations" in sensor
+            for item in sensor["observations"]:
+                assert "payload" not in item
+                assert "payload_sha256" in item
+
+            resource = await client.read_resource("elia://identity")
+            assert resource.contents
+            text = getattr(resource.contents[0], "text", "")
+            identity = json.loads(text)
+            assert identity["identity_id"] == "elia-wild"
+            assert identity["body_version"].startswith("1.1.")
+
+    asyncio.run(exercise())
+
+
+def test_mcp_server_http_transport_policy_is_loopback_only() -> None:
+    from elia.mcp_server import _is_loopback_host
+
+    assert _is_loopback_host("127.0.0.1") is True
+    assert _is_loopback_host("::1") is True
+    assert _is_loopback_host("localhost") is True
+    assert _is_loopback_host("0.0.0.0") is False
+    assert _is_loopback_host("192.168.1.10") is False
+    assert _is_loopback_host("example.com") is False
