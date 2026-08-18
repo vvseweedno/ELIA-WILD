@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=elia
 Group=elia
+UMask=0077
 WorkingDirectory=/opt/elia-wild
 EnvironmentFile=-/etc/elia-wild/elia.env
 ExecStart=/opt/elia-wild/.venv/bin/elia-supervisor --config /opt/elia-wild/config/genesis.yaml
@@ -18,6 +19,14 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/elia-wild /opt/elia-wild/.elia
 
 [Install]
