@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from .paths import default_manifest_path
 from .research.registry import RESEARCH_REGISTRY, maturity_summary
 
 
@@ -29,10 +30,6 @@ def _canonical(value: Any) -> bytes:
 
 def _fingerprint(value: Any) -> str:
     return sha256(_canonical(value)).hexdigest()
-
-
-def default_manifest_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "organism.yaml"
 
 
 def _load_yaml_object(path: Path) -> dict[str, Any]:
@@ -86,7 +83,9 @@ def _merge_default_overlays(path: Path, base: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"organism overlay organs must be a list: {overlay_path.name}")
         for item in additions:
             if not isinstance(item, dict):
-                raise ValueError(f"organism overlay organ must be an object: {overlay_path.name}")
+                raise ValueError(
+                    f"organism overlay organ must be an object: {overlay_path.name}"
+                )
             organ_id = str(item.get("id", "")).strip()
             if not organ_id or organ_id in existing_ids:
                 raise ValueError(
@@ -241,7 +240,10 @@ class OrganismManifest:
             identity_id=identity_id,
             name=str(raw.get("name", identity_id)),
             principle=str(raw.get("principle", "")).strip(),
-            layers={str(k): str(v) for k, v in dict(raw.get("layers") or {}).items()},
+            layers={
+                str(k): str(v)
+                for k, v in dict(raw.get("layers") or {}).items()
+            },
             organs=tuple(organs),
             raw=raw,
         )
@@ -258,7 +260,13 @@ class OrganismManifest:
         assert organ.path is not None
         resolved = (self.project_root / organ.path).resolve()
         if not resolved.is_file():
-            return OrganStatus(organ, False, None, str(resolved), "artifact is missing")
+            return OrganStatus(
+                organ,
+                False,
+                None,
+                str(resolved),
+                "artifact is missing",
+            )
         digest = sha256(resolved.read_bytes()).hexdigest()
         return OrganStatus(organ, True, digest, str(resolved), None)
 
@@ -277,9 +285,13 @@ class OrganismManifest:
                 digest = sha256(Path(location).read_bytes()).hexdigest()
             else:
                 try:
-                    digest = sha256(inspect.getsource(target).encode("utf-8")).hexdigest()
+                    digest = sha256(
+                        inspect.getsource(target).encode("utf-8")
+                    ).hexdigest()
                 except (OSError, TypeError):
-                    digest = _fingerprint({"module": organ.module, "symbol": organ.symbol})
+                    digest = _fingerprint(
+                        {"module": organ.module, "symbol": organ.symbol}
+                    )
             return OrganStatus(
                 organ,
                 True,
@@ -296,7 +308,11 @@ class OrganismManifest:
                 f"{type(exc).__name__}: {str(exc)[:1000]}",
             )
 
-    def audit(self, *, expected_identity_id: str | None = None) -> OrganismAuditReport:
+    def audit(
+        self,
+        *,
+        expected_identity_id: str | None = None,
+    ) -> OrganismAuditReport:
         statuses: list[OrganStatus] = []
         findings: list[OrganFinding] = []
         if expected_identity_id and self.identity_id != str(expected_identity_id):
@@ -340,7 +356,8 @@ class OrganismManifest:
                 if item.implementation_fingerprint
             },
             "research": {
-                name: artifact.as_dict() for name, artifact in sorted(RESEARCH_REGISTRY.items())
+                name: artifact.as_dict()
+                for name, artifact in sorted(RESEARCH_REGISTRY.items())
             },
         }
         healthy = not any(item.severity == "critical" for item in findings)
