@@ -30,6 +30,16 @@ class ChronicleEntry:
     hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class ChronicleCheckpoint:
+    seq: int
+    hash: str
+    byte_size: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class Chronicle:
     """Append-only JSONL history with SHA-256 chaining and POSIX single-writer locking.
 
@@ -40,6 +50,8 @@ class Chronicle:
     A valid current chain is not by itself proof of continuity with an older accepted
     chain. `hash_at_seq` / `contains_anchor` expose exact prefix ancestry so CRC/vitals
     can prove that an earlier accepted head is still present in the current history.
+    Recoverable file checkpoints allow the accepted-transition kernel to remove only
+    unaccepted suffix entries after an interrupted local transition.
     """
 
     def __init__(self, path: Path):
@@ -103,6 +115,16 @@ class Chronicle:
             except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 raise RuntimeError(f"Chronicle head is unreadable: {exc}") from exc
 
+    def checkpoint(self) -> ChronicleCheckpoint:
+        """Capture an exact accepted file boundary under a shared Chronicle lock."""
+        with self._locked(exclusive=False):
+            try:
+                seq, digest = self._last_unlocked()
+                size = self.path.stat().st_size if self.path.exists() else 0
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"Chronicle checkpoint is unreadable: {exc}") from exc
+        return ChronicleCheckpoint(seq=seq, hash=digest, byte_size=size)
+
     def append(self, kind: str, payload: dict[str, Any]) -> ChronicleEntry:
         persisted_payload = (
             redact_action_record(payload) if str(kind).upper() == "CYCLE" else payload
@@ -149,13 +171,7 @@ class Chronicle:
             raise ValueError(f"hash mismatch at line {line_number}")
         return seq, digest
 
-    def hash_at_seq(self, seq: int) -> str:
-        """Return the validated hash at exactly `seq`, or fail closed.
-
-        Sequence zero is the immutable genesis anchor. For positive sequences the
-        method validates the chain from genesis through the requested point rather
-        than trusting a raw line lookup.
-        """
+    def _hash_at_seq_unlocked(self, seq: int) -> str:
         seq = int(seq)
         if seq < 0:
             raise ValueError("Chronicle sequence must be non-negative")
@@ -165,25 +181,29 @@ class Chronicle:
             raise LookupError(f"Chronicle has no sequence {seq}")
         previous_hash = GENESIS_HASH
         expected_seq = 1
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                actual_seq, digest = self._validated_item(
+                    line,
+                    line_number=line_number,
+                    expected_seq=expected_seq,
+                    previous_hash=previous_hash,
+                )
+                if actual_seq == seq:
+                    return digest
+                previous_hash = digest
+                expected_seq += 1
+        raise LookupError(f"Chronicle has no sequence {seq}")
+
+    def hash_at_seq(self, seq: int) -> str:
+        """Return the validated hash at exactly `seq`, or fail closed."""
         with self._locked(exclusive=False):
             try:
-                with self.path.open("r", encoding="utf-8") as handle:
-                    for line_number, line in enumerate(handle, start=1):
-                        if not line.strip():
-                            continue
-                        actual_seq, digest = self._validated_item(
-                            line,
-                            line_number=line_number,
-                            expected_seq=expected_seq,
-                            previous_hash=previous_hash,
-                        )
-                        if actual_seq == seq:
-                            return digest
-                        previous_hash = digest
-                        expected_seq += 1
+                return self._hash_at_seq_unlocked(seq)
             except OSError as exc:
                 raise RuntimeError(f"Chronicle read failure: {exc}") from exc
-        raise LookupError(f"Chronicle has no sequence {seq}")
 
     def contains_anchor(self, seq: int, expected_hash: str) -> tuple[bool, str | None]:
         """Prove that `(seq, hash)` is an exact validated prefix anchor of this chain."""
@@ -200,6 +220,42 @@ class Chronicle:
                 f"current={actual}, expected={expected_hash}"
             )
         return True, None
+
+    def restore_checkpoint(self, checkpoint: ChronicleCheckpoint) -> None:
+        """Remove only an unaccepted suffix while preserving the validated prefix.
+
+        This is intentionally not a general history-rewrite API. The requested prefix
+        must still be exactly present and the current file may only be longer than the
+        captured byte boundary. A missing/tampered prefix fails closed.
+        """
+        if not isinstance(checkpoint, ChronicleCheckpoint):
+            raise TypeError("restore_checkpoint requires ChronicleCheckpoint")
+        if checkpoint.byte_size < 0:
+            raise ValueError("Chronicle checkpoint byte size must be non-negative")
+        with self._locked(exclusive=True):
+            try:
+                actual = self._hash_at_seq_unlocked(checkpoint.seq)
+            except (LookupError, OSError, ValueError) as exc:
+                raise RuntimeError(f"cannot restore Chronicle checkpoint: {exc}") from exc
+            if actual != checkpoint.hash:
+                raise RuntimeError("cannot restore Chronicle checkpoint: accepted prefix hash changed")
+            current_size = self.path.stat().st_size if self.path.exists() else 0
+            if current_size < checkpoint.byte_size:
+                raise RuntimeError("cannot restore Chronicle checkpoint: file moved backward")
+            if checkpoint.byte_size == 0:
+                if self.path.exists():
+                    with self.path.open("r+b") as handle:
+                        handle.truncate(0)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            else:
+                with self.path.open("r+b") as handle:
+                    handle.truncate(checkpoint.byte_size)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            restored_seq, restored_hash = self._last_unlocked()
+            if restored_seq != checkpoint.seq or restored_hash != checkpoint.hash:
+                raise RuntimeError("Chronicle checkpoint restore did not reproduce accepted head")
 
     def verify(self) -> tuple[bool, str | None]:
         previous_hash = GENESIS_HASH
