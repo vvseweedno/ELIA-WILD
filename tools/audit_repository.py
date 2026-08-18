@@ -17,7 +17,18 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
-TEXT_SUFFIXES = {".py", ".toml", ".yaml", ".yml", ".md", ".service", ".txt"}
+TEXT_SUFFIXES = {
+    ".py",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".md",
+    ".service",
+    ".txt",
+    ".json",
+    ".ipynb",
+    ".sh",
+}
 PATH_PREFIXES = (
     "config/",
     "deploy/",
@@ -33,9 +44,11 @@ PATH_PREFIXES = (
 PATH_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_:/.-])"
     r"((?:\.github|config|deploy|docs|elia|runtime|scripts|skills|tests|tools)/"
-    r"[A-Za-z0-9_./-]+(?:\.py|\.ya?ml|\.md|\.toml|\.ipynb|\.service))"
+    r"[A-Za-z0-9_./-]+(?:\.py|\.ya?ml|\.md|\.toml|\.ipynb|\.json|\.sh|\.service))"
 )
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+ACTION_USE = re.compile(r"^\s*uses:\s*([^\s#]+)", re.MULTILINE)
+PINNED_ACTION = re.compile(r"^[^@\s]+@[0-9a-fA-F]{40}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +194,43 @@ class RepositoryAudit:
         except Exception as exc:
             self.add("error", "skills.load", "skills", f"{type(exc).__name__}: {exc}")
 
+    def check_structured_files(self) -> None:
+        for path in sorted(self.root.rglob("*.ipynb")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                self.add("error", "notebook.json", path, str(exc))
+                continue
+            if not isinstance(payload, dict) or not isinstance(payload.get("cells"), list):
+                self.add("error", "notebook.schema", path, "notebook must be a JSON object with a cells list")
+        for suffix in ("*.yaml", "*.yml"):
+            for path in sorted(self.root.rglob(suffix)):
+                if any(part in {".git", ".elia", ".venv"} for part in path.parts):
+                    continue
+                try:
+                    yaml.safe_load(path.read_text(encoding="utf-8"))
+                except (UnicodeError, yaml.YAMLError) as exc:
+                    self.add("error", "yaml.syntax", path, str(exc))
+
+    def check_workflow_action_pins(self) -> None:
+        workflow_dir = self.root / ".github" / "workflows"
+        if not workflow_dir.is_dir():
+            return
+        for path in sorted([*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")]):
+            text = path.read_text(encoding="utf-8")
+            for match in ACTION_USE.finditer(text):
+                target = match.group(1).strip()
+                if target.startswith("./"):
+                    continue
+                if not PINNED_ACTION.fullmatch(target):
+                    line = text.count("\n", 0, match.start()) + 1
+                    self.add(
+                        "error",
+                        "workflow.unpinned-action",
+                        f"{path.relative_to(self.root)}:{line}",
+                        f"GitHub Action must be pinned to a full 40-hex commit SHA: {target}",
+                    )
+
     def check_literal_repository_paths(self) -> None:
         trim_chars = ".,;:)]}'\"`"
         for path in self._iter_text_files():
@@ -312,6 +362,8 @@ class RepositoryAudit:
             self.check_genesis_paths,
             self.check_organism_manifest,
             self.check_skill_registry,
+            self.check_structured_files,
+            self.check_workflow_action_pins,
             self.check_literal_repository_paths,
             self.check_markdown_links,
             self.check_version_sync,
