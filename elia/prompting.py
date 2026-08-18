@@ -53,20 +53,31 @@ DECISION_SCHEMA = {
     ],
     "opportunity_updates": [
         {
-            "op": "create|update",
+            "op": "create|update|profile_resource|plan_work|abandon_work",
             "id": None,
+            "opportunity_id": None,
+            "work_item_id": None,
             "title": "required for create",
             "kind": "work|bounty|grant|free_compute|free_api|product|other",
             "source_url": "https://... or empty if evidence text exists",
-            "evidence": "observed provenance; required for terminal state",
+            "evidence": "observed provenance; required for terminal/abandon state",
             "estimated_value": 0.0,
             "estimated_cost_value": 0.0,
-            "unit": "USD|RUB|CREDIT|OTHER",
+            "unit": "abstract value unit for opportunity valuation; not necessarily a resource key",
             "probability": 0.0,
             "estimated_gpu_hours": 0.0,
             "status": "discovered|evaluating|pursuing|won|lost|expired|abandoned",
             "expires_at": None,
             "notes": "optional",
+            "target_asset": "cash|api|compute|storage|other; profile_resource only",
+            "target_unit": "USD|RUB|CREDIT|GPU_HOUR|GB|OTHER; profile_resource only",
+            "target_amount": 0.0,
+            "eligibility_confidence": 0.0,
+            "evidence_quality": 0.0,
+            "blockers": ["unresolved eligibility or execution blocker"],
+            "objective": "plan_work only",
+            "deliverable_spec": "plan_work only",
+            "acceptance_criteria": "plan_work only",
         }
     ],
     "sleep_seconds": 60,
@@ -195,6 +206,110 @@ def _bounded_homeostasis(value: Any) -> dict[str, Any]:
     }
 
 
+def _bounded_resource_ecology(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    candidates: list[dict[str, Any]] = []
+    for raw in list(value.get("candidates") or [])[:12]:
+        if not isinstance(raw, dict):
+            continue
+        opportunity = raw.get("opportunity") or {}
+        profile = raw.get("resource_profile") or {}
+        work_items = []
+        for work in list(raw.get("work_items") or [])[:4]:
+            if not isinstance(work, dict):
+                continue
+            work_items.append(
+                {
+                    key: work.get(key)
+                    for key in (
+                        "id",
+                        "opportunity_id",
+                        "status",
+                        "objective",
+                        "deliverable_spec",
+                        "acceptance_criteria",
+                        "estimated_gpu_hours",
+                        "artifact_path",
+                        "submission_observation_id",
+                        "resource_event_id",
+                    )
+                    if key in work
+                }
+            )
+        candidates.append(
+            {
+                "opportunity": {
+                    key: opportunity.get(key)
+                    for key in (
+                        "id",
+                        "title",
+                        "kind",
+                        "source_url",
+                        "estimated_value",
+                        "estimated_cost_value",
+                        "unit",
+                        "probability",
+                        "estimated_gpu_hours",
+                        "status",
+                        "expires_at",
+                        "expected_net_value",
+                        "value_per_gpu_hour",
+                    )
+                    if key in opportunity
+                },
+                "resource_profile": {
+                    key: profile.get(key)
+                    for key in (
+                        "opportunity_id",
+                        "target_asset",
+                        "target_unit",
+                        "target_amount",
+                        "eligibility_confidence",
+                        "evidence_quality",
+                        "blockers",
+                        "qualification_score",
+                        "epistemic_status",
+                    )
+                    if key in profile
+                },
+                "bottleneck_match": raw.get("bottleneck_match"),
+                "expected_resource_amount": raw.get("expected_resource_amount"),
+                "expected_resource_per_gpu_hour": raw.get("expected_resource_per_gpu_hour"),
+                "expected_runway_gain_days": raw.get("expected_runway_gain_days"),
+                "work_items": work_items,
+            }
+        )
+    active_work = []
+    for work in list(value.get("active_work") or [])[:12]:
+        if not isinstance(work, dict):
+            continue
+        active_work.append(
+            {
+                key: work.get(key)
+                for key in (
+                    "id",
+                    "opportunity_id",
+                    "status",
+                    "objective",
+                    "estimated_gpu_hours",
+                    "artifact_path",
+                    "submission_observation_id",
+                    "resource_event_id",
+                )
+                if key in work
+            }
+        )
+    return {
+        "bottleneck": value.get("bottleneck"),
+        "exact_bottleneck_candidate_count": value.get("exact_bottleneck_candidate_count", 0),
+        "candidates": candidates,
+        "active_work": active_work,
+        "unprofiled_opportunity_count": len(value.get("unprofiled_opportunities") or []),
+        "epistemic_rule": value.get("epistemic_rule"),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     path: Path
@@ -260,6 +375,9 @@ class PromptTemplate:
             "causal_strategy_statistics": list(causal.get("strategy_statistics") or [])[:16],
             "metabolism": _bounded_metabolism(metabolism),
             "homeostasis": _bounded_homeostasis(homeostasis),
+            "resource_ecology": _bounded_resource_ecology(context.get("resource_ecology")),
+            "executive": context.get("executive") or {},
+            "executive_energy": context.get("executive_energy") or {},
             "digital_body": context.get("digital_body") or {},
             "organism_state_bus": context.get("organism_state_bus") or {},
             "metacognitive_calibration": context.get("metacognition") or {},
