@@ -37,7 +37,16 @@ def _jsonable(value: Any) -> Any:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        _jsonable(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _text_digest(value: str) -> str:
+    return sha256(str(value).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,12 +70,13 @@ class Observation:
 
 
 class ObservationStore:
-    """Durable normalized sensorium shared by all external adapters.
+    """Durable normalized sensorium with verified stored-payload reads.
 
-    Fresh observations retain bounded payloads. Older payloads are compacted to their
-    original digest and byte count while metadata/provenance remain queryable. This
-    preserves evidence identity without allowing long-lived operation to accumulate
-    an unbounded archive of page bodies and tool output.
+    `payload_sha256` identifies the original canonical observation. A second
+    `stored_payload_sha256` authenticates the representation currently retained in the
+    SQLite row, including truncated previews and compacted markers. Every authoritative
+    read verifies the stored form; full retained payloads additionally rederive their
+    original digest. Compacted/truncated rows must carry the exact original digest.
     """
 
     def __init__(self, path: Path):
@@ -99,6 +109,7 @@ class ObservationStore:
                     summary TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     payload_sha256 TEXT NOT NULL,
+                    stored_payload_sha256 TEXT NOT NULL DEFAULT '',
                     provenance_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_observations_time
@@ -109,11 +120,27 @@ class ObservationStore:
                     ON observations(transaction_id, id ASC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(observations)").fetchall()
+            }
+            if "stored_payload_sha256" not in columns:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN stored_payload_sha256 TEXT NOT NULL DEFAULT ''"
+                )
+            rows = conn.execute(
+                "SELECT id, payload_json FROM observations WHERE stored_payload_sha256=''"
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE observations SET stored_payload_sha256=? WHERE id=?",
+                    (_text_digest(str(row["payload_json"])), int(row["id"])),
+                )
 
     @staticmethod
     def _bounded_payload(value: Any) -> tuple[str, str]:
         canonical = _canonical_json(value)
-        digest = sha256(canonical.encode("utf-8")).hexdigest()
+        digest = _text_digest(canonical)
         raw = canonical.encode("utf-8")
         if len(raw) <= MAX_STORED_PAYLOAD_BYTES:
             return canonical, digest
@@ -144,7 +171,7 @@ class ObservationStore:
             cutoff = int(cutoff_row["id"])
             rows = conn.execute(
                 """
-                SELECT id, payload_json, payload_sha256
+                SELECT id, payload_json, payload_sha256, stored_payload_sha256
                 FROM observations
                 WHERE id < ? AND payload_json NOT LIKE '%\"_compacted\":true%'
                 ORDER BY id ASC LIMIT ?
@@ -152,17 +179,25 @@ class ObservationStore:
                 (cutoff, batch),
             ).fetchall()
             for row in rows:
-                raw = str(row["payload_json"]).encode("utf-8")
+                raw_text = str(row["payload_json"])
+                if _text_digest(raw_text) != str(row["stored_payload_sha256"]):
+                    raise RuntimeError(
+                        f"observation {int(row['id'])} stored payload digest mismatch before compaction"
+                    )
                 compacted = _canonical_json(
                     {
                         "_compacted": True,
                         "original_sha256": str(row["payload_sha256"]),
-                        "previous_stored_bytes": len(raw),
+                        "previous_stored_bytes": len(raw_text.encode("utf-8")),
                     }
                 )
                 conn.execute(
-                    "UPDATE observations SET payload_json=? WHERE id=?",
-                    (compacted, int(row["id"])),
+                    """
+                    UPDATE observations
+                    SET payload_json=?, stored_payload_sha256=?
+                    WHERE id=?
+                    """,
+                    (compacted, _text_digest(compacted), int(row["id"])),
                 )
             return len(rows)
 
@@ -188,6 +223,7 @@ class ObservationStore:
             raise ValueError("source_kind and source_ref are required")
         trust = max(0.0, min(1.0, float(trust)))
         payload_json, payload_digest = self._bounded_payload(payload)
+        stored_digest = _text_digest(payload_json)
         provenance_json = _canonical_json(provenance or {})
         timestamp = _now()
         with self._connect() as conn:
@@ -196,8 +232,8 @@ class ObservationStore:
                 INSERT INTO observations(
                     observed_at, transaction_id, source_kind, source_ref, modality,
                     content_type, trust, success, summary, payload_json,
-                    payload_sha256, provenance_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_sha256, stored_payload_sha256, provenance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -211,6 +247,7 @@ class ObservationStore:
                     str(summary).strip()[:4000],
                     payload_json,
                     payload_digest,
+                    stored_digest,
                     provenance_json,
                 ),
             )
@@ -223,11 +260,44 @@ class ObservationStore:
         return observation
 
     @staticmethod
-    def _from_row(row: sqlite3.Row) -> Observation:
+    def _verified_payload(row: sqlite3.Row) -> Any:
+        raw = str(row["payload_json"])
+        stored_digest = str(row["stored_payload_sha256"])
+        actual_stored = _text_digest(raw)
+        if actual_stored != stored_digest:
+            raise RuntimeError(
+                f"observation {int(row['id'])} stored payload digest mismatch"
+            )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"observation {int(row['id'])} payload JSON is malformed"
+            ) from exc
+        original_digest = str(row["payload_sha256"])
+        if isinstance(payload, dict) and (
+            payload.get("_truncated") is True or payload.get("_compacted") is True
+        ):
+            if str(payload.get("original_sha256", "")) != original_digest:
+                raise RuntimeError(
+                    f"observation {int(row['id'])} original digest marker mismatch"
+                )
+        else:
+            actual_original = _text_digest(_canonical_json(payload))
+            if actual_original != original_digest:
+                raise RuntimeError(
+                    f"observation {int(row['id'])} original payload digest mismatch"
+                )
+        return payload
+
+    @classmethod
+    def _from_row(cls, row: sqlite3.Row) -> Observation:
         return Observation(
             id=int(row["id"]),
             observed_at=str(row["observed_at"]),
-            transaction_id=str(row["transaction_id"]) if row["transaction_id"] else None,
+            transaction_id=(
+                str(row["transaction_id"]) if row["transaction_id"] else None
+            ),
             source_kind=str(row["source_kind"]),
             source_ref=str(row["source_ref"]),
             modality=str(row["modality"]),
@@ -235,14 +305,16 @@ class ObservationStore:
             trust=float(row["trust"]),
             success=bool(row["success"]),
             summary=str(row["summary"]),
-            payload=json.loads(row["payload_json"]),
+            payload=cls._verified_payload(row),
             payload_sha256=str(row["payload_sha256"]),
             provenance=json.loads(row["provenance_json"]),
         )
 
     def get(self, observation_id: int) -> Observation | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM observations WHERE id=?", (int(observation_id),)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM observations WHERE id=?", (int(observation_id),)
+            ).fetchone()
         return self._from_row(row) if row else None
 
     def recent(self, limit: int = 32) -> list[Observation]:
