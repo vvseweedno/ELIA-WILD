@@ -12,10 +12,12 @@ from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
 from .economy import EconomyStore
+from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
-from .organism_runtime import OrganismRuntime
+from .metabolic_runtime import MetabolicOrganismRuntime
+from .metabolism import MetabolismEngine
 from .prompting import PromptTemplate
 from .skills import SkillRegistry
 from .tools import ToolRegistry
@@ -101,6 +103,23 @@ def _maybe_auto_checkpoint(config, key_env: str, outcome: dict[str, Any]) -> dic
     return {"ok": True, **info.as_dict()}
 
 
+def _status_physiology(config, tools: ToolRegistry) -> tuple[dict[str, Any], dict[str, Any]]:
+    database = config.runtime.state_dir / "memory.sqlite3"
+    metabolism = MetabolismEngine(
+        database,
+        weekly_gpu_budget_hours=config.runtime.weekly_gpu_budget_hours,
+    ).snapshot().as_dict()
+    homeostasis = HomeostasisEngine(
+        config.runtime.state_dir,
+        tools.observations,
+        tools.world_model,
+        tools.state_bus,
+        tools.body.diagnostics(),
+        metabolism_snapshot=metabolism,
+    ).evaluate().as_dict()
+    return metabolism, homeostasis
+
+
 def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
@@ -176,6 +195,7 @@ def main() -> None:
         capability_health = memory.capability_health_all(list(capability_catalog), window=20)
         skill_state = skills.prompt_catalog(capability_catalog, capability_health)
         economy = economy_store.snapshot(16)
+        metabolism, homeostasis = _status_physiology(config, tools)
         limit = config.runtime.weekly_gpu_budget_hours
         runtime_hours = memory.runtime_seconds_this_week() / 3600.0
         brain_hours = memory.brain_seconds_this_week() / 3600.0
@@ -198,6 +218,26 @@ def main() -> None:
                 economy=economy,
             )
         ]
+        existing_names = {str(item.get("name", "")) for item in needs}
+        for signal in homeostasis.get("signals", []):
+            if not isinstance(signal, dict):
+                continue
+            name = str(signal.get("name", ""))
+            if not name or name in existing_names:
+                continue
+            needs.append(
+                {
+                    "name": name,
+                    "severity": float(signal.get("severity", 0.0)),
+                    "reason": str(signal.get("reason", "")),
+                    "response_hint": str(signal.get("response_hint", "")),
+                    "source": "homeostasis",
+                    "evidence": signal.get("evidence") or {},
+                }
+            )
+            existing_names.add(name)
+        needs.sort(key=lambda item: (-float(item.get("severity", 0.0)), str(item.get("name", ""))))
+
         anchor_path = state_dir / "checkpoint.anchor.json"
         anchor = None
         if anchor_path.exists():
@@ -237,6 +277,8 @@ def main() -> None:
                     "chronicle": {"valid": chronicle_valid, "error": chronicle_error},
                     "resources": resources,
                     "economy": economy,
+                    "metabolism": metabolism,
+                    "homeostasis": homeostasis,
                     "world_model": tools.world_model.snapshot(24),
                     "sensorium": tools.observations.snapshot(8),
                     "causal_memory": tools.causal.snapshot(8),
@@ -247,7 +289,7 @@ def main() -> None:
                     },
                     "memory_records": len(memory.recent(1000000)),
                     "active_goals": [asdict(goal) for goal in active_goals],
-                    "needs": needs,
+                    "needs": needs[:16],
                     "scheduler": {
                         "next_wake_at": memory.get_meta("next_wake_at"),
                         "last_sleep_seconds": memory.get_meta("last_sleep_seconds"),
@@ -310,7 +352,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = OrganismRuntime(config)
+    runtime = MetabolicOrganismRuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
