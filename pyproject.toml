@@ -59,8 +59,20 @@ include = ["elia*"]
 "share/elia-wild/config/organism.d" = [
   "config/organism.d/*.yaml",
 ]
-"share/elia-wild/skills" = [
-  "skills/*.yaml",
+"share/elia-wild/skills/continuity" = [
+  "skills/continuity/*.yaml",
+]
+"share/elia-wild/skills/cognition" = [
+  "skills/cognition/*.yaml",
+]
+"share/elia-wild/skills/economy" = [
+  "skills/economy/*.yaml",
+]
+"share/elia-wild/skills/engineering" = [
+  "skills/engineering/*.yaml",
+]
+"share/elia-wild/skills/research" = [
+  "skills/research/*.yaml",
 ]
 
 [tool.pytest.ini_options]
