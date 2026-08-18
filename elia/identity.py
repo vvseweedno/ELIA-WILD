@@ -12,6 +12,7 @@ import yaml
 
 
 LINEAGE_GENESIS_HASH = "0" * 64
+_HEX = frozenset("0123456789abcdef")
 
 
 def _canonical(value: Any) -> bytes:
@@ -25,6 +26,11 @@ def _canonical(value: Any) -> bytes:
 
 def _fingerprint(value: Any) -> str:
     return sha256(_canonical(value)).hexdigest()
+
+
+def _valid_digest(value: str) -> bool:
+    text = str(value).strip().lower()
+    return len(text) == 64 and all(ch in _HEX for ch in text)
 
 
 def _lineage_material(
@@ -74,7 +80,7 @@ class IdentityBundle:
         constitution = yaml.safe_load(Path(constitution_path).read_text(encoding="utf-8"))
         if not isinstance(subject_core, dict) or not isinstance(constitution, dict):
             raise ValueError("identity artifacts must contain YAML objects")
-        if str(subject_core.get("identity_id", "")).strip() == "":
+        if not str(subject_core.get("identity_id", "")).strip():
             raise ValueError("subject core has no identity_id")
         core_fp = _fingerprint(subject_core)
         constitution_fp = _fingerprint(constitution)
@@ -99,11 +105,11 @@ class IdentityBundle:
         items = self.subject_core.get("immutable_invariants", [])
         if not isinstance(items, list):
             return []
-        result: list[dict[str, str]] = []
-        for item in items:
-            if isinstance(item, dict) and item.get("id") and item.get("statement"):
-                result.append({"id": str(item["id"]), "statement": str(item["statement"])})
-        return result
+        return [
+            {"id": str(item["id"]), "statement": str(item["statement"])}
+            for item in items
+            if isinstance(item, dict) and item.get("id") and item.get("statement")
+        ]
 
     @property
     def commitments(self) -> list[str]:
@@ -181,7 +187,7 @@ class LineageEvent:
 
 
 class IdentityStore:
-    """Persistent self-model and hash-chained lineage state sharing ELIA's SQLite DB."""
+    """Persistent self-model and full-history hash-chained lineage state."""
 
     BRANCH_TRANSITION_EVENTS = {"fork", "branch_fork", "recovery_fork"}
 
@@ -277,6 +283,8 @@ class IdentityStore:
     def _migrate_legacy_lineage_hashes(cls, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT * FROM lineage_events ORDER BY id ASC").fetchall()
         previous = LINEAGE_GENESIS_HASH
+        saw_hashed = False
+        saw_legacy = False
         for row in rows:
             stored_previous = str(row["previous_hash"] or "")
             stored_hash = str(row["event_hash"] or "")
@@ -284,22 +292,36 @@ class IdentityStore:
                 raise RuntimeError(
                     f"lineage event {int(row['id'])} has a partial hash migration"
                 )
+            if stored_previous:
+                saw_hashed = True
+                if saw_legacy:
+                    raise RuntimeError("lineage has mixed legacy/hashed suffix state")
+                if stored_previous != previous:
+                    raise RuntimeError(
+                        f"lineage previous_hash mismatch during migration at event {int(row['id'])}"
+                    )
+                expected = cls._row_hash(row, previous)
+                if stored_hash != expected:
+                    raise RuntimeError(
+                        f"lineage event_hash mismatch during migration at event {int(row['id'])}"
+                    )
+                previous = stored_hash
+                continue
+
+            if saw_hashed:
+                raise RuntimeError("lineage has legacy rows after hashed rows")
+            saw_legacy = True
             expected = cls._row_hash(row, previous)
-            if not stored_previous:
-                conn.execute(
-                    "UPDATE lineage_events SET previous_hash=?, event_hash=? WHERE id=?",
-                    (previous, expected, int(row["id"])),
-                )
-                stored_previous = previous
-                stored_hash = expected
-            previous = stored_hash
+            conn.execute(
+                "UPDATE lineage_events SET previous_hash=?, event_hash=? WHERE id=?",
+                (previous, expected, int(row["id"])),
+            )
+            previous = expected
 
     def record_self_model(
         self, snapshot: SelfModelSnapshot | dict[str, Any], *, source: str = "runtime"
     ) -> tuple[int, str]:
-        payload = (
-            snapshot.as_dict() if isinstance(snapshot, SelfModelSnapshot) else dict(snapshot)
-        )
+        payload = snapshot.as_dict() if isinstance(snapshot, SelfModelSnapshot) else dict(snapshot)
         identity_fp = str(payload.get("identity_fingerprint", "")).strip()
         if not identity_fp:
             raise ValueError("self-model snapshot requires identity_fingerprint")
@@ -376,8 +398,8 @@ class IdentityStore:
             head = conn.execute(
                 "SELECT event_hash FROM lineage_events ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            previous_hash = str(head["event_hash"]) if head else LINEAGE_GENESIS_HASH
-            if head and (len(previous_hash) != 64 or not previous_hash.strip("0123456789abcdef")):
+            previous_hash = str(head["event_hash"]).lower() if head else LINEAGE_GENESIS_HASH
+            if head and not _valid_digest(previous_hash):
                 raise RuntimeError("lineage head hash is malformed")
             event_hash = _lineage_hash(
                 timestamp=timestamp,
@@ -444,15 +466,14 @@ class IdentityStore:
     def lineage(self, limit: int | None = 100) -> list[LineageEvent]:
         with self._connect() as conn:
             if limit is None:
+                rows = conn.execute("SELECT * FROM lineage_events ORDER BY id ASC").fetchall()
+            else:
                 rows = conn.execute(
-                    "SELECT * FROM lineage_events ORDER BY id ASC"
+                    "SELECT * FROM lineage_events ORDER BY id DESC LIMIT ?",
+                    (max(1, min(int(limit), 100_000)),),
                 ).fetchall()
-                return [self._lineage_event(row) for row in rows]
-            rows = conn.execute(
-                "SELECT * FROM lineage_events ORDER BY id DESC LIMIT ?",
-                (max(1, min(int(limit), 100_000)),),
-            ).fetchall()
-        return [self._lineage_event(row) for row in reversed(rows)]
+                rows = list(reversed(rows))
+        return [self._lineage_event(row) for row in rows]
 
     def last_lineage(self) -> LineageEvent | None:
         items = self.lineage(1)
@@ -488,6 +509,8 @@ class IdentityStore:
             if event.id <= previous_id:
                 return False, f"non-monotonic lineage event id at {event.id}"
             previous_id = event.id
+            if not _valid_digest(event.event_hash) or not _valid_digest(event.previous_hash):
+                return False, f"malformed lineage hash at event {event.id}"
             if event.previous_hash != previous_hash:
                 return False, f"lineage previous_hash mismatch at event {event.id}"
             expected_hash = _lineage_hash(
