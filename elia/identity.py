@@ -11,6 +11,9 @@ from typing import Any
 import yaml
 
 
+LINEAGE_GENESIS_HASH = "0" * 64
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -22,6 +25,39 @@ def _canonical(value: Any) -> bytes:
 
 def _fingerprint(value: Any) -> str:
     return sha256(_canonical(value)).hexdigest()
+
+
+def _lineage_material(
+    *,
+    timestamp: str,
+    event: str,
+    branch_id: str,
+    body_version: str,
+    brain_backend: str,
+    model_id: str,
+    identity_fingerprint: str,
+    checkpoint_digest: str | None,
+    parent_checkpoint_digest: str | None,
+    note: str,
+    previous_hash: str,
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "event": event,
+        "branch_id": branch_id,
+        "body_version": body_version,
+        "brain_backend": brain_backend,
+        "model_id": model_id,
+        "identity_fingerprint": identity_fingerprint,
+        "checkpoint_digest": checkpoint_digest,
+        "parent_checkpoint_digest": parent_checkpoint_digest,
+        "note": note,
+        "previous_hash": previous_hash,
+    }
+
+
+def _lineage_hash(**kwargs: Any) -> str:
+    return _fingerprint(_lineage_material(**kwargs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +176,12 @@ class LineageEvent:
     checkpoint_digest: str | None
     parent_checkpoint_digest: str | None
     note: str
+    previous_hash: str
+    event_hash: str
 
 
 class IdentityStore:
-    """Persistent self-model and lineage state sharing ELIA's SQLite database."""
+    """Persistent self-model and hash-chained lineage state sharing ELIA's SQLite DB."""
 
     BRANCH_TRANSITION_EVENTS = {"fork", "branch_fork", "recovery_fork"}
 
@@ -153,9 +191,10 @@ class IdentityStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -184,7 +223,9 @@ class IdentityStore:
                     identity_fingerprint TEXT NOT NULL,
                     checkpoint_digest TEXT NULL,
                     parent_checkpoint_digest TEXT NULL,
-                    note TEXT NOT NULL DEFAULT ''
+                    note TEXT NOT NULL DEFAULT '',
+                    previous_hash TEXT NOT NULL DEFAULT '',
+                    event_hash TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_lineage_events_id
                     ON lineage_events(id ASC);
@@ -192,15 +233,73 @@ class IdentityStore:
                     ON lineage_events(branch_id, id ASC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(lineage_events)").fetchall()
+            }
+            if "previous_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE lineage_events ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''"
+                )
+            if "event_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE lineage_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''"
+                )
+            self._migrate_legacy_lineage_hashes(conn)
 
     @staticmethod
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _row_hash(row: sqlite3.Row, previous_hash: str) -> str:
+        return _lineage_hash(
+            timestamp=str(row["timestamp"]),
+            event=str(row["event"]),
+            branch_id=str(row["branch_id"]),
+            body_version=str(row["body_version"]),
+            brain_backend=str(row["brain_backend"]),
+            model_id=str(row["model_id"]),
+            identity_fingerprint=str(row["identity_fingerprint"]),
+            checkpoint_digest=(
+                str(row["checkpoint_digest"]) if row["checkpoint_digest"] else None
+            ),
+            parent_checkpoint_digest=(
+                str(row["parent_checkpoint_digest"])
+                if row["parent_checkpoint_digest"]
+                else None
+            ),
+            note=str(row["note"]),
+            previous_hash=previous_hash,
+        )
+
+    @classmethod
+    def _migrate_legacy_lineage_hashes(cls, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("SELECT * FROM lineage_events ORDER BY id ASC").fetchall()
+        previous = LINEAGE_GENESIS_HASH
+        for row in rows:
+            stored_previous = str(row["previous_hash"] or "")
+            stored_hash = str(row["event_hash"] or "")
+            if bool(stored_previous) != bool(stored_hash):
+                raise RuntimeError(
+                    f"lineage event {int(row['id'])} has a partial hash migration"
+                )
+            expected = cls._row_hash(row, previous)
+            if not stored_previous:
+                conn.execute(
+                    "UPDATE lineage_events SET previous_hash=?, event_hash=? WHERE id=?",
+                    (previous, expected, int(row["id"])),
+                )
+                stored_previous = previous
+                stored_hash = expected
+            previous = stored_hash
+
     def record_self_model(
         self, snapshot: SelfModelSnapshot | dict[str, Any], *, source: str = "runtime"
     ) -> tuple[int, str]:
-        payload = snapshot.as_dict() if isinstance(snapshot, SelfModelSnapshot) else dict(snapshot)
+        payload = (
+            snapshot.as_dict() if isinstance(snapshot, SelfModelSnapshot) else dict(snapshot)
+        )
         identity_fp = str(payload.get("identity_fingerprint", "")).strip()
         if not identity_fp:
             raise ValueError("self-model snapshot requires identity_fingerprint")
@@ -234,7 +333,15 @@ class IdentityStore:
         if row is None:
             return None
         item = json.loads(row["snapshot_json"])
-        item["snapshot_fingerprint"] = str(row["snapshot_fingerprint"])
+        if not isinstance(item, dict):
+            raise RuntimeError("latest self-model payload is not a JSON object")
+        stored = str(row["snapshot_fingerprint"])
+        actual = _fingerprint(item)
+        if actual != stored:
+            raise RuntimeError(
+                f"self-model snapshot fingerprint mismatch: stored={stored}, actual={actual}"
+            )
+        item["snapshot_fingerprint"] = stored
         return item
 
     def record_lineage(
@@ -252,61 +359,100 @@ class IdentityStore:
     ) -> int:
         event = str(event).strip()[:64]
         branch_id = str(branch_id).strip()[:128]
+        identity_fingerprint = str(identity_fingerprint).strip()[:128]
         if not event or not branch_id or not identity_fingerprint:
             raise ValueError("lineage event, branch_id and identity_fingerprint are required")
+        timestamp = self.now()
+        body_version = str(body_version)[:64]
+        brain_backend = str(brain_backend)[:128]
+        model_id = str(model_id)[:512]
+        checkpoint_digest = str(checkpoint_digest)[:128] if checkpoint_digest else None
+        parent_checkpoint_digest = (
+            str(parent_checkpoint_digest)[:128] if parent_checkpoint_digest else None
+        )
+        note = str(note)[:4000]
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            head = conn.execute(
+                "SELECT event_hash FROM lineage_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            previous_hash = str(head["event_hash"]) if head else LINEAGE_GENESIS_HASH
+            if head and (len(previous_hash) != 64 or not previous_hash.strip("0123456789abcdef")):
+                raise RuntimeError("lineage head hash is malformed")
+            event_hash = _lineage_hash(
+                timestamp=timestamp,
+                event=event,
+                branch_id=branch_id,
+                body_version=body_version,
+                brain_backend=brain_backend,
+                model_id=model_id,
+                identity_fingerprint=identity_fingerprint,
+                checkpoint_digest=checkpoint_digest,
+                parent_checkpoint_digest=parent_checkpoint_digest,
+                note=note,
+                previous_hash=previous_hash,
+            )
             cur = conn.execute(
                 """
                 INSERT INTO lineage_events(
                     timestamp, event, branch_id, body_version, brain_backend, model_id,
-                    identity_fingerprint, checkpoint_digest, parent_checkpoint_digest, note
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    identity_fingerprint, checkpoint_digest, parent_checkpoint_digest,
+                    note, previous_hash, event_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self.now(),
+                    timestamp,
                     event,
                     branch_id,
-                    str(body_version)[:64],
-                    str(brain_backend)[:128],
-                    str(model_id)[:512],
-                    str(identity_fingerprint)[:128],
-                    str(checkpoint_digest)[:128] if checkpoint_digest else None,
-                    str(parent_checkpoint_digest)[:128] if parent_checkpoint_digest else None,
-                    str(note)[:4000],
+                    body_version,
+                    brain_backend,
+                    model_id,
+                    identity_fingerprint,
+                    checkpoint_digest,
+                    parent_checkpoint_digest,
+                    note,
+                    previous_hash,
+                    event_hash,
                 ),
             )
             return int(cur.lastrowid)
 
-    def lineage(self, limit: int = 100) -> list[LineageEvent]:
+    @staticmethod
+    def _lineage_event(row: sqlite3.Row) -> LineageEvent:
+        return LineageEvent(
+            id=int(row["id"]),
+            timestamp=str(row["timestamp"]),
+            event=str(row["event"]),
+            branch_id=str(row["branch_id"]),
+            body_version=str(row["body_version"]),
+            brain_backend=str(row["brain_backend"]),
+            model_id=str(row["model_id"]),
+            identity_fingerprint=str(row["identity_fingerprint"]),
+            checkpoint_digest=(
+                str(row["checkpoint_digest"]) if row["checkpoint_digest"] else None
+            ),
+            parent_checkpoint_digest=(
+                str(row["parent_checkpoint_digest"])
+                if row["parent_checkpoint_digest"]
+                else None
+            ),
+            note=str(row["note"]),
+            previous_hash=str(row["previous_hash"]),
+            event_hash=str(row["event_hash"]),
+        )
+
+    def lineage(self, limit: int | None = 100) -> list[LineageEvent]:
         with self._connect() as conn:
+            if limit is None:
+                rows = conn.execute(
+                    "SELECT * FROM lineage_events ORDER BY id ASC"
+                ).fetchall()
+                return [self._lineage_event(row) for row in rows]
             rows = conn.execute(
-                """
-                SELECT * FROM lineage_events
-                ORDER BY id DESC LIMIT ?
-                """,
-                (max(1, min(int(limit), 1000)),),
+                "SELECT * FROM lineage_events ORDER BY id DESC LIMIT ?",
+                (max(1, min(int(limit), 100_000)),),
             ).fetchall()
-        result = [
-            LineageEvent(
-                id=int(row["id"]),
-                timestamp=str(row["timestamp"]),
-                event=str(row["event"]),
-                branch_id=str(row["branch_id"]),
-                body_version=str(row["body_version"]),
-                brain_backend=str(row["brain_backend"]),
-                model_id=str(row["model_id"]),
-                identity_fingerprint=str(row["identity_fingerprint"]),
-                checkpoint_digest=str(row["checkpoint_digest"]) if row["checkpoint_digest"] else None,
-                parent_checkpoint_digest=(
-                    str(row["parent_checkpoint_digest"])
-                    if row["parent_checkpoint_digest"]
-                    else None
-                ),
-                note=str(row["note"]),
-            )
-            for row in rows
-        ]
-        return list(reversed(result))
+        return [self._lineage_event(row) for row in reversed(rows)]
 
     def last_lineage(self) -> LineageEvent | None:
         items = self.lineage(1)
@@ -325,18 +471,41 @@ class IdentityStore:
         actual = str(row["identity_fingerprint"])
         if actual != expected:
             return False, f"identity fingerprint changed: {actual} != {expected}"
+        try:
+            self.latest_self_model()
+        except RuntimeError as exc:
+            return False, str(exc)
         return True, None
 
     def verify_lineage(
         self, *, expected_identity_fingerprint: str, expected_branch_id: str
     ) -> tuple[bool, str | None]:
-        events = self.lineage(1000)
+        events = self.lineage(None)
         previous_id = 0
+        previous_hash = LINEAGE_GENESIS_HASH
         active_branch: str | None = None
         for event in events:
             if event.id <= previous_id:
                 return False, f"non-monotonic lineage event id at {event.id}"
             previous_id = event.id
+            if event.previous_hash != previous_hash:
+                return False, f"lineage previous_hash mismatch at event {event.id}"
+            expected_hash = _lineage_hash(
+                timestamp=event.timestamp,
+                event=event.event,
+                branch_id=event.branch_id,
+                body_version=event.body_version,
+                brain_backend=event.brain_backend,
+                model_id=event.model_id,
+                identity_fingerprint=event.identity_fingerprint,
+                checkpoint_digest=event.checkpoint_digest,
+                parent_checkpoint_digest=event.parent_checkpoint_digest,
+                note=event.note,
+                previous_hash=event.previous_hash,
+            )
+            if event.event_hash != expected_hash:
+                return False, f"lineage event_hash mismatch at event {event.id}"
+            previous_hash = event.event_hash
             if event.identity_fingerprint != expected_identity_fingerprint:
                 return False, f"lineage identity fingerprint mismatch at event {event.id}"
             if active_branch is None:
