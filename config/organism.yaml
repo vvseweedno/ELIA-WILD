@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 identity_id: elia-wild
 name: ELIA WILD Organism
 principle: >-
@@ -15,7 +15,7 @@ layers:
   world: evidence-bearing beliefs and empirical intervention experience
   assurance: critic, drift, continuity verification and revision validation
   agency: goals, needs, capabilities, skills, bounded action and body-revision proposals
-  metabolism: compute/resource accounting, homeostasis and opportunity economy
+  metabolism: verified resources, obligations, burn, runway, homeostasis and opportunity economy
   lifecycle: preflight, hibernation, checkpointing, supervisor and wake transport
   research: optional measured mutations and ablations
 
@@ -169,7 +169,7 @@ organs:
     required: true
     maturity: prototype
     authority: read_oriented_export
-    role: Publishes sanitized identity, continuity, world, sensorium, body and homeostasis state through a standard MCP v2 server port.
+    role: Publishes sanitized identity, continuity, world, sensorium, body and physiology state through a standard MCP v2 server port.
   - id: bounded_process_body
     layer: sensorium
     kind: python
@@ -278,15 +278,6 @@ organs:
     maturity: core
     authority: none
     role: Deterministic self-maintenance pressures from verified state.
-  - id: homeostasis
-    layer: metabolism
-    kind: python
-    module: elia.homeostasis
-    symbol: HomeostasisEngine
-    required: true
-    maturity: prototype
-    authority: none
-    role: Derives inspectable maintenance pressures from storage, transition integrity, sensor health, epistemic contradictions and body readiness below the LLM.
   - id: economy
     layer: metabolism
     kind: python
@@ -296,6 +287,33 @@ organs:
     maturity: core
     authority: local_state
     role: Separates estimates/opportunities from verified resource receipts.
+  - id: metabolism_store
+    layer: metabolism
+    kind: python
+    module: elia.metabolism
+    symbol: MetabolismStore
+    required: true
+    maturity: prototype
+    authority: trusted_local_state
+    role: Persists evidence-bearing recurring operating obligations; only verified obligations affect runway.
+  - id: metabolism_engine
+    layer: metabolism
+    kind: python
+    module: elia.metabolism
+    symbol: MetabolismEngine
+    required: true
+    maturity: prototype
+    authority: local_read
+    role: Computes per-resource burn/runway and measured weekly GPU energy without implicit cross-unit conversion.
+  - id: homeostasis
+    layer: metabolism
+    kind: python
+    module: elia.homeostasis
+    symbol: HomeostasisEngine
+    required: true
+    maturity: prototype
+    authority: none
+    role: Derives inspectable maintenance pressures from storage, transition integrity, sensor health, epistemic contradictions, verified resource runway and body readiness below the LLM.
   - id: lifecycle_preflight
     layer: lifecycle
     kind: python
@@ -347,9 +365,18 @@ organs:
     module: elia.organism_runtime
     symbol: OrganismRuntime
     required: true
+    maturity: proven
+    authority: composed
+    role: Tested Genesis 1.1 sensorimotor/world organism retained as the direct parent and rollback base for 1.2.
+  - id: metabolic_runtime
+    layer: agency
+    kind: python
+    module: elia.metabolic_runtime
+    symbol: MetabolicOrganismRuntime
+    required: true
     maturity: prototype
     authority: composed
-    role: Production 1.1 runtime integrating sensorium, world model, causal experience, homeostasis and state-bus continuity into every wake.
+    role: Production Genesis 1.2 runtime integrating verified resource metabolism into homeostasis and every cognitive wake.
   - id: research_registry
     layer: research
     kind: python
