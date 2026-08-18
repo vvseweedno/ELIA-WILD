@@ -12,8 +12,10 @@ from .config import Config, load_config
 from .crc import build_crc, compare_crc, read_crc, write_crc
 from .identity import IdentityBundle
 from .longitudinal import LongitudinalContinuityStore
+from .memory import MemoryStore
 from .organism import OrganismManifest, default_manifest_path
 from .research.registry import maturity_summary
+from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +27,7 @@ class VitalSignsReport:
     continuity_comparison: dict[str, Any] | None
     longitudinal: dict[str, Any]
     research_maturity: dict[str, list[str]]
+    transition_recovery: dict[str, Any] | None
     last_healthy_crc_path: str
     failure_evidence_path: str | None
 
@@ -33,19 +36,33 @@ class VitalSignsReport:
 
 
 class VitalSigns:
-    """Model-independent organism/continuity gate with long-horizon evidence.
+    """Model-independent organism/continuity gate with crash recovery.
 
-    The last *healthy* CRC is never replaced by a broken comparison. A failed check
-    preserves both the trusted prior capsule and separate failure evidence. Materially
-    new states are also written into a checkpointed longitudinal series.
+    Recovery happens before any CRC/audit projection is built. This is critical because
+    supervisor/CLI call VitalSigns before loading the cognitive runtime; an interrupted
+    transition must never be inspected or promoted as if it were an accepted state.
 
-    Genesis 1.7 treats Chronicle sequence monotonicity as insufficient: every
-    comparison to the accepted CRC proves that the prior `(seq, hash)` is an exact
-    validated prefix anchor of the current Chronicle.
+    The last *healthy* CRC is never replaced by a broken comparison. Genesis 1.7 also
+    proves that the prior accepted Chronicle `(seq, hash)` is an exact prefix anchor of
+    the current chain; monotonic sequence alone is not continuity evidence.
     """
 
     def __init__(self, config: Config, *, manifest_path: Path | None = None):
         self.config = config
+        self.chronicle = Chronicle(config.runtime.state_dir / "chronicle.jsonl")
+        self.transition_recovery: TransitionRecovery = (
+            AcceptedTransitionGuard.recover_incomplete(
+                config.runtime.state_dir,
+                self.chronicle,
+            )
+        )
+        # load_config may have observed dirty branch meta before recovery. Reconcile the
+        # mutable in-memory Config to the restored accepted branch before CRC/vitals.
+        memory = MemoryStore(config.runtime.state_dir / "memory.sqlite3")
+        persisted_branch = memory.get_meta("branch_id")
+        if persisted_branch:
+            self.config.branch_id = str(persisted_branch)
+
         self.identity = IdentityBundle.load(
             config.subject_core_path,
             config.continuity_constitution_path,
@@ -57,7 +74,6 @@ class VitalSigns:
         self.longitudinal = LongitudinalContinuityStore(
             config.runtime.state_dir / "memory.sqlite3"
         )
-        self.chronicle = Chronicle(config.runtime.state_dir / "chronicle.jsonl")
 
     def _persist_report(self, report: VitalSignsReport) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -112,6 +128,11 @@ class VitalSigns:
             continuity_comparison=comparison_dict,
             longitudinal=self.longitudinal.summary(),
             research_maturity=maturity_summary(),
+            transition_recovery=(
+                self.transition_recovery.as_dict()
+                if self.transition_recovery.recovered
+                else None
+            ),
             last_healthy_crc_path=str(self.last_healthy_crc_path),
             failure_evidence_path=str(failure_path) if failure_path else None,
         )
