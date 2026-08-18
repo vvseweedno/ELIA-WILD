@@ -70,8 +70,13 @@ class HomeostasisEngine:
             return "strained"
         return "stable"
 
-    def evaluate(self) -> HomeostasisSnapshot:
+    def evaluate(
+        self,
+        *,
+        ignore_transaction_ids: set[str] | None = None,
+    ) -> HomeostasisSnapshot:
         signals: list[HomeostaticSignal] = []
+        ignored = set(ignore_transaction_ids or set())
 
         usage = shutil.disk_usage(self.state_dir)
         free_ratio = usage.free / usage.total if usage.total else 0.0
@@ -102,9 +107,14 @@ class HomeostasisEngine:
                 )
             )
 
-        incomplete = self.state_bus.incomplete(128)
+        incomplete = [
+            item
+            for item in self.state_bus.incomplete(128)
+            if str(item["transaction_id"]) not in ignored
+        ]
         state_bus = {
             "incomplete_count": len(incomplete),
+            "ignored_active_count": len(ignored),
             "oldest_incomplete": incomplete[0] if incomplete else None,
         }
         if incomplete:
