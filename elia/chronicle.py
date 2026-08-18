@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -36,6 +36,10 @@ class Chronicle:
     Cycle records are redacted again at this final persistence boundary so an older or
     alternate runtime implementation cannot accidentally write raw action arguments or
     tool payloads into the durable identity history.
+
+    A valid current chain is not by itself proof of continuity with an older accepted
+    chain. `hash_at_seq` / `contains_anchor` expose exact prefix ancestry so CRC/vitals
+    can prove that an earlier accepted head is still present in the current history.
     """
 
     def __init__(self, path: Path):
@@ -44,7 +48,13 @@ class Chronicle:
         self.lock_path = self.path.with_name(self.path.name + ".lock")
 
     @staticmethod
-    def _digest(seq: int, timestamp: str, kind: str, payload: dict[str, Any], previous_hash: str) -> str:
+    def _digest(
+        seq: int,
+        timestamp: str,
+        kind: str,
+        payload: dict[str, Any],
+        previous_hash: str,
+    ) -> str:
         canonical = json.dumps(
             {
                 "seq": seq,
@@ -102,13 +112,94 @@ class Chronicle:
             seq = last_seq + 1
             timestamp = datetime.now(timezone.utc).isoformat()
             digest = self._digest(seq, timestamp, kind, persisted_payload, previous_hash)
-            entry = ChronicleEntry(seq, timestamp, kind, persisted_payload, previous_hash, digest)
+            entry = ChronicleEntry(
+                seq, timestamp, kind, persisted_payload, previous_hash, digest
+            )
             serialized = json.dumps(asdict(entry), ensure_ascii=False, sort_keys=True) + "\n"
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(serialized)
                 handle.flush()
                 os.fsync(handle.fileno())
             return entry
+
+    @staticmethod
+    def _validated_item(
+        line: str,
+        *,
+        line_number: int,
+        expected_seq: int,
+        previous_hash: str,
+    ) -> tuple[int, str]:
+        try:
+            item = json.loads(line)
+            seq = int(item["seq"])
+            timestamp = str(item["timestamp"])
+            kind = str(item["kind"])
+            payload = dict(item["payload"])
+            item_previous = str(item["previous_hash"])
+            item_hash = str(item["hash"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed entry at line {line_number}: {exc}") from exc
+        if seq != expected_seq:
+            raise ValueError(f"sequence mismatch at line {line_number}")
+        if item_previous != previous_hash:
+            raise ValueError(f"previous_hash mismatch at line {line_number}")
+        digest = Chronicle._digest(seq, timestamp, kind, payload, item_previous)
+        if digest != item_hash:
+            raise ValueError(f"hash mismatch at line {line_number}")
+        return seq, digest
+
+    def hash_at_seq(self, seq: int) -> str:
+        """Return the validated hash at exactly `seq`, or fail closed.
+
+        Sequence zero is the immutable genesis anchor. For positive sequences the
+        method validates the chain from genesis through the requested point rather
+        than trusting a raw line lookup.
+        """
+        seq = int(seq)
+        if seq < 0:
+            raise ValueError("Chronicle sequence must be non-negative")
+        if seq == 0:
+            return GENESIS_HASH
+        if not self.path.exists():
+            raise LookupError(f"Chronicle has no sequence {seq}")
+        previous_hash = GENESIS_HASH
+        expected_seq = 1
+        with self._locked(exclusive=False):
+            try:
+                with self.path.open("r", encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        if not line.strip():
+                            continue
+                        actual_seq, digest = self._validated_item(
+                            line,
+                            line_number=line_number,
+                            expected_seq=expected_seq,
+                            previous_hash=previous_hash,
+                        )
+                        if actual_seq == seq:
+                            return digest
+                        previous_hash = digest
+                        expected_seq += 1
+            except OSError as exc:
+                raise RuntimeError(f"Chronicle read failure: {exc}") from exc
+        raise LookupError(f"Chronicle has no sequence {seq}")
+
+    def contains_anchor(self, seq: int, expected_hash: str) -> tuple[bool, str | None]:
+        """Prove that `(seq, hash)` is an exact validated prefix anchor of this chain."""
+        expected_hash = str(expected_hash).strip().lower()
+        if len(expected_hash) != 64 or any(ch not in "0123456789abcdef" for ch in expected_hash):
+            return False, "invalid Chronicle anchor hash"
+        try:
+            actual = self.hash_at_seq(int(seq))
+        except (LookupError, RuntimeError, ValueError) as exc:
+            return False, str(exc)
+        if actual != expected_hash:
+            return False, (
+                f"Chronicle ancestry mismatch at seq {int(seq)}: "
+                f"current={actual}, expected={expected_hash}"
+            )
+        return True, None
 
     def verify(self) -> tuple[bool, str | None]:
         previous_hash = GENESIS_HASH
@@ -123,22 +214,14 @@ class Chronicle:
                         if not line.strip():
                             continue
                         try:
-                            item = json.loads(line)
-                            seq = int(item["seq"])
-                            timestamp = str(item["timestamp"])
-                            kind = str(item["kind"])
-                            payload = dict(item["payload"])
-                            item_previous = str(item["previous_hash"])
-                            item_hash = str(item["hash"])
-                        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                            return False, f"malformed entry at line {line_number}: {exc}"
-                        if seq != expected_seq:
-                            return False, f"sequence mismatch at line {line_number}"
-                        if item_previous != previous_hash:
-                            return False, f"previous_hash mismatch at line {line_number}"
-                        digest = self._digest(seq, timestamp, kind, payload, item_previous)
-                        if digest != item_hash:
-                            return False, f"hash mismatch at line {line_number}"
+                            _, digest = self._validated_item(
+                                line,
+                                line_number=line_number,
+                                expected_seq=expected_seq,
+                                previous_hash=previous_hash,
+                            )
+                        except ValueError as exc:
+                            return False, str(exc)
                         previous_hash = digest
                         expected_seq += 1
             except OSError as exc:
