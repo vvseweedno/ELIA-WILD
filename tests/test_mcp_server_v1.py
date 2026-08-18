@@ -43,6 +43,7 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert {
                 "elia_status",
                 "elia_preflight",
+                "elia_executive",
                 "elia_world_query",
                 "elia_sensorium_recent",
                 "elia_body_diagnostics",
@@ -57,8 +58,26 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert "compute_energy" in status["metabolism"]
             assert "homeostasis" in status
             assert status["homeostasis"]["metabolism"] == status["metabolism"]
+            assert "executive" in status
+            assert status["executive"]["enabled"] is True
+            assert "plan" in status["executive"]
+            assert "energy" in status["executive"]
             assert "digital_body" in status
             assert "sensorium" in status
+
+            executive_result = await client.call_tool("elia_executive", {})
+            assert executive_result.is_error is False
+            executive = _structured(executive_result)
+            assert executive["enabled"] is True
+            assert isinstance(executive["plan"], dict)
+            assert executive["plan"]["cognitive_budget"]["tier"] in {
+                "none",
+                "low",
+                "normal",
+                "deep",
+            }
+            assert "energy" in executive
+            assert "recent" in executive
 
             world_result = await client.call_tool(
                 "elia_world_query",
@@ -86,7 +105,7 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             text = getattr(resource.contents[0], "text", "")
             identity = json.loads(text)
             assert identity["identity_id"] == "elia-wild"
-            assert identity["body_version"].startswith("1.2.")
+            assert identity["body_version"].startswith("1.3.")
 
     asyncio.run(exercise())
 

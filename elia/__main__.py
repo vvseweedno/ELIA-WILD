@@ -12,11 +12,12 @@ from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
 from .economy import EconomyStore
+from .executive_runtime import ExecutiveOrganismRuntime
+from .executive_status import executive_status
 from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
-from .metabolic_runtime import MetabolicOrganismRuntime
 from .metabolism import MetabolismEngine
 from .prompting import PromptTemplate
 from .skills import SkillRegistry
@@ -118,6 +119,17 @@ def _status_physiology(config, tools: ToolRegistry) -> tuple[dict[str, Any], dic
         metabolism_snapshot=metabolism,
     ).evaluate().as_dict()
     return metabolism, homeostasis
+
+
+def _load_drift(memory: MemoryStore) -> dict[str, Any]:
+    raw = memory.get_meta("last_drift_report", "") or ""
+    if not raw:
+        return {"status": "unknown"}
+    try:
+        item = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"status": "unknown", "error": "invalid stored drift report"}
+    return item if isinstance(item, dict) else {"status": "unknown"}
 
 
 def main() -> None:
@@ -237,6 +249,16 @@ def main() -> None:
             )
             existing_names.add(name)
         needs.sort(key=lambda item: (-float(item.get("severity", 0.0)), str(item.get("name", ""))))
+        drift = _load_drift(memory)
+        executive = executive_status(
+            config,
+            resources=resources,
+            needs=needs[:16],
+            active_goals=[asdict(goal) for goal in active_goals],
+            chronicle_valid=chronicle_valid,
+            chronicle_error=chronicle_error,
+            identity_drift=drift,
+        )
 
         anchor_path = state_dir / "checkpoint.anchor.json"
         anchor = None
@@ -279,6 +301,7 @@ def main() -> None:
                     "economy": economy,
                     "metabolism": metabolism,
                     "homeostasis": homeostasis,
+                    "executive": executive,
                     "world_model": tools.world_model.snapshot(24),
                     "sensorium": tools.observations.snapshot(8),
                     "causal_memory": tools.causal.snapshot(8),
@@ -352,7 +375,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = MetabolicOrganismRuntime(config)
+    runtime = ExecutiveOrganismRuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
@@ -362,6 +385,7 @@ def main() -> None:
         "brain_loaded": runtime.brain_loaded,
         "identity_fingerprint": runtime.identity.fingerprint,
         "self_model_fingerprint": runtime.memory.get_meta("self_model_fingerprint"),
+        "executive_enabled": runtime.executive_enabled,
     }
     if auto_checkpoint is not None:
         output["auto_checkpoint"] = auto_checkpoint

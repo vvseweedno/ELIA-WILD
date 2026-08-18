@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 identity_id: elia-wild
 name: ELIA WILD Organism
 principle: >-
@@ -14,6 +14,7 @@ layers:
   sensorium: normalized observations and replaceable digital body adapters
   world: evidence-bearing beliefs and empirical intervention experience
   assurance: critic, drift, continuity verification and revision validation
+  executive: deterministic attention arbitration and cognitive-energy control below the LLM
   agency: goals, needs, capabilities, skills, bounded action and body-revision proposals
   metabolism: verified resources, obligations, burn, runway, homeostasis and opportunity economy
   lifecycle: preflight, hibernation, checkpointing, supervisor and wake transport
@@ -133,7 +134,7 @@ organs:
     required: true
     maturity: prototype
     authority: local_state
-    role: Hash-chained write-ahead history for causal organism transitions and interruption recovery.
+    role: Hash-chained causal organism transitions and interruption recovery.
   - id: sensorimotor_fabric
     layer: sensorium
     kind: python
@@ -178,7 +179,7 @@ organs:
     required: false
     maturity: prototype
     authority: configured_executables
-    role: No-shell subprocess execution restricted to explicit executable aliases, workspace cwd and bounded resources.
+    role: Sandboxed subprocess execution restricted to explicit executable aliases and bounded resources.
   - id: jsonrpc_body
     layer: sensorium
     kind: python
@@ -278,6 +279,33 @@ organs:
     maturity: core
     authority: none
     role: Deterministic self-maintenance pressures from verified state.
+  - id: executive_controller
+    layer: executive
+    kind: python
+    module: elia.executive
+    symbol: ExecutiveController
+    required: true
+    maturity: prototype
+    authority: none
+    role: Arbitrates continuity, verified maintenance pressures and durable goals before model inference.
+  - id: executive_store
+    layer: executive
+    kind: python
+    module: elia.executive
+    symbol: ExecutiveStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: Persists pre-inference executive plans, context digests and measured post-cycle cognitive cost.
+  - id: cognitive_energy_controller
+    layer: executive
+    kind: python
+    module: elia.cognitive_energy
+    symbol: CognitiveEnergyController
+    required: true
+    maturity: prototype
+    authority: none
+    role: Uses measured brain-seconds feedback to conservatively constrain future inference budgets.
   - id: economy
     layer: metabolism
     kind: python
@@ -295,7 +323,7 @@ organs:
     required: true
     maturity: prototype
     authority: trusted_local_state
-    role: Persists evidence-bearing recurring operating obligations; only verified obligations affect runway.
+    role: Persists signed evidence-bearing recurring operating obligations; only verified obligations affect runway.
   - id: metabolism_engine
     layer: metabolism
     kind: python
@@ -367,16 +395,25 @@ organs:
     required: true
     maturity: proven
     authority: composed
-    role: Tested Genesis 1.1 sensorimotor/world organism retained as the direct parent and rollback base for 1.2.
+    role: Tested Genesis 1.1 sensorimotor/world organism retained as a rollback generation.
   - id: metabolic_runtime
     layer: agency
     kind: python
     module: elia.metabolic_runtime
     symbol: MetabolicOrganismRuntime
     required: true
+    maturity: proven
+    authority: composed
+    role: Genesis 1.2 verified-metabolism runtime retained as the direct parent and rollback base for 1.3.
+  - id: executive_runtime
+    layer: executive
+    kind: python
+    module: elia.executive_runtime
+    symbol: ExecutiveOrganismRuntime
+    required: true
     maturity: prototype
     authority: composed
-    role: Production Genesis 1.2 runtime integrating verified resource metabolism into homeostasis and every cognitive wake.
+    role: Genesis 1.3 candidate runtime that suppresses unnecessary inference and enforces cycle-local cognitive budgets before model action selection.
   - id: research_registry
     layer: research
     kind: python

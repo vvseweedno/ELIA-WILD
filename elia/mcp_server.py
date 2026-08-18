@@ -11,6 +11,7 @@ from typing import Any
 from . import __version__
 from .chronicle import Chronicle
 from .config import Config, load_config
+from .executive_status import executive_status_from_state
 from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
@@ -122,6 +123,7 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
         tools.body.diagnostics(),
         metabolism_snapshot=metabolism,
     ).evaluate().as_dict()
+    executive = executive_status_from_state(config, memory=memory, tools=tools)
     return {
         "identity": _identity_snapshot(config),
         "lifecycle": {
@@ -152,6 +154,7 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
             "signals": list(homeostasis.get("signals") or [])[:12],
             "metabolism": homeostasis.get("metabolism") or {},
         },
+        "executive": executive,
         "world": {
             "active_belief_count": len(world.get("beliefs") or []),
             "contradictions": list(world.get("contradictions") or [])[:16],
@@ -168,7 +171,7 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
 
 
 def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
-    """Build the Genesis 1.2 read-oriented MCP organism port without starting transport.
+    """Build the Genesis 1.3 read-oriented MCP organism port without starting transport.
 
     The exported port exposes sanitized organism state and world-query functions,
     never arbitrary shell execution, credentials, raw sensor payloads, mutation/
@@ -184,7 +187,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_status() -> dict[str, Any]:
-        """Return sanitized continuity, physiology, metabolism, resource and body status."""
+        """Return sanitized continuity, physiology, Executive and body status."""
         return _status_snapshot(config)
 
     @server.tool()
@@ -207,6 +210,11 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
             payload["mode"] = "halt"
             payload["reason"] = "Organism vital-sign audit failed."
         return payload
+
+    @server.tool()
+    def elia_executive() -> dict[str, Any]:
+        """Return current deterministic Executive plan and measured energy feedback."""
+        return executive_status_from_state(config)
 
     @server.tool()
     def elia_world_query(
@@ -251,7 +259,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_homeostasis() -> dict[str, Any]:
-        """Return deterministic Genesis 1.2 physiology including verified metabolism."""
+        """Return deterministic Genesis 1.3 physiology including verified metabolism."""
         tools = ToolRegistry(
             config.runtime.state_dir / "workspace",
             config.raw_tools,
@@ -265,7 +273,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.resource("elia://status")
     def status_resource() -> str:
-        """Sanitized organism status snapshot."""
+        """Sanitized organism status snapshot including Executive state."""
         return json.dumps(_status_snapshot(config), ensure_ascii=False, sort_keys=True)
 
     @server.resource("elia://sensorium/recent")
@@ -301,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=("stdio", "streamable-http"),
         default="stdio",
-        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.2",
+        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.3",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -317,7 +325,7 @@ def main() -> None:
 
     if not _is_loopback_host(args.host):
         raise SystemExit(
-            "Genesis 1.2 MCP HTTP transport is intentionally loopback-only because "
+            "Genesis 1.3 MCP HTTP transport is intentionally loopback-only because "
             "this server does not implement a remote authentication policy. Put an "
             "authenticated reverse proxy/tunnel in front of it instead of exposing it directly."
         )

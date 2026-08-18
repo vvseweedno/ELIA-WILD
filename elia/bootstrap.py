@@ -9,8 +9,8 @@ from typing import Any
 from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
+from .executive_runtime import ExecutiveOrganismRuntime
 from .identity import IdentityBundle
-from .metabolic_runtime import MetabolicOrganismRuntime
 from .vitals import VitalSigns
 
 
@@ -18,9 +18,9 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
     """Initialize/continue a zero-GPU ELIA state and prove the current organism path.
 
     The bootstrap uses the deterministic MockBrain explicitly, so it never imports the
-    configured expensive model backend. It exercises the Genesis 1.2 metabolic runtime,
-    including durable sensorium/world/causal wiring and verified resource physiology,
-    on a fresh CPU machine.
+    configured expensive model backend. It exercises the Genesis 1.3 Executive runtime,
+    including Sensorium/World/Causal/Metabolism wiring and deterministic cognitive
+    arbitration, on a fresh CPU machine.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -32,7 +32,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = MetabolicOrganismRuntime(config, brain=MockBrain())
+    runtime = ExecutiveOrganismRuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
@@ -42,6 +42,11 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
         "vitals": after.as_dict(),
         "brain_backend_used": "mock",
         "configured_brain_backend_not_loaded": config.brain.backend,
+        "executive_enabled": runtime.executive_enabled,
+        "executive_history": runtime.executive_store.recent(8),
+        "cognitive_energy": runtime.cognitive_energy.summarize(
+            runtime.executive_store.recent(runtime.EXECUTIVE_HISTORY_LIMIT)
+        ).as_dict(),
         "metabolism": runtime._metabolism_snapshot(),
         "homeostasis": runtime._homeostasis_snapshot(),
         "world_model": runtime.tools.world_model.snapshot(12),
