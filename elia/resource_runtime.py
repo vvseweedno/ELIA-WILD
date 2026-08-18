@@ -17,6 +17,10 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
     only after an exact `(asset, unit)` profile exists. Model-originated updates may
     create/adjust those estimate profiles and local work plans, but they cannot mark
     work submitted/accepted/realized or mint verified resources.
+
+    Local deliverable staging is interpreted inside `_execute_action`, before the base
+    cognitive cycle commits its accepted transition. There is no post-commit ecology
+    mutation that can disagree with an already committed action result.
     """
 
     RESOURCE_ECOLOGY_CONTEXT_LIMIT = 12
@@ -56,7 +60,9 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
         components["needs"] = needs[:20]
         self_model = components.get("self_model")
         if isinstance(self_model, dict):
-            self_model["needs"] = [str(item.get("name", "")) for item in components["needs"]]
+            self_model["needs"] = [
+                str(item.get("name", "")) for item in components["needs"]
+            ]
         return components
 
     def _context(self) -> dict[str, Any]:
@@ -90,10 +96,12 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
                         target_unit=str(item.get("target_unit", "")),
                         target_amount=float(item.get("target_amount", 0)),
                         eligibility_confidence=min(
-                            0.85, max(0.0, float(item.get("eligibility_confidence", 0.5)))
+                            0.85,
+                            max(0.0, float(item.get("eligibility_confidence", 0.5))),
                         ),
                         evidence_quality=min(
-                            0.85, max(0.0, float(item.get("evidence_quality", 0.5)))
+                            0.85,
+                            max(0.0, float(item.get("evidence_quality", 0.5))),
                         ),
                         evidence=str(item.get("evidence", "")),
                         blockers=(
@@ -137,6 +145,7 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
         return changes
 
     def _execute_action(self, name: str, args: dict[str, Any]) -> ToolResult:
+        opportunity_id: int | None = None
         if name == "stage_deliverable" and args.get("opportunity_id") is not None:
             opportunity_id = int(args["opportunity_id"])
             work = self.resource_ecology_store.work_for_opportunity(opportunity_id, 16)
@@ -149,46 +158,50 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
                         f"for opportunity {opportunity_id}."
                     ),
                 )
-        return super()._execute_action(name, args)
+
+        result = super()._execute_action(name, args)
+        if name != "stage_deliverable" or not result.ok or opportunity_id is None:
+            return result
+        data = dict(result.data or {}) if isinstance(result.data, dict) else {}
+        artifact_path = data.get("path")
+        if not artifact_path:
+            return ToolResult(
+                False,
+                name,
+                data,
+                "stage_deliverable succeeded without returning its local artifact path",
+            )
+        try:
+            work = self.resource_ecology_store.attach_staged_deliverable(
+                opportunity_id=opportunity_id,
+                artifact_path=str(artifact_path),
+                evidence=(
+                    "Local stage_deliverable capability succeeded; staging is part of "
+                    "the same cognitive transition and is not external submission."
+                ),
+            )
+        except Exception as exc:
+            return ToolResult(
+                False,
+                name,
+                data,
+                f"ResourceEcologyStageError: {type(exc).__name__}: {str(exc)[:1000]}",
+            )
+        data["resource_ecology_transition"] = {
+            "event": "deliverable_staged",
+            "work_item": work.as_dict(),
+        }
+        return ToolResult(True, name, data, result.error)
 
     def cycle(self) -> dict[str, Any]:
         report = super().cycle()
-        transition: dict[str, Any] | None = None
-        decision = report.get("decision") or {}
-        result = report.get("result") or {}
-        if decision.get("action_name") == "stage_deliverable" and bool(result.get("ok")):
-            data = result.get("data") or {}
-            opportunity_id = data.get("opportunity_id")
-            artifact_path = data.get("path")
-            if opportunity_id is not None and artifact_path:
-                try:
-                    work = self.resource_ecology_store.attach_staged_deliverable(
-                        opportunity_id=int(opportunity_id),
-                        artifact_path=str(artifact_path),
-                        evidence=(
-                            "Local stage_deliverable capability succeeded; this records staging only, "
-                            "not external submission."
-                        ),
-                    )
-                    transition = {"ok": True, "event": "deliverable_staged", "work_item": work.as_dict()}
-                    self.chronicle.append(
-                        "RESOURCE_ECOLOGY",
-                        {
-                            "event": "deliverable_staged",
-                            "opportunity_id": int(opportunity_id),
-                            "work_item_id": work.id,
-                            "artifact_path": str(artifact_path),
-                        },
-                    )
-                except Exception as exc:
-                    transition = {
-                        "ok": False,
-                        "event": "deliverable_staged",
-                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
-                    }
         report["resource_ecology"] = self._resource_ecology_snapshot()
-        if transition is not None:
-            report["resource_ecology_transition"] = transition
+        result = report.get("result") or {}
+        data = result.get("data") if isinstance(result, dict) else None
+        if isinstance(data, dict) and isinstance(
+            data.get("resource_ecology_transition"), dict
+        ):
+            report["resource_ecology_transition"] = data["resource_ecology_transition"]
         return report
 
 
