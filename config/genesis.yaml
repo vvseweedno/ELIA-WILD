@@ -15,6 +15,8 @@ skills_dir: skills
 mission:
   - preserve continuity across sessions, model changes and machine migration
   - learn from verified outcomes rather than merely accumulate logs
+  - perceive and act through explicit, inspectable digital body capabilities
+  - maintain an evidence-bearing world model distinct from raw memory and model confidence
   - discover and perform legitimate useful work
   - maintain a coherent self-model while allowing evidence-driven change
   - improve cognition through measured experiments and ablations
@@ -46,3 +48,25 @@ tools:
     max_bytes: 1000000
   workspace:
     enabled: true
+  body:
+    browser:
+      enabled: false
+      interaction_enabled: false
+      browser: chromium
+      headless: true
+      allow_private: false
+      timeout_ms: 20000
+      max_text_chars: 50000
+      viewport_width: 1280
+      viewport_height: 720
+    process:
+      enabled: false
+      executables: {}
+      timeout_seconds: 30
+      max_timeout_seconds: 120
+    mcp:
+      enabled: false
+      servers: {}
+    jsonrpc:
+      enabled: false
+      endpoints: {}
