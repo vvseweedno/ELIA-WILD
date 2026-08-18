@@ -9,17 +9,18 @@ from typing import Any
 from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
-from .external_work_runtime import ExternalWorkOrganismRuntime
+from .epistemic_runtime import EpistemicOrganismRuntime
+from .epistemic_status import epistemic_status
 from .identity import IdentityBundle
 from .vitals import VitalSigns
 
 
 def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None = None) -> dict[str, Any]:
-    """Initialize/continue a zero-GPU ELIA state and prove the current organism path.
+    """Initialize/continue zero-GPU ELIA state and prove the Genesis 1.6 organism path.
 
-    The bootstrap uses deterministic MockBrain and exercises the Genesis 1.5 runtime.
-    External work ports remain disabled by default, so bootstrap proves the port organ
-    and rollback-compatible body without requiring MCP credentials or external writes.
+    Deterministic MockBrain exercises the production Epistemic runtime without loading
+    Qwen. Expensive multi-organ deliberation remains Executive-gated; external work
+    ports and network body organs remain disabled by default.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -31,7 +32,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = ExternalWorkOrganismRuntime(config, brain=MockBrain())
+    runtime = EpistemicOrganismRuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
@@ -46,6 +47,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
         "cognitive_energy": runtime.cognitive_energy.summarize(
             runtime.executive_store.recent(runtime.EXECUTIVE_HISTORY_LIMIT)
         ).as_dict(),
+        "epistemic_ecosystem": epistemic_status(config),
         "metabolism": runtime._metabolism_snapshot(),
         "resource_ecology": runtime._resource_ecology_snapshot(),
         "work_ports": runtime.work_ports.diagnostics(),
