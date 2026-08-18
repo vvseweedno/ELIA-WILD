@@ -1,0 +1,69 @@
+schema_version: 9
+identity_id: elia-wild
+
+layers:
+  continuity_kernel: accepted-state, replay resistance, exact ancestry and crash recovery beneath cognition
+
+organs:
+  - id: verification_consumption_kernel
+    layer: continuity_kernel
+    kind: python
+    module: elia.verification
+    symbol: consume_verified_receipt
+    required: true
+    maturity: core
+    authority: trusted_verifier_only
+    role: >-
+      Authenticates exact signed claims and consumes each authority+nonce once in the
+      same SQLite transaction as the verified domain transition, preventing replay and
+      concurrent double counting across economy, metabolism, world facts and revision gates.
+
+  - id: accepted_transition_guard
+    layer: continuity_kernel
+    kind: python
+    module: elia.transition_kernel
+    symbol: AcceptedTransitionGuard
+    required: true
+    maturity: core
+    authority: local_state_recovery
+    role: >-
+      Captures the last accepted SQLite/Chronicle boundary before a production cycle,
+      accepts only an intact descendant state, and restores speculative local state after
+      exception or process death while preserving external work outbox evidence.
+
+  - id: continuity_kernel_runtime
+    layer: agency
+    kind: python
+    module: elia.continuity_runtime
+    symbol: ContinuityKernelRuntime
+    required: true
+    maturity: core
+    authority: composed
+    role: >-
+      Genesis 1.7 production runtime wrapping the complete Genesis 1.6 epistemic organism
+      in the accepted-transition kernel. Genesis 1.6 remains the direct rollback ancestor.
+
+  - id: chronicle_prefix_ancestry
+    layer: continuity_kernel
+    kind: python
+    module: elia.chronicle
+    symbol: Chronicle
+    required: true
+    maturity: core
+    authority: local_history_integrity
+    role: >-
+      Proves that a previous accepted Chronicle (sequence, hash) remains an exact validated
+      prefix anchor of the current chain; sequence growth alone is not continuity evidence.
+
+  - id: work_port_outbox
+    layer: continuity_kernel
+    kind: python
+    module: elia.work_ports
+    symbol: WorkPortStore
+    required: true
+    maturity: core
+    authority: configured_external_work_state
+    role: >-
+      Persists immutable idempotency intent before remote submission, distinguishes
+      sending/submitted/indeterminate outcomes and requires remote lookup before retrying
+      an ambiguous irreversible external effect.
