@@ -13,7 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<9"]
+test = [
+  "pytest>=8,<9",
+  "ruff>=0.12,<1",
+]
 browser = ["playwright>=1.50,<2"]
 mcp = ["mcp>=2,<3"]
 sensorimotor = [
@@ -46,3 +49,10 @@ include = ["elia*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Correctness-oriented gate only. Formatting/style can evolve independently.
+select = ["E9", "F63", "F7", "F82"]
