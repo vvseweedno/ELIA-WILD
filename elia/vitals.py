@@ -16,6 +16,7 @@ from .memory import MemoryStore
 from .organism import OrganismManifest, default_manifest_path
 from .research.registry import maturity_summary
 from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
+from .viability import run_deep_viability
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class VitalSignsReport:
     longitudinal: dict[str, Any]
     research_maturity: dict[str, list[str]]
     transition_recovery: dict[str, Any] | None
+    deep_viability: dict[str, Any] | None
     last_healthy_crc_path: str
     failure_evidence_path: str | None
 
@@ -45,6 +47,11 @@ class VitalSigns:
     The last *healthy* CRC is never replaced by a broken comparison. Genesis 1.7 also
     proves that the prior accepted Chronicle `(seq, hash)` is an exact prefix anchor of
     the current chain; monotonic sequence alone is not continuity evidence.
+
+    `check(deep=True)` additionally constructs a scratch zero-GPU production runtime,
+    resolves machine-readable viability contracts against the actual runtime graph,
+    verifies durable reconnects and deliberately rolls back a speculative accepted
+    transition. Deep mode never uses the configured model or external body authority.
     """
 
     def __init__(self, config: Config, *, manifest_path: Path | None = None):
@@ -83,7 +90,12 @@ class VitalSigns:
             encoding="utf-8",
         )
 
-    def check(self, *, persist: bool = True) -> VitalSignsReport:
+    def check(
+        self,
+        *,
+        persist: bool = True,
+        deep: bool = False,
+    ) -> VitalSignsReport:
         audit = self.manifest.audit(expected_identity_id=self.identity.identity_id)
         audit_dict = audit.as_dict()
         capsule = build_crc(self.config)
@@ -103,7 +115,14 @@ class VitalSigns:
             comparison_dict = comparison.as_dict()
             continuity_healthy = continuity_healthy and comparison.status != "broken"
 
-        healthy = bool(audit.healthy and continuity_healthy)
+        viability_dict: dict[str, Any] | None = None
+        viability_healthy = True
+        if deep:
+            viability = run_deep_viability(self.config, self.manifest)
+            viability_dict = viability.as_dict()
+            viability_healthy = viability.healthy
+
+        healthy = bool(audit.healthy and continuity_healthy and viability_healthy)
         failure_path: Path | None = None
         if persist:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -133,6 +152,7 @@ class VitalSigns:
                 if self.transition_recovery.recovered
                 else None
             ),
+            deep_viability=viability_dict,
             last_healthy_crc_path=str(self.last_healthy_crc_path),
             failure_evidence_path=str(failure_path) if failure_path else None,
         )
@@ -146,6 +166,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config/genesis.yaml")
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--no-persist", action="store_true")
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Run scratch zero-GPU production wiring, persistence and accepted-transition "
+            "fault probes in addition to ordinary import/anatomy/CRC checks"
+        ),
+    )
     return parser
 
 
@@ -155,7 +183,10 @@ def main() -> None:
     report = VitalSigns(
         config,
         manifest_path=Path(args.manifest) if args.manifest else None,
-    ).check(persist=not args.no_persist)
+    ).check(
+        persist=not args.no_persist,
+        deep=bool(args.deep),
+    )
     print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
     raise SystemExit(0 if report.healthy else 2)
 
