@@ -57,9 +57,6 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
         self._current_executive_energy = energy
         context["executive_energy"] = energy.as_dict()
         context["executive"] = plan.as_dict()
-        # Persist only after the final constrained plan is known. The context digest
-        # therefore commits the verified state that existed before inference plus the
-        # measured energy feedback used to select the cognitive envelope.
         self._current_executive_row_id = self.executive_store.record(plan, context)
         context["executive_history"] = self.executive_store.recent(self.EXECUTIVE_HISTORY_LIMIT)
         context["_system_prompt"] = self.prompt_template.render(context)
@@ -84,6 +81,15 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
             sleep_seconds=plan.sleep_seconds,
         )
 
+    def _before_brain(self, context: dict[str, Any], plan: ExecutivePlan) -> dict[str, Any]:
+        """Hook for bounded cognitive organs that must run only after Executive wake.
+
+        Subclasses may enrich the context inside the already-selected cognitive budget.
+        They must not grant capabilities, widen authority, or bypass a no-brain plan.
+        """
+        del plan
+        return context
+
     def _think(self, context: dict[str, Any]) -> Decision:
         if not self.executive_enabled:
             return super()._think(context)
@@ -98,11 +104,9 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
         try:
             if budget.max_tokens > 0:
                 brain_config.max_tokens = min(original_max_tokens, int(budget.max_tokens))
-            # Deep reasoning is an Executive decision. Explicitly configured thinking
-            # remains allowed, while the Executive may also elevate a deep tier when
-            # its policy permits adaptive thinking.
             brain_config.thinking = bool(original_thinking or budget.allow_thinking)
-            return super()._think(context)
+            enriched = self._before_brain(context, plan)
+            return super()._think(enriched)
         finally:
             brain_config.max_tokens = original_max_tokens
             brain_config.thinking = original_thinking

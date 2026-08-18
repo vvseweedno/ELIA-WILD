@@ -1,0 +1,131 @@
+schema_version: 8
+identity_id: elia-wild
+
+layers:
+  epistemic_ecosystem: differentiated temporary cognitive organs, evidence views, biographies and neutral adjudication
+
+organs:
+  - id: epistemic_registry
+    layer: epistemic_ecosystem
+    kind: artifact
+    path: config/epistemic.yaml
+    required: true
+    maturity: prototype
+    authority: none
+    role: >-
+      Defines exactly twelve Pearson-derived cognitive attention/evidence policies.
+      Archetype labels are not identities, permissions or truth authorities.
+
+  - id: cognitive_biographies
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic
+    symbol: CognitiveBiographyStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Base persistence contract for organ-specific packet/session history and weak
+      operational outcome association. Production credit semantics are tightened by
+      the selective_credit_store organ below.
+
+  - id: selective_credit_store
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_hardening
+    symbol: SelectiveCreditBiographyStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Applies downstream operational outcome credit only to adjudicator-supported
+      packets while keeping unsupported/dissenting packets unresolved. The signal
+      remains weak operational credit and is never interpreted as epistemic truth.
+
+  - id: evidence_view_projector
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_views
+    symbol: EvidenceViewProjector
+    required: true
+    maturity: prototype
+    authority: none
+    role: >-
+      Gives different organs different privacy-bounded evidence diets derived only
+      from the provider-safe context boundary. Absence from a view is not evidence of absence.
+
+  - id: epistemic_view_store
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_views
+    symbol: EpistemicViewStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Stores evidence-view digests, included field sets, size and failure state without
+      duplicating raw private context into a second long-lived memory store.
+
+  - id: resilient_epistemic_cortex
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_views
+    symbol: ResilientEpistemicCortex
+    required: true
+    maturity: prototype
+    authority: cognition_only
+    role: >-
+      Base fail-soft divergence/adjudication implementation. Individual organ/judge
+      failures degrade safely; below quorum no packet is promoted to synthesis.
+
+  - id: epistemic_security_boundary
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_hardening
+    symbol: HardenedEpistemicCortex
+    required: true
+    maturity: prototype
+    authority: cognition_only
+    role: >-
+      Production epistemic cortex that treats questions, evidence views, biographies
+      and packet fields as untrusted data. Embedded instructions cannot grant tool,
+      identity, account, payment or state-mutation authority.
+
+  - id: epistemic_runtime
+    layer: agency
+    kind: python
+    module: elia.epistemic_runtime
+    symbol: EpistemicOrganismRuntime
+    required: true
+    maturity: prototype
+    authority: composed
+    role: >-
+      Genesis 1.6 runtime integrating differentiated cognition inside the existing
+      Executive energy envelope while preserving one Self, one assurance boundary and
+      Genesis 1.5 as direct rollback ancestry.
+
+  - id: epistemic_diversity_ablation
+    layer: research
+    kind: python
+    module: elia.research.epistemic_ablation
+    symbol: EpistemicAblationHarness
+    required: false
+    maturity: prototype
+    authority: none
+    role: >-
+      Equal-call and equal maximum-output-token-ceiling comparison of Pearson-12,
+      homogeneous, random-role and domain-expert conditions. Exact input/total-token
+      equality requires tokenizer-aware accounting; diversity metrics are not accuracy.
+
+  - id: cognitive_biography_hysteresis
+    layer: research
+    kind: python
+    module: elia.research.cognitive_hysteresis
+    symbol: CognitiveBiographyHysteresisHarness
+    required: false
+    maturity: hypothesis
+    authority: none
+    role: >-
+      Tests whether output differentiation persists after role-policy homogenization
+      when organ biographies are preserved, against a clean-history control. A positive
+      result is not interpreted as human personality or consciousness.

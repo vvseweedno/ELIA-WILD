@@ -44,6 +44,7 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
                 "elia_status",
                 "elia_preflight",
                 "elia_executive",
+                "elia_epistemic",
                 "elia_resource_ecology",
                 "elia_work_ports",
                 "elia_world_query",
@@ -65,6 +66,9 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert status["work_ports"]["enabled"] is False
             assert "submission_ref" not in json.dumps(status["work_ports"], sort_keys=True)
             assert "exact_bottleneck_candidate_count" in status["resource_ecology"]
+            assert "epistemic_ecosystem" in status
+            assert len(status["epistemic_ecosystem"]["organs"]) == 12
+            assert "recent_sessions" not in status["epistemic_ecosystem"]
             assert "homeostasis" in status
             assert status["homeostasis"]["metabolism"] == status["metabolism"]
             assert "executive" in status
@@ -73,6 +77,14 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert "energy" in status["executive"]
             assert "digital_body" in status
             assert "sensorium" in status
+
+            epistemic_result = await client.call_tool("elia_epistemic", {})
+            assert epistemic_result.is_error is False
+            epistemic = _structured(epistemic_result)
+            assert len(epistemic["organs"]) == 12
+            assert "biographies" in epistemic
+            assert "recent_sessions" not in epistemic
+            assert "recent" not in json.dumps(epistemic["biographies"], sort_keys=True)
 
             work_ports_result = await client.call_tool("elia_work_ports", {})
             assert work_ports_result.is_error is False
@@ -130,7 +142,14 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             text = getattr(resource.contents[0], "text", "")
             identity = json.loads(text)
             assert identity["identity_id"] == "elia-wild"
-            assert identity["body_version"].startswith("1.5.")
+            assert identity["body_version"].startswith("1.6.")
+
+            epistemic_resource = await client.read_resource("elia://epistemic")
+            assert epistemic_resource.contents
+            epistemic_text = getattr(epistemic_resource.contents[0], "text", "")
+            epistemic_from_resource = json.loads(epistemic_text)
+            assert len(epistemic_from_resource["organs"]) == 12
+            assert "recent_sessions" not in epistemic_text
 
             ecology_resource = await client.read_resource("elia://resource-ecology")
             assert ecology_resource.contents

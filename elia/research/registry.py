@@ -170,6 +170,36 @@ RESEARCH_REGISTRY: dict[str, ResearchArtifact] = {
             "Reference metrics are diagnostics and are not language-model performance claims.",
         ),
     ),
+    "epistemic_diversity_ablation": ResearchArtifact(
+        "epistemic_diversity_ablation",
+        "epistemic",
+        "prototype",
+        "Compare Pearson-12 cognitive diversity against homogeneous, random-role and domain-expert controls under equal compute budgets.",
+        (
+            "Genesis 1.6 includes an executable equal-call/token-budget harness.",
+            "Built-in lexical diversity and falsifier/counterexample coverage are not accuracy metrics; superiority requires external ground truth/evaluation.",
+        ),
+    ),
+    "cognitive_biography_hysteresis": ResearchArtifact(
+        "cognitive_biography_hysteresis",
+        "epistemic",
+        "hypothesis",
+        "Test whether differentiated organ histories cause persistent behavioral differences after role-policy prompts are reset or homogenized.",
+        (
+            "The hypothesis follows the project observation that durable memory should causally alter later reasoning rather than merely decorate prompts.",
+            "No repository-local experiment yet establishes a hysteresis effect or its magnitude.",
+        ),
+    ),
+    "latent_communication": ResearchArtifact(
+        "latent_communication",
+        "epistemic",
+        "hypothesis",
+        "Test local-model hidden-state/concept channels as an optional communication substrate between cognitive organs versus text/evidence packets.",
+        (
+            "This remains research-only: ordinary remote model APIs do not expose a trustworthy hidden-state channel.",
+            "Any latent-channel claim must beat text/evidence-packet baselines on downstream task quality under controlled compute, not merely preserve more internal features.",
+        ),
+    ),
     "complex_rmsnorm": ResearchArtifact(
         "complex_rmsnorm",
         "holo",

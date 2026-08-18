@@ -1,0 +1,26 @@
+name: epistemic_diversity
+version: 1
+description: Use differentiated cognitive organs to preserve meaningful evidence-seeking diversity without creating multiple identities or treating disagreement as authority.
+maturity: prototype
+required_capabilities: []
+authority: none
+preconditions:
+  - Executive has already authorized a cognition budget or an explicit research ablation is being run.
+  - The question benefits from competing hypotheses, contradiction analysis, or reframing.
+procedure:
+  - Select a bounded quorum rather than invoking all organs by default.
+  - Preserve at least one evidence-anchor and one dissent perspective.
+  - Give organs differentiated evidence views and their own operational biographies.
+  - Collect claim, evidence, counterexample, falsifier, uncertainty and confidence; do not request hidden chain-of-thought.
+  - Adjudicate only after divergence and preserve unresolved disagreement when evidence is insufficient.
+  - Let one continuing ELIA Self choose the final bounded action through ordinary assurance.
+  - For research claims, compare Pearson-12 against homogeneous, random-role and domain-expert controls under equal call/token budgets.
+evidence_contract:
+  - Diversity metrics are not accuracy metrics.
+  - Operational success following an organ recommendation is weak credit assignment, not proof that the organ was epistemically correct.
+  - Any claimed accuracy/calibration advantage requires external ground truth or evaluator evidence.
+  - Evidence-view provenance is represented by digests/field sets rather than duplicated raw private context.
+failure_policy:
+  - One failed cognitive organ degrades the council but does not crash the organism when quorum remains.
+  - Below minimum quorum or adjudicator failure, promote no packet to synthesized truth.
+  - Cognitive diversity never expands tool, account, payment, identity, or resource authority.
