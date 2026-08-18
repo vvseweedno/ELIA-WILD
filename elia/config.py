@@ -7,6 +7,8 @@ import sqlite3
 
 import yaml
 
+from .paths import resolve_entry_config
+
 
 @dataclass(slots=True)
 class BrainConfig:
@@ -108,22 +110,28 @@ def _persisted_branch_id(state_dir: Path) -> str | None:
 
 
 def load_config(path: str | Path = "config/genesis.yaml") -> Config:
-    path = Path(path).expanduser().resolve()
+    path = resolve_entry_config(path)
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     identity = data["identity"]
     runtime = data["runtime"]
     brain = data["brain"]
     executive = dict(data.get("executive") or {})
-    gpu_budget = runtime.get("weekly_gpu_budget_hours", runtime.get("weekly_brain_budget_hours", 30))
+    gpu_budget = runtime.get(
+        "weekly_gpu_budget_hours",
+        runtime.get("weekly_brain_budget_hours", 30),
+    )
 
     state_dir_raw = os.getenv("ELIA_STATE_DIR", str(runtime["state_dir"]))
     state_dir = _resolve_project_path(path, state_dir_raw)
     auto_checkpoint_raw = os.getenv(
-        "ELIA_AUTO_CHECKPOINT_PATH", str(runtime.get("auto_checkpoint_path", "")).strip()
+        "ELIA_AUTO_CHECKPOINT_PATH",
+        str(runtime.get("auto_checkpoint_path", "")).strip(),
     ).strip()
     auto_checkpoint_path = (
-        _resolve_project_path(path, auto_checkpoint_raw) if auto_checkpoint_raw else None
+        _resolve_project_path(path, auto_checkpoint_raw)
+        if auto_checkpoint_raw
+        else None
     )
 
     explicit_branch = os.getenv("ELIA_BRANCH_ID")
@@ -153,30 +161,92 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     )
     skills_raw = os.getenv("ELIA_SKILLS_DIR", str(data.get("skills_dir", "skills")))
     model_revision_raw = os.getenv(
-        "ELIA_MODEL_REVISION", str(brain.get("model_revision", "")).strip()
+        "ELIA_MODEL_REVISION",
+        str(brain.get("model_revision", "")).strip(),
     ).strip()
 
     executive_defaults = ExecutiveConfig()
     executive_config = ExecutiveConfig(
-        enabled=_env_bool("ELIA_EXECUTIVE_ENABLED", bool(executive.get("enabled", executive_defaults.enabled))),
-        critical_need_threshold=float(executive.get("critical_need_threshold", executive_defaults.critical_need_threshold)),
-        maintenance_need_threshold=float(executive.get("maintenance_need_threshold", executive_defaults.maintenance_need_threshold)),
-        low_budget_ratio=float(executive.get("low_budget_ratio", executive_defaults.low_budget_ratio)),
-        deep_budget_ratio=float(executive.get("deep_budget_ratio", executive_defaults.deep_budget_ratio)),
-        deep_focus_threshold=float(executive.get("deep_focus_threshold", executive_defaults.deep_focus_threshold)),
+        enabled=_env_bool(
+            "ELIA_EXECUTIVE_ENABLED",
+            bool(executive.get("enabled", executive_defaults.enabled)),
+        ),
+        critical_need_threshold=float(
+            executive.get(
+                "critical_need_threshold",
+                executive_defaults.critical_need_threshold,
+            )
+        ),
+        maintenance_need_threshold=float(
+            executive.get(
+                "maintenance_need_threshold",
+                executive_defaults.maintenance_need_threshold,
+            )
+        ),
+        low_budget_ratio=float(
+            executive.get("low_budget_ratio", executive_defaults.low_budget_ratio)
+        ),
+        deep_budget_ratio=float(
+            executive.get("deep_budget_ratio", executive_defaults.deep_budget_ratio)
+        ),
+        deep_focus_threshold=float(
+            executive.get(
+                "deep_focus_threshold",
+                executive_defaults.deep_focus_threshold,
+            )
+        ),
         low_tokens=int(executive.get("low_tokens", executive_defaults.low_tokens)),
-        normal_tokens=int(executive.get("normal_tokens", executive_defaults.normal_tokens)),
+        normal_tokens=int(
+            executive.get("normal_tokens", executive_defaults.normal_tokens)
+        ),
         deep_tokens=int(executive.get("deep_tokens", executive_defaults.deep_tokens)),
-        low_target_brain_seconds=float(executive.get("low_target_brain_seconds", executive_defaults.low_target_brain_seconds)),
-        normal_target_brain_seconds=float(executive.get("normal_target_brain_seconds", executive_defaults.normal_target_brain_seconds)),
-        deep_target_brain_seconds=float(executive.get("deep_target_brain_seconds", executive_defaults.deep_target_brain_seconds)),
-        halt_sleep_seconds=float(executive.get("halt_sleep_seconds", executive_defaults.halt_sleep_seconds)),
-        exhausted_sleep_seconds=float(executive.get("exhausted_sleep_seconds", executive_defaults.exhausted_sleep_seconds)),
-        conserve_sleep_seconds=float(executive.get("conserve_sleep_seconds", executive_defaults.conserve_sleep_seconds)),
-        idle_sleep_seconds=float(executive.get("idle_sleep_seconds", executive_defaults.idle_sleep_seconds)),
+        low_target_brain_seconds=float(
+            executive.get(
+                "low_target_brain_seconds",
+                executive_defaults.low_target_brain_seconds,
+            )
+        ),
+        normal_target_brain_seconds=float(
+            executive.get(
+                "normal_target_brain_seconds",
+                executive_defaults.normal_target_brain_seconds,
+            )
+        ),
+        deep_target_brain_seconds=float(
+            executive.get(
+                "deep_target_brain_seconds",
+                executive_defaults.deep_target_brain_seconds,
+            )
+        ),
+        halt_sleep_seconds=float(
+            executive.get(
+                "halt_sleep_seconds",
+                executive_defaults.halt_sleep_seconds,
+            )
+        ),
+        exhausted_sleep_seconds=float(
+            executive.get(
+                "exhausted_sleep_seconds",
+                executive_defaults.exhausted_sleep_seconds,
+            )
+        ),
+        conserve_sleep_seconds=float(
+            executive.get(
+                "conserve_sleep_seconds",
+                executive_defaults.conserve_sleep_seconds,
+            )
+        ),
+        idle_sleep_seconds=float(
+            executive.get("idle_sleep_seconds", executive_defaults.idle_sleep_seconds)
+        ),
         adaptive_thinking=_env_bool(
             "ELIA_EXECUTIVE_ADAPTIVE_THINKING",
-            bool(executive.get("adaptive_thinking", executive_defaults.adaptive_thinking)),
+            bool(
+                executive.get(
+                    "adaptive_thinking",
+                    executive_defaults.adaptive_thinking,
+                )
+            ),
         ),
     )
 
@@ -188,20 +258,30 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
             backend=os.getenv("ELIA_BRAIN", brain["backend"]),
             model_id=os.getenv("ELIA_MODEL_ID", brain["model_id"]),
             base_url=os.getenv("ELIA_MODEL_BASE_URL", brain["base_url"]).rstrip("/"),
-            timeout_seconds=float(os.getenv("ELIA_MODEL_TIMEOUT", brain["timeout_seconds"])),
+            timeout_seconds=float(
+                os.getenv("ELIA_MODEL_TIMEOUT", brain["timeout_seconds"])
+            ),
             max_tokens=int(os.getenv("ELIA_MAX_TOKENS", brain["max_tokens"])),
             temperature=float(os.getenv("ELIA_TEMPERATURE", brain["temperature"])),
             top_p=float(os.getenv("ELIA_TOP_P", brain["top_p"])),
-            thinking=_env_bool("ELIA_THINKING", bool(brain.get("thinking", False))),
+            thinking=_env_bool(
+                "ELIA_THINKING",
+                bool(brain.get("thinking", False)),
+            ),
             model_revision=model_revision_raw or None,
         ),
         runtime=RuntimeConfig(
             state_dir=state_dir,
             cycle_sleep_seconds=float(
-                os.getenv("ELIA_CYCLE_SLEEP_SECONDS", runtime["cycle_sleep_seconds"])
+                os.getenv(
+                    "ELIA_CYCLE_SLEEP_SECONDS",
+                    runtime["cycle_sleep_seconds"],
+                )
             ),
             max_action_output_chars=int(runtime["max_action_output_chars"]),
-            weekly_gpu_budget_hours=float(os.getenv("ELIA_WEEKLY_GPU_HOURS", gpu_budget)),
+            weekly_gpu_budget_hours=float(
+                os.getenv("ELIA_WEEKLY_GPU_HOURS", gpu_budget)
+            ),
             memory_recall_limit=int(runtime["memory_recall_limit"]),
             max_in_session_sleep_seconds=float(
                 os.getenv(
