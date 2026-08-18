@@ -32,6 +32,7 @@ class HomeostasisSnapshot:
     sensorium: dict[str, Any]
     epistemics: dict[str, Any]
     digital_body: dict[str, Any]
+    metabolism: dict[str, Any]
     signals: tuple[HomeostaticSignal, ...]
 
     def as_dict(self) -> dict[str, Any]:
@@ -45,6 +46,8 @@ class HomeostasisEngine:
 
     Signals are derived from observable local state. They can raise maintenance
     pressure but cannot create new executable authority or invent external resources.
+    Resource pressure is accepted only from a precomputed metabolism snapshot whose
+    runway itself is based on verified balances + verified obligations.
     """
 
     def __init__(
@@ -54,12 +57,14 @@ class HomeostasisEngine:
         world_model: WorldModelStore,
         state_bus: OrganismStateBus,
         body_diagnostics: dict[str, Any],
+        metabolism_snapshot: dict[str, Any] | None = None,
     ):
         self.state_dir = Path(state_dir)
         self.observations = observations
         self.world_model = world_model
         self.state_bus = state_bus
         self.body_diagnostics = dict(body_diagnostics)
+        self.metabolism_snapshot = dict(metabolism_snapshot or {})
 
     @staticmethod
     def _mode(signals: list[HomeostaticSignal]) -> str:
@@ -69,6 +74,83 @@ class HomeostasisEngine:
         if peak >= 0.6:
             return "strained"
         return "stable"
+
+    @staticmethod
+    def _resource_pressure(metabolism: dict[str, Any]) -> list[HomeostaticSignal]:
+        signals: list[HomeostaticSignal] = []
+        bottleneck = metabolism.get("bottleneck")
+        if isinstance(bottleneck, dict) and bottleneck.get("runway_days") is not None:
+            runway = max(0.0, float(bottleneck.get("runway_days", 0.0)))
+            if runway <= 0:
+                severity = 1.0
+            elif runway < 3:
+                severity = 0.96
+            elif runway < 7:
+                severity = 0.86
+            elif runway < 30:
+                severity = 0.64
+            else:
+                severity = 0.0
+            if severity:
+                signals.append(
+                    HomeostaticSignal(
+                        "resource_runway",
+                        severity,
+                        (
+                            f"Verified essential runway for {bottleneck.get('asset')}/"
+                            f"{bottleneck.get('unit')} is {runway:.2f} day(s)."
+                        ),
+                        (
+                            "Prefer legitimate value/resource acquisition, cost reduction or an "
+                            "authorized substitute that directly improves this constrained resource. "
+                            "Do not treat estimates as receipts and do not mix unrelated units."
+                        ),
+                        {"bottleneck": bottleneck},
+                    )
+                )
+
+        uncovered = [
+            item
+            for item in list(metabolism.get("upcoming_verified_obligations") or [])
+            if isinstance(item, dict)
+            and bool(item.get("essential", False))
+            and float(item.get("due_in_seconds", 1.0)) <= 7 * 86_400
+        ]
+        resource_index = {
+            (str(item.get("asset")), str(item.get("unit"))): item
+            for item in list(metabolism.get("resources") or [])
+            if isinstance(item, dict)
+        }
+        not_covered: list[dict[str, Any]] = []
+        for item in uncovered:
+            key = (str(item.get("asset")), str(item.get("unit")))
+            resource = resource_index.get(key)
+            if resource is not None and resource.get("next_due_covered") is False:
+                not_covered.append(item)
+        if not_covered:
+            nearest = min(
+                not_covered,
+                key=lambda item: float(item.get("due_in_seconds", float("inf"))),
+            )
+            due_in = float(nearest.get("due_in_seconds", 0.0))
+            severity = 0.99 if due_in <= 86_400 else 0.92
+            signals.append(
+                HomeostaticSignal(
+                    "uncovered_essential_obligation",
+                    severity,
+                    (
+                        f"A verified essential {nearest.get('asset')}/{nearest.get('unit')} "
+                        f"obligation is not covered by the current verified balance and is due "
+                        f"in {max(0.0, due_in) / 3600.0:.1f} hour(s)."
+                    ),
+                    (
+                        "Prioritize an authorized action that can cover, reduce, replace or "
+                        "truthfully retire this obligation. Scarcity does not broaden authority."
+                    ),
+                    {"obligation": nearest},
+                )
+            )
+        return signals
 
     def evaluate(
         self,
@@ -171,6 +253,7 @@ class HomeostasisEngine:
             "capability_count": int(self.body_diagnostics.get("capability_count", 0) or 0),
         }
 
+        signals.extend(self._resource_pressure(self.metabolism_snapshot))
         signals.sort(key=lambda item: (-item.severity, item.name))
         return HomeostasisSnapshot(
             checked_at=datetime.now(timezone.utc).isoformat(),
@@ -180,5 +263,6 @@ class HomeostasisEngine:
             sensorium=sensorium,
             epistemics=epistemics,
             digital_body=digital_body,
-            signals=tuple(signals[:12]),
+            metabolism=self.metabolism_snapshot,
+            signals=tuple(signals[:16]),
         )
