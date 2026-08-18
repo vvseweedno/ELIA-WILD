@@ -33,6 +33,28 @@ def test_crc_model_swap_can_remain_continuous() -> None:
     assert "model_id" in comparison.changed
 
 
+def test_crc_body_prompt_upgrade_and_capability_growth_can_remain_continuous() -> None:
+    left = base_record()
+    right = dict(left)
+    right["body_version"] = "1.1.0a1"
+    right["prompt_fingerprint"] = "e" * 64
+    right["chronicle_seq"] = 20
+    right["declared_capabilities"] = [
+        "noop",
+        "http_get",
+        "world_model_query",
+        "browser_navigate",
+        "mcp_discover",
+    ]
+    comparison = compare_crc(left, right)
+    assert comparison.status == "continuous"
+    assert comparison.score >= 0.80
+    assert not comparison.critical_failures
+    assert "body_version" in comparison.changed
+    assert "prompt_fingerprint" in comparison.changed
+    assert "capability_superset" in comparison.preserved
+
+
 def test_crc_subject_core_change_breaks_continuity() -> None:
     left = base_record()
     right = dict(left)
