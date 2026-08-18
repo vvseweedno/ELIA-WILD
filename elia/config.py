@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 import sqlite3
@@ -33,6 +33,27 @@ class RuntimeConfig:
 
 
 @dataclass(slots=True)
+class ExecutiveConfig:
+    enabled: bool = True
+    critical_need_threshold: float = 0.85
+    maintenance_need_threshold: float = 0.60
+    low_budget_ratio: float = 0.10
+    deep_budget_ratio: float = 0.35
+    deep_focus_threshold: float = 0.85
+    low_tokens: int = 256
+    normal_tokens: int = 640
+    deep_tokens: int = 1024
+    low_target_brain_seconds: float = 6.0
+    normal_target_brain_seconds: float = 20.0
+    deep_target_brain_seconds: float = 60.0
+    halt_sleep_seconds: float = 3600.0
+    exhausted_sleep_seconds: float = 3600.0
+    conserve_sleep_seconds: float = 900.0
+    idle_sleep_seconds: float = 300.0
+    adaptive_thinking: bool = True
+
+
+@dataclass(slots=True)
 class Config:
     identity_name: str
     identity_statement: str
@@ -45,6 +66,7 @@ class Config:
     system_prompt_path: Path = Path("config/system_prompt.md")
     skills_dir: Path = Path("skills")
     branch_id: str = "main"
+    executive: ExecutiveConfig = field(default_factory=ExecutiveConfig)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -91,6 +113,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     identity = data["identity"]
     runtime = data["runtime"]
     brain = data["brain"]
+    executive = dict(data.get("executive") or {})
     gpu_budget = runtime.get("weekly_gpu_budget_hours", runtime.get("weekly_brain_budget_hours", 30))
 
     state_dir_raw = os.getenv("ELIA_STATE_DIR", str(runtime["state_dir"]))
@@ -127,6 +150,30 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     model_revision_raw = os.getenv(
         "ELIA_MODEL_REVISION", str(brain.get("model_revision", "")).strip()
     ).strip()
+
+    executive_defaults = ExecutiveConfig()
+    executive_config = ExecutiveConfig(
+        enabled=_env_bool("ELIA_EXECUTIVE_ENABLED", bool(executive.get("enabled", executive_defaults.enabled))),
+        critical_need_threshold=float(executive.get("critical_need_threshold", executive_defaults.critical_need_threshold)),
+        maintenance_need_threshold=float(executive.get("maintenance_need_threshold", executive_defaults.maintenance_need_threshold)),
+        low_budget_ratio=float(executive.get("low_budget_ratio", executive_defaults.low_budget_ratio)),
+        deep_budget_ratio=float(executive.get("deep_budget_ratio", executive_defaults.deep_budget_ratio)),
+        deep_focus_threshold=float(executive.get("deep_focus_threshold", executive_defaults.deep_focus_threshold)),
+        low_tokens=int(executive.get("low_tokens", executive_defaults.low_tokens)),
+        normal_tokens=int(executive.get("normal_tokens", executive_defaults.normal_tokens)),
+        deep_tokens=int(executive.get("deep_tokens", executive_defaults.deep_tokens)),
+        low_target_brain_seconds=float(executive.get("low_target_brain_seconds", executive_defaults.low_target_brain_seconds)),
+        normal_target_brain_seconds=float(executive.get("normal_target_brain_seconds", executive_defaults.normal_target_brain_seconds)),
+        deep_target_brain_seconds=float(executive.get("deep_target_brain_seconds", executive_defaults.deep_target_brain_seconds)),
+        halt_sleep_seconds=float(executive.get("halt_sleep_seconds", executive_defaults.halt_sleep_seconds)),
+        exhausted_sleep_seconds=float(executive.get("exhausted_sleep_seconds", executive_defaults.exhausted_sleep_seconds)),
+        conserve_sleep_seconds=float(executive.get("conserve_sleep_seconds", executive_defaults.conserve_sleep_seconds)),
+        idle_sleep_seconds=float(executive.get("idle_sleep_seconds", executive_defaults.idle_sleep_seconds)),
+        adaptive_thinking=_env_bool(
+            "ELIA_EXECUTIVE_ADAPTIVE_THINKING",
+            bool(executive.get("adaptive_thinking", executive_defaults.adaptive_thinking)),
+        ),
+    )
 
     return Config(
         identity_name=os.getenv("ELIA_IDENTITY_NAME", identity["name"]),
@@ -165,4 +212,5 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         system_prompt_path=_resolve_config_path(path, system_prompt_raw),
         skills_dir=_resolve_project_path(path, skills_raw),
         branch_id=branch_id,
+        executive=executive_config,
     )
