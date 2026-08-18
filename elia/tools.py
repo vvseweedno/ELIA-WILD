@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 import ipaddress
 import json
 import re
 import socket
+import time
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -14,6 +16,11 @@ from uuid import uuid4
 import httpx
 
 from . import __version__
+from .body import SensorimotorFabric
+from .causal import CausalMemoryStore
+from .observations import ObservationStore
+from .state_bus import OrganismStateBus
+from .world_model import WorldModelStore
 
 
 @dataclass(slots=True)
@@ -37,16 +44,40 @@ class Capability:
     network_scope: str
     cost_class: str
     enabled: bool = True
+    readiness: str = "ready"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+def _fingerprint(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
 class ToolRegistry:
-    def __init__(self, workspace: Path, tool_config: dict[str, Any] | None = None):
+    """Explicit capability boundary plus durable sensorium/provenance wiring."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        tool_config: dict[str, Any] | None = None,
+        *,
+        mcp_target_overrides: dict[str, Any] | None = None,
+    ):
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.config = tool_config or {}
+        database = self.workspace.parent / "memory.sqlite3"
+        self.observations = ObservationStore(database)
+        self.causal = CausalMemoryStore(database)
+        self.state_bus = OrganismStateBus(database)
+        self.world_model = WorldModelStore(database)
+        self.body = SensorimotorFabric(
+            self.workspace,
+            self.config.get("body", {}),
+            mcp_target_overrides=mcp_target_overrides,
+        )
 
     def catalog(self) -> dict[str, dict[str, Any]]:
         http_enabled = bool(self.config.get("http_get", {}).get("enabled", True))
@@ -124,42 +155,219 @@ class ToolRegistry:
                 "none",
                 "low",
             ),
+            Capability(
+                "sensorium_recent",
+                "Read recent normalized observations from all tools/body adapters.",
+                "{limit?: int}",
+                "local_observation_read",
+                "none",
+                "none",
+                "negligible",
+            ),
+            Capability(
+                "causal_snapshot",
+                "Read empirical intervention history and per-action success statistics; never presented as causal proof.",
+                "{}",
+                "local_experience_read",
+                "none",
+                "none",
+                "negligible",
+            ),
+            Capability(
+                "world_model_query",
+                "Query evidence-bearing beliefs and contradictions in ELIA's external world model.",
+                "{text?: str, domain?: str, statuses?: [str], limit?: int}",
+                "local_world_model_read",
+                "none",
+                "none",
+                "negligible",
+            ),
+            Capability(
+                "world_model_propose",
+                "Create/reinforce one evidence-bearing world hypothesis; cannot create a verified fact.",
+                "{domain: str, subject: str, predicate: str, object: any, confidence: number, evidence: str, observation_id?: int}",
+                "local_world_model_write",
+                "writes a revisable hypothesis with confidence cap",
+                "none",
+                "low",
+            ),
+            Capability(
+                "world_model_revise",
+                "Revise an existing model-originated world hypothesis as hypothesis/supported/disputed only.",
+                "{id: int, status?: hypothesis|supported|disputed, confidence?: number, evidence: str, observation_id?: int}",
+                "local_world_model_write",
+                "updates a revisable hypothesis; cannot verify/refute authoritatively",
+                "none",
+                "low",
+            ),
+            Capability(
+                "body_diagnostics",
+                "Inspect which digital body adapters/capabilities are configured and currently available.",
+                "{}",
+                "local_body_introspection",
+                "none",
+                "none",
+                "negligible",
+            ),
         ]
-        return {item.name: item.as_dict() for item in capabilities}
+        result = {item.name: item.as_dict() for item in capabilities}
+        result.update(self.body.capabilities())
+        return result
 
     def descriptions(self) -> dict[str, str]:
         return {
-            name: f"{item['description']} args={item['args']} enabled={item['enabled']}"
+            name: f"{item['description']} args={item['args']} enabled={item['enabled']} readiness={item.get('readiness', 'ready')}"
             for name, item in self.catalog().items()
         }
 
     def execute(self, name: str, args: dict[str, Any] | None = None) -> ToolResult:
-        args = args or {}
+        args = dict(args or {})
         capability = self.catalog().get(name)
         if capability is not None and not capability["enabled"]:
-            return ToolResult(False, name, error=f"Capability is disabled by configuration: {name}")
+            return ToolResult(
+                False,
+                name,
+                error=(
+                    f"Capability is disabled/unavailable: {name} "
+                    f"({capability.get('readiness', 'disabled')})"
+                ),
+            )
+
+        transaction_id = self.state_bus.begin(f"capability:{name}")
+        args_fingerprint = _fingerprint(args)
+        self.state_bus.append(
+            transaction_id,
+            phase="action",
+            kind="CAPABILITY_ATTEMPT",
+            payload={"capability": name, "arguments_fingerprint": args_fingerprint},
+        )
+        started = time.monotonic()
         try:
-            if name == "noop":
-                return ToolResult(True, name, {"message": "No action taken."})
-            if name == "list_workspace":
-                return self._list_workspace()
-            if name == "read_workspace":
-                return self._read_workspace(str(args.get("path", "")))
-            if name == "write_workspace":
-                return self._write_workspace(
-                    str(args.get("path", "")), str(args.get("content", ""))
-                )
-            if name == "http_get":
-                return self._http_get(str(args.get("url", "")))
-            if name == "self_check":
-                return self._self_check()
-            if name == "propose_repair":
-                return self._propose_repair(args)
-            if name == "stage_deliverable":
-                return self._stage_deliverable(args)
-            return ToolResult(False, name, error=f"Unknown tool: {name}")
+            result = self._dispatch(name, args)
         except Exception as exc:  # Tool failures become observations, not process failures.
-            return ToolResult(False, name, error=f"{type(exc).__name__}: {exc}")
+            result = ToolResult(False, name, error=f"{type(exc).__name__}: {exc}")
+        duration_ms = (time.monotonic() - started) * 1000.0
+
+        observation_payload = result.as_dict()
+        source_kind = "body" if name in self.body.capabilities() else "capability"
+        observation = self.observations.record(
+            source_kind=source_kind,
+            source_ref=name,
+            payload=observation_payload,
+            trust=0.65 if source_kind == "body" else 0.8,
+            success=result.ok,
+            summary=(result.error or f"{name} completed")[:4000],
+            provenance={
+                "capability": name,
+                "arguments_fingerprint": args_fingerprint,
+                "body_version": __version__,
+            },
+            transaction_id=transaction_id,
+        )
+        experience = self.causal.record_intervention(
+            action_name=name,
+            arguments=args,
+            outcome=observation_payload,
+            success=result.ok,
+            duration_ms=duration_ms,
+            observation_id=observation.id,
+            transaction_id=transaction_id,
+            source="tool_registry",
+            outcome_summary=result.error or f"{name} ok={result.ok}",
+        )
+        self.state_bus.append(
+            transaction_id,
+            phase="observation",
+            kind="OBSERVATION_RECORDED",
+            payload={
+                "observation_id": observation.id,
+                "payload_sha256": observation.payload_sha256,
+                "experience_id": experience.id,
+                "success": result.ok,
+                "duration_ms": duration_ms,
+            },
+        )
+        self.state_bus.commit(
+            transaction_id,
+            {"capability": name, "success": result.ok, "observation_id": observation.id},
+        )
+        return result
+
+    def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
+        if name == "noop":
+            return ToolResult(True, name, {"message": "No action taken."})
+        if name == "list_workspace":
+            return self._list_workspace()
+        if name == "read_workspace":
+            return self._read_workspace(str(args.get("path", "")))
+        if name == "write_workspace":
+            return self._write_workspace(
+                str(args.get("path", "")), str(args.get("content", ""))
+            )
+        if name == "http_get":
+            return self._http_get(str(args.get("url", "")))
+        if name == "self_check":
+            return self._self_check()
+        if name == "propose_repair":
+            return self._propose_repair(args)
+        if name == "stage_deliverable":
+            return self._stage_deliverable(args)
+        if name == "sensorium_recent":
+            limit = max(1, min(int(args.get("limit", 12)), 64))
+            return ToolResult(True, name, {"observations": self.observations.snapshot(limit)})
+        if name == "causal_snapshot":
+            return ToolResult(True, name, self.causal.snapshot())
+        if name == "world_model_query":
+            statuses_raw = args.get("statuses")
+            statuses = (
+                {str(item) for item in statuses_raw}
+                if isinstance(statuses_raw, list)
+                else None
+            )
+            beliefs = self.world_model.query(
+                text=str(args.get("text", "")),
+                domain=(str(args["domain"]) if args.get("domain") else None),
+                statuses=statuses,
+                limit=max(1, min(int(args.get("limit", 24)), 64)),
+            )
+            return ToolResult(
+                True,
+                name,
+                {
+                    "beliefs": [item.as_dict() for item in beliefs],
+                    "contradictions": self.world_model.snapshot(64)["contradictions"],
+                },
+            )
+        if name == "world_model_propose":
+            observation_raw = args.get("observation_id")
+            belief = self.world_model.propose(
+                domain=str(args.get("domain", "")),
+                subject=str(args.get("subject", "")),
+                predicate=str(args.get("predicate", "")),
+                object=args.get("object"),
+                confidence=float(args.get("confidence", 0.5)),
+                evidence=str(args.get("evidence", "")),
+                source="brain",
+                observation_id=(int(observation_raw) if observation_raw is not None else None),
+            )
+            return ToolResult(True, name, belief.as_dict())
+        if name == "world_model_revise":
+            observation_raw = args.get("observation_id")
+            confidence_raw = args.get("confidence")
+            belief = self.world_model.revise_from_model(
+                int(args.get("id")),
+                status=(str(args["status"]) if args.get("status") is not None else None),
+                confidence=(float(confidence_raw) if confidence_raw is not None else None),
+                evidence=str(args.get("evidence", "")),
+                observation_id=(int(observation_raw) if observation_raw is not None else None),
+            )
+            return ToolResult(True, name, belief.as_dict())
+        if name == "body_diagnostics":
+            return ToolResult(True, name, self.body.diagnostics())
+        if name in self.body.capabilities():
+            body_result = self.body.execute(name, args)
+            return ToolResult(body_result.ok, name, body_result.data, body_result.error)
+        return ToolResult(False, name, error=f"Unknown tool: {name}")
 
     def _safe_path(self, relative: str) -> Path:
         if not relative or relative in {".", "./"}:
@@ -213,14 +421,16 @@ class ToolRegistry:
         finally:
             scratch.unlink(missing_ok=True)
         checks["scratch_cleanup"] = not scratch.exists()
+        checks["state_bus_no_unreconciled_prior_actions"] = len(self.state_bus.incomplete(16)) <= 1
         ok = all(checks.values())
         return ToolResult(
             ok,
             "self_check",
             {
                 "checks": checks,
+                "body": self.body.diagnostics(),
                 "checked_at": datetime.now(timezone.utc).isoformat(),
-                "note": "No network, shell, credentials, or external systems were touched.",
+                "note": "Self-check does not broaden capability authority.",
             },
             error=None if ok else "One or more bounded self-checks failed",
         )
@@ -318,7 +528,7 @@ class ToolRegistry:
         if parsed.username or parsed.password:
             raise ValueError("Credentials in URLs are not supported")
 
-        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
         for info in addresses:
             ip = ipaddress.ip_address(info[4][0])
             if (
