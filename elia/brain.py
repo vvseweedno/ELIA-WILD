@@ -7,6 +7,7 @@ from typing import Any, Protocol
 import httpx
 
 from .config import BrainConfig
+from .provider_context import provider_context
 
 
 @dataclass(slots=True)
@@ -34,8 +35,7 @@ Use only declared capabilities, choose exactly one action, preserve uncertainty,
 
 def _system_and_public_context(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     system_prompt = str(context.get("_system_prompt") or FALLBACK_SYSTEM_PROMPT)
-    public = {key: value for key, value in context.items() if not str(key).startswith("_")}
-    return system_prompt, public
+    return system_prompt, provider_context(context)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
