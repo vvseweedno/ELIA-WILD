@@ -60,7 +60,7 @@ class BaseSecretBrain:
         )
 
 
-def test_base_runtime_cannot_persist_raw_tool_values_outside_private_sensorium(tmp_path: Path) -> None:
+def test_base_runtime_cannot_persist_raw_tool_values_outside_private_file(tmp_path: Path) -> None:
     runtime = EliaRuntime(_config(tmp_path), brain=BaseSecretBrain())
     report = runtime.cycle()
     assert report["result"]["ok"] is True
@@ -90,7 +90,10 @@ def test_base_runtime_cannot_persist_raw_tool_values_outside_private_sensorium(t
     assert all(SECRET not in str(row[0]) for row in rows)
     assert all("data_fingerprint" in str(row[0]) for row in rows)
 
-    # The private Sensorium is intentionally the evidence-bearing location that may
-    # retain the full result until its retention/compaction policy ages it out.
+    # write_workspace returns path/byte-count metadata and deliberately does not echo
+    # the model-controlled file content. The private file itself is the only durable
+    # location that contains this input value.
     observations = runtime.tools.observations.snapshot(8)
-    assert any(SECRET in str(item.get("payload")) for item in observations)
+    assert observations
+    assert all(SECRET not in str(item.get("payload")) for item in observations)
+    assert any(item.get("source_ref") == "write_workspace" for item in observations)
