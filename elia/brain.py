@@ -212,13 +212,15 @@ class Transformers4BitBrain:
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.float16,
         )
-        self.processor = AutoProcessor.from_pretrained(config.model_id)
+        revision_args = {"revision": config.model_revision} if config.model_revision else {}
+        self.processor = AutoProcessor.from_pretrained(config.model_id, **revision_args)
         self.model = AutoModelForMultimodalLM.from_pretrained(
             config.model_id,
             device_map="auto",
             quantization_config=quantization,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
+            **revision_args,
         )
         self.model.eval()
 
