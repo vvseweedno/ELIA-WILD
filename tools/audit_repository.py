@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 import pkgutil
 import re
-import sys
 import tomllib
 from typing import Iterable
 
@@ -19,7 +18,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 TEXT_SUFFIXES = {".py", ".toml", ".yaml", ".yml", ".md", ".service", ".txt"}
-PATH_PREFIXES = ("config/", "deploy/", "docs/", "elia/", "runtime/", "scripts/", "skills/", "tests/", "tools/", ".github/")
+PATH_PREFIXES = (
+    "config/",
+    "deploy/",
+    "docs/",
+    "elia/",
+    "runtime/",
+    "scripts/",
+    "skills/",
+    "tests/",
+    "tools/",
+    ".github/",
+)
 PATH_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_:/.-])"
     r"((?:\.github|config|deploy|docs|elia|runtime|scripts|skills|tests|tools)/"
@@ -66,7 +76,8 @@ class RepositoryAudit:
 
     def check_python_syntax_and_internal_imports(self) -> None:
         python_files = sorted(
-            path for path in self.root.rglob("*.py")
+            path
+            for path in self.root.rglob("*.py")
             if ".git" not in path.parts and ".elia" not in path.parts and ".venv" not in path.parts
         )
         for path in python_files:
@@ -155,7 +166,8 @@ class RepositoryAudit:
             return
         if not report.healthy:
             for item in report.findings:
-                self.add(item.severity if item.severity in {"error", "warning"} else "error", "organism.audit", manifest.path, item.message)
+                severity = item.severity if item.severity in {"error", "warning"} else "error"
+                self.add(severity, "organism.audit", manifest.path, item.message)
 
     def check_skill_registry(self) -> None:
         try:
@@ -170,19 +182,25 @@ class RepositoryAudit:
             self.add("error", "skills.load", "skills", f"{type(exc).__name__}: {exc}")
 
     def check_literal_repository_paths(self) -> None:
+        trim_chars = ".,;:)]}'\"`"
         for path in self._iter_text_files():
             try:
                 text = path.read_text(encoding="utf-8")
             except UnicodeError:
                 continue
             for match in PATH_PATTERN.finditer(text):
-                raw = match.group(1).rstrip(".,;:)"]'`")
+                raw = match.group(1).rstrip(trim_chars)
                 if not raw.startswith(PATH_PREFIXES):
                     continue
                 candidate = self.root / raw
                 if not candidate.exists():
                     line = text.count("\n", 0, match.start()) + 1
-                    self.add("error", "path.literal", f"{path.relative_to(self.root)}:{line}", f"referenced path does not exist: {raw}")
+                    self.add(
+                        "error",
+                        "path.literal",
+                        f"{path.relative_to(self.root)}:{line}",
+                        f"referenced path does not exist: {raw}",
+                    )
 
     def check_markdown_links(self) -> None:
         for path in self.root.rglob("*.md"):
@@ -199,7 +217,12 @@ class RepositoryAudit:
                 candidate = (path.parent / target).resolve()
                 if not candidate.exists():
                     line = text.count("\n", 0, match.start()) + 1
-                    self.add("error", "markdown.link", f"{path.relative_to(self.root)}:{line}", f"broken local link: {target}")
+                    self.add(
+                        "error",
+                        "markdown.link",
+                        f"{path.relative_to(self.root)}:{line}",
+                        f"broken local link: {target}",
+                    )
 
     def check_version_sync(self) -> None:
         pyproject = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
