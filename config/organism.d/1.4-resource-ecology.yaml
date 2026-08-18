@@ -1,0 +1,45 @@
+schema_version: 6
+identity_id: elia-wild
+
+layers:
+  resource_ecology: typed opportunity-resource alignment and evidence-bearing work realization
+
+organs:
+  - id: resource_ecology_store
+    layer: resource_ecology
+    kind: python
+    module: elia.resource_ecology
+    symbol: ResourceEcologyStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Persists exact opportunity resource profiles and the ordered work lifecycle
+      without allowing estimated value, staging, submission or acceptance to become
+      a verified resource by narration.
+
+  - id: resource_ecology_engine
+    layer: resource_ecology
+    kind: python
+    module: elia.resource_ecology
+    symbol: ResourceEcologyEngine
+    required: true
+    maturity: prototype
+    authority: local_read
+    role: >-
+      Ranks opportunities against verified metabolic bottlenecks only on exact
+      (asset, unit) matches and computes estimated resource/runway gain without
+      changing verified balances.
+
+  - id: resource_runtime
+    layer: agency
+    kind: python
+    module: elia.resource_runtime
+    symbol: ResourceOrganismRuntime
+    required: true
+    maturity: prototype
+    authority: composed
+    role: >-
+      Production Genesis 1.4 runtime integrating typed resource ecology into
+      deterministic needs, Executive cognition, local deliverable staging and
+      observed work progression while retaining Genesis 1.3 as rollback ancestry.

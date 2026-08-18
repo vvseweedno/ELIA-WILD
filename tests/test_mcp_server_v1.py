@@ -44,6 +44,7 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
                 "elia_status",
                 "elia_preflight",
                 "elia_executive",
+                "elia_resource_ecology",
                 "elia_world_query",
                 "elia_sensorium_recent",
                 "elia_body_diagnostics",
@@ -56,6 +57,8 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert status["identity"]["identity_id"] == "elia-wild"
             assert "metabolism" in status
             assert "compute_energy" in status["metabolism"]
+            assert "resource_ecology" in status
+            assert "exact_bottleneck_candidate_count" in status["resource_ecology"]
             assert "homeostasis" in status
             assert status["homeostasis"]["metabolism"] == status["metabolism"]
             assert "executive" in status
@@ -78,6 +81,15 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             }
             assert "energy" in executive
             assert "recent" in executive
+
+            ecology_result = await client.call_tool("elia_resource_ecology", {})
+            assert ecology_result.is_error is False
+            ecology = _structured(ecology_result)
+            assert "candidates" in ecology
+            assert "active_work" in ecology
+            assert "epistemic_rule" in ecology
+            serialized_ecology = json.dumps(ecology, sort_keys=True)
+            assert "external_evidence" not in serialized_ecology
 
             world_result = await client.call_tool(
                 "elia_world_query",
@@ -105,7 +117,13 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             text = getattr(resource.contents[0], "text", "")
             identity = json.loads(text)
             assert identity["identity_id"] == "elia-wild"
-            assert identity["body_version"].startswith("1.3.")
+            assert identity["body_version"].startswith("1.4.")
+
+            ecology_resource = await client.read_resource("elia://resource-ecology")
+            assert ecology_resource.contents
+            ecology_text = getattr(ecology_resource.contents[0], "text", "")
+            ecology_from_resource = json.loads(ecology_text)
+            assert "candidates" in ecology_from_resource
 
     asyncio.run(exercise())
 

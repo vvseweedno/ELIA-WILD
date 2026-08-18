@@ -13,6 +13,7 @@ from .executive import ExecutiveController, ExecutivePolicy, ExecutiveStore
 from .homeostasis import HomeostasisEngine
 from .memory import MemoryStore
 from .metabolism import MetabolismEngine
+from .resource_status import resource_ecology_needs, resource_ecology_status
 from .tools import ToolRegistry
 
 
@@ -85,6 +86,7 @@ def executive_status_from_state(
         database,
         weekly_gpu_budget_hours=config.runtime.weekly_gpu_budget_hours,
     ).snapshot().as_dict()
+    ecology = resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
     homeostasis = HomeostasisEngine(
         state_dir,
         tools.observations,
@@ -135,6 +137,11 @@ def executive_status_from_state(
             }
         )
         names.add(name)
+    for item in resource_ecology_needs(ecology):
+        name = str(item.get("name", ""))
+        if name and name not in names:
+            needs.append(item)
+            names.add(name)
     needs.sort(key=lambda item: (-float(item.get("severity", 0.0)), str(item.get("name", ""))))
 
     drift_raw = memory.get_meta("last_drift_report", "") or ""
@@ -148,7 +155,7 @@ def executive_status_from_state(
     result = executive_status(
         config,
         resources=resources,
-        needs=needs[:16],
+        needs=needs[:20],
         active_goals=[asdict(goal) for goal in active_goals],
         chronicle_valid=chronicle_valid,
         chronicle_error=chronicle_error,
@@ -157,8 +164,15 @@ def executive_status_from_state(
     )
     result["inputs"] = {
         "resources": resources,
-        "needs": needs[:16],
+        "needs": needs[:20],
         "active_goal_count": len(active_goals),
         "homeostasis_mode": homeostasis.get("mode"),
+        "resource_ecology": {
+            "exact_bottleneck_candidate_count": ecology.get(
+                "exact_bottleneck_candidate_count", 0
+            ),
+            "active_work_count": len(ecology.get("active_work") or []),
+            "bottleneck": ecology.get("bottleneck"),
+        },
     }
     return result

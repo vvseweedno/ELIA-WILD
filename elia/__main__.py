@@ -7,19 +7,19 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .autonomy import derive_needs
 from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
 from .economy import EconomyStore
-from .executive_runtime import ExecutiveOrganismRuntime
-from .executive_status import executive_status
+from .executive_status import executive_status_from_state
 from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
 from .metabolism import MetabolismEngine
 from .prompting import PromptTemplate
+from .resource_runtime import ResourceOrganismRuntime
+from .resource_status import public_resource_ecology, resource_ecology_status
 from .skills import SkillRegistry
 from .tools import ToolRegistry
 from .vitals import VitalSigns
@@ -121,17 +121,6 @@ def _status_physiology(config, tools: ToolRegistry) -> tuple[dict[str, Any], dic
     return metabolism, homeostasis
 
 
-def _load_drift(memory: MemoryStore) -> dict[str, Any]:
-    raw = memory.get_meta("last_drift_report", "") or ""
-    if not raw:
-        return {"status": "unknown"}
-    try:
-        item = json.loads(raw)
-    except json.JSONDecodeError:
-        return {"status": "unknown", "error": "invalid stored drift report"}
-    return item if isinstance(item, dict) else {"status": "unknown"}
-
-
 def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
@@ -208,57 +197,14 @@ def main() -> None:
         skill_state = skills.prompt_catalog(capability_catalog, capability_health)
         economy = economy_store.snapshot(16)
         metabolism, homeostasis = _status_physiology(config, tools)
-        limit = config.runtime.weekly_gpu_budget_hours
-        runtime_hours = memory.runtime_seconds_this_week() / 3600.0
-        brain_hours = memory.brain_seconds_this_week() / 3600.0
-        resources = {
-            "weekly_limit_hours": limit,
-            "runtime_hours_used": runtime_hours,
-            "brain_hours_used": brain_hours,
-            "runtime_hours_remaining": max(0.0, limit - runtime_hours),
-        }
+        ecology_local = resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
+        ecology_public = public_resource_ecology(ecology_local)
+        executive = executive_status_from_state(config, memory=memory, tools=tools)
+        executive_inputs = executive.get("inputs") or {}
+        resources = executive_inputs.get("resources") or {}
+        needs = list(executive_inputs.get("needs") or [])
         active_goals = memory.active_goals(16)
         chronicle_valid, chronicle_error = Chronicle(state_dir / "chronicle.jsonl").verify()
-        needs = [
-            need.as_dict()
-            for need in derive_needs(
-                memory,
-                chronicle_valid=chronicle_valid,
-                budget=resources,
-                active_goals=active_goals,
-                capability_health=capability_health,
-                economy=economy,
-            )
-        ]
-        existing_names = {str(item.get("name", "")) for item in needs}
-        for signal in homeostasis.get("signals", []):
-            if not isinstance(signal, dict):
-                continue
-            name = str(signal.get("name", ""))
-            if not name or name in existing_names:
-                continue
-            needs.append(
-                {
-                    "name": name,
-                    "severity": float(signal.get("severity", 0.0)),
-                    "reason": str(signal.get("reason", "")),
-                    "response_hint": str(signal.get("response_hint", "")),
-                    "source": "homeostasis",
-                    "evidence": signal.get("evidence") or {},
-                }
-            )
-            existing_names.add(name)
-        needs.sort(key=lambda item: (-float(item.get("severity", 0.0)), str(item.get("name", ""))))
-        drift = _load_drift(memory)
-        executive = executive_status(
-            config,
-            resources=resources,
-            needs=needs[:16],
-            active_goals=[asdict(goal) for goal in active_goals],
-            chronicle_valid=chronicle_valid,
-            chronicle_error=chronicle_error,
-            identity_drift=drift,
-        )
 
         anchor_path = state_dir / "checkpoint.anchor.json"
         anchor = None
@@ -300,6 +246,7 @@ def main() -> None:
                     "resources": resources,
                     "economy": economy,
                     "metabolism": metabolism,
+                    "resource_ecology": ecology_public,
                     "homeostasis": homeostasis,
                     "executive": executive,
                     "world_model": tools.world_model.snapshot(24),
@@ -312,7 +259,7 @@ def main() -> None:
                     },
                     "memory_records": memory.count(),
                     "active_goals": [asdict(goal) for goal in active_goals],
-                    "needs": needs[:16],
+                    "needs": needs[:20],
                     "scheduler": {
                         "next_wake_at": memory.get_meta("next_wake_at"),
                         "last_sleep_seconds": memory.get_meta("last_sleep_seconds"),
@@ -375,7 +322,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = ExecutiveOrganismRuntime(config)
+    runtime = ResourceOrganismRuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
@@ -386,6 +333,7 @@ def main() -> None:
         "identity_fingerprint": runtime.identity.fingerprint,
         "self_model_fingerprint": runtime.memory.get_meta("self_model_fingerprint"),
         "executive_enabled": runtime.executive_enabled,
+        "resource_ecology": public_resource_ecology(runtime._resource_ecology_snapshot()),
     }
     if auto_checkpoint is not None:
         output["auto_checkpoint"] = auto_checkpoint

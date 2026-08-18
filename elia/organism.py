@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import importlib
@@ -32,6 +33,82 @@ def _fingerprint(value: Any) -> str:
 
 def default_manifest_path() -> Path:
     return Path(__file__).resolve().parents[1] / "config" / "organism.yaml"
+
+
+def _load_yaml_object(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"organism manifest fragment must contain a YAML object: {path}")
+    return raw
+
+
+def _merge_default_overlays(path: Path, base: dict[str, Any]) -> dict[str, Any]:
+    """Merge immutable generational anatomy overlays next to the default manifest.
+
+    `config/organism.yaml` remains the historical base anatomy. New generations add
+    small declarative fragments under `config/organism.d/` instead of rewriting the
+    whole lineage manifest. Overlays are sorted by filename, may add layers/organs and
+    raise schema_version, but may not change identity_id or silently replace an organ.
+
+    Custom manifest paths do not implicitly load overlays; this keeps isolated tests
+    and external audits deterministic unless they explicitly use the project default.
+    """
+
+    if path != default_manifest_path().resolve():
+        return base
+    overlay_dir = path.parent / "organism.d"
+    if not overlay_dir.is_dir():
+        return base
+
+    merged = deepcopy(base)
+    merged_layers = dict(merged.get("layers") or {})
+    merged_organs = list(merged.get("organs") or [])
+    existing_ids = {
+        str(item.get("id", "")).strip()
+        for item in merged_organs
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    base_identity = str(merged.get("identity_id", "")).strip()
+    overlays: list[dict[str, str]] = []
+
+    for overlay_path in sorted(overlay_dir.glob("*.yaml"), key=lambda item: item.name):
+        overlay = _load_yaml_object(overlay_path)
+        overlay_identity = str(overlay.get("identity_id", base_identity)).strip()
+        if overlay_identity != base_identity:
+            raise ValueError(
+                f"organism overlay {overlay_path.name} identity_id {overlay_identity!r} "
+                f"does not match base {base_identity!r}"
+            )
+        for key, value in dict(overlay.get("layers") or {}).items():
+            merged_layers[str(key)] = str(value)
+        additions = overlay.get("organs") or []
+        if not isinstance(additions, list):
+            raise ValueError(f"organism overlay organs must be a list: {overlay_path.name}")
+        for item in additions:
+            if not isinstance(item, dict):
+                raise ValueError(f"organism overlay organ must be an object: {overlay_path.name}")
+            organ_id = str(item.get("id", "")).strip()
+            if not organ_id or organ_id in existing_ids:
+                raise ValueError(
+                    f"organism overlay {overlay_path.name} has invalid/duplicate organ id: {organ_id!r}"
+                )
+            existing_ids.add(organ_id)
+            merged_organs.append(deepcopy(item))
+        merged["schema_version"] = max(
+            int(merged.get("schema_version", 1)),
+            int(overlay.get("schema_version", merged.get("schema_version", 1))),
+        )
+        overlays.append(
+            {
+                "name": overlay_path.name,
+                "sha256": sha256(overlay_path.read_bytes()).hexdigest(),
+            }
+        )
+
+    merged["layers"] = merged_layers
+    merged["organs"] = merged_organs
+    merged["anatomy_overlays"] = overlays
+    return merged
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +192,7 @@ class OrganismManifest:
     @classmethod
     def load(cls, path: Path | None = None) -> "OrganismManifest":
         path = Path(path or default_manifest_path()).resolve()
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("organism manifest must contain a YAML object")
+        raw = _merge_default_overlays(path, _load_yaml_object(path))
         identity_id = str(raw.get("identity_id", "")).strip()
         if not identity_id:
             raise ValueError("organism manifest has no identity_id")
@@ -297,6 +372,7 @@ class OrganismManifest:
             "manifest_fingerprint": self.fingerprint,
             "principle": self.principle,
             "core_organs": core,
+            "anatomy_overlays": list(self.raw.get("anatomy_overlays") or []),
             "research_maturity": maturity_summary(),
             "research_rule": (
                 "prototype/hypothesis research is evidence-generating code, not identity authority or a proven production gain"

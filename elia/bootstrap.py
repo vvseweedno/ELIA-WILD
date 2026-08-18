@@ -9,8 +9,8 @@ from typing import Any
 from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
-from .executive_runtime import ExecutiveOrganismRuntime
 from .identity import IdentityBundle
+from .resource_runtime import ResourceOrganismRuntime
 from .vitals import VitalSigns
 
 
@@ -18,9 +18,9 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
     """Initialize/continue a zero-GPU ELIA state and prove the current organism path.
 
     The bootstrap uses the deterministic MockBrain explicitly, so it never imports the
-    configured expensive model backend. It exercises the Genesis 1.3 Executive runtime,
-    including Sensorium/World/Causal/Metabolism wiring and deterministic cognitive
-    arbitration, on a fresh CPU machine.
+    configured expensive model backend. It exercises the Genesis 1.4 resource runtime,
+    including Sensorium/World/Causal/Metabolism/Executive wiring plus typed resource
+    ecology, on a fresh CPU machine.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -32,7 +32,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = ExecutiveOrganismRuntime(config, brain=MockBrain())
+    runtime = ResourceOrganismRuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
@@ -48,6 +48,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             runtime.executive_store.recent(runtime.EXECUTIVE_HISTORY_LIMIT)
         ).as_dict(),
         "metabolism": runtime._metabolism_snapshot(),
+        "resource_ecology": runtime._resource_ecology_snapshot(),
         "homeostasis": runtime._homeostasis_snapshot(),
         "world_model": runtime.tools.world_model.snapshot(12),
         "sensorium": runtime.tools.observations.snapshot(8),
