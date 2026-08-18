@@ -88,3 +88,16 @@ organs:
     role: >-
       Equal-call/token-budget comparison of Pearson-12, homogeneous, random-role and
       domain-expert conditions. Built-in diversity metrics never masquerade as accuracy.
+
+  - id: cognitive_biography_hysteresis
+    layer: research
+    kind: python
+    module: elia.research.cognitive_hysteresis
+    symbol: CognitiveBiographyHysteresisHarness
+    required: false
+    maturity: hypothesis
+    authority: none
+    role: >-
+      Tests whether output differentiation persists after role-policy homogenization
+      when organ biographies are preserved, against a clean-history control. A positive
+      result is not interpreted as human personality or consciousness.
