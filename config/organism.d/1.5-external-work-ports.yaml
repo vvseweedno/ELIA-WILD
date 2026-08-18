@@ -1,0 +1,44 @@
+schema_version: 7
+identity_id: elia-wild
+
+layers:
+  external_work: configured submission/outcome channels connecting staged work to observed external state
+
+organs:
+  - id: work_port_store
+    layer: external_work
+    kind: python
+    module: elia.work_ports
+    symbol: WorkPortStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Persists external submission references, observed remote status and response
+      fingerprints without turning acceptance into payment or verified resource.
+
+  - id: work_port_registry
+    layer: external_work
+    kind: python
+    module: elia.work_ports
+    symbol: WorkPortRegistry
+    required: true
+    maturity: prototype
+    authority: configured_external_submission
+    role: >-
+      Binds a configured port name to fixed MCP server/submission/outcome tools,
+      records submission/outcome Observations and advances work lifecycle only from
+      observed adapter results. Port code exists even when all ports are disabled.
+
+  - id: external_work_runtime
+    layer: agency
+    kind: python
+    module: elia.external_work_runtime
+    symbol: ExternalWorkOrganismRuntime
+    required: true
+    maturity: prototype
+    authority: composed
+    role: >-
+      Production Genesis 1.5 runtime integrating configured external work ports into
+      capability health, assurance, cognition and Resource Ecology while preserving
+      Genesis 1.4 as direct rollback ancestry.

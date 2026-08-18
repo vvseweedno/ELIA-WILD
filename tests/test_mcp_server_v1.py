@@ -45,11 +45,14 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
                 "elia_preflight",
                 "elia_executive",
                 "elia_resource_ecology",
+                "elia_work_ports",
                 "elia_world_query",
                 "elia_sensorium_recent",
                 "elia_body_diagnostics",
                 "elia_homeostasis",
             }.issubset(names)
+            assert "submit_work" not in names
+            assert "check_work_outcome" not in names
 
             status_result = await client.call_tool("elia_status", {})
             assert status_result.is_error is False
@@ -58,6 +61,9 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert "metabolism" in status
             assert "compute_energy" in status["metabolism"]
             assert "resource_ecology" in status
+            assert "work_ports" in status
+            assert status["work_ports"]["enabled"] is False
+            assert "submission_ref" not in json.dumps(status["work_ports"], sort_keys=True)
             assert "exact_bottleneck_candidate_count" in status["resource_ecology"]
             assert "homeostasis" in status
             assert status["homeostasis"]["metabolism"] == status["metabolism"]
@@ -67,6 +73,13 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert "energy" in status["executive"]
             assert "digital_body" in status
             assert "sensorium" in status
+
+            work_ports_result = await client.call_tool("elia_work_ports", {})
+            assert work_ports_result.is_error is False
+            work_ports = _structured(work_ports_result)
+            assert work_ports["enabled"] is False
+            assert "authority_rule" in work_ports
+            assert "submission_ref" not in json.dumps(work_ports, sort_keys=True)
 
             executive_result = await client.call_tool("elia_executive", {})
             assert executive_result.is_error is False
@@ -117,13 +130,20 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             text = getattr(resource.contents[0], "text", "")
             identity = json.loads(text)
             assert identity["identity_id"] == "elia-wild"
-            assert identity["body_version"].startswith("1.4.")
+            assert identity["body_version"].startswith("1.5.")
 
             ecology_resource = await client.read_resource("elia://resource-ecology")
             assert ecology_resource.contents
             ecology_text = getattr(ecology_resource.contents[0], "text", "")
             ecology_from_resource = json.loads(ecology_text)
             assert "candidates" in ecology_from_resource
+
+            ports_resource = await client.read_resource("elia://work-ports")
+            assert ports_resource.contents
+            ports_text = getattr(ports_resource.contents[0], "text", "")
+            ports_from_resource = json.loads(ports_text)
+            assert ports_from_resource["enabled"] is False
+            assert "submission_ref" not in ports_text
 
     asyncio.run(exercise())
 

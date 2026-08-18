@@ -310,6 +310,51 @@ def _bounded_resource_ecology(value: Any) -> dict[str, Any]:
     }
 
 
+def _bounded_work_ports(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    ports = {}
+    for name, item in dict(value.get("ports") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        ports[str(name)[:128]] = {
+            key: item.get(key)
+            for key in ("server", "submit_tool", "outcome_tool")
+            if key in item
+        }
+    active: list[dict[str, Any]] = []
+    for item in list(value.get("active_submissions") or [])[:16]:
+        if not isinstance(item, dict):
+            continue
+        # submission_ref and response_fingerprint stay local; the model can act by
+        # work_item_id and the configured port runtime carries the remote reference.
+        active.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "id",
+                    "work_item_id",
+                    "port_name",
+                    "submitted_at",
+                    "updated_at",
+                    "submission_observation_id",
+                    "remote_status",
+                    "last_outcome_observation_id",
+                )
+                if key in item
+            }
+        )
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "readiness": value.get("readiness"),
+        "ports": ports,
+        "active_submissions": active,
+        "authority_rule": (
+            "port configuration fixes transport/server/tool authority; model actions select only declared port/work ids"
+        ),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     path: Path
@@ -376,6 +421,7 @@ class PromptTemplate:
             "metabolism": _bounded_metabolism(metabolism),
             "homeostasis": _bounded_homeostasis(homeostasis),
             "resource_ecology": _bounded_resource_ecology(context.get("resource_ecology")),
+            "work_ports": _bounded_work_ports(context.get("work_ports")),
             "executive": context.get("executive") or {},
             "executive_energy": context.get("executive_energy") or {},
             "digital_body": context.get("digital_body") or {},

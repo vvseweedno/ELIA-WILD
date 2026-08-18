@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import fnmatch
 import importlib.util
+import json
 import os
 from typing import Any, AsyncIterator
 
@@ -66,7 +67,8 @@ class MCPBody:
                 "side effects are defined by the selected allow-listed remote tool",
                 "configured_mcp_server",
                 "network_or_local_process",
-                base_enabled and any(bool(item.get("allow_tool_calls", False)) for item in self.servers().values()),
+                base_enabled
+                and any(bool(item.get("allow_tool_calls", False)) for item in self.servers().values()),
                 readiness,
             ),
             BodyCapability(
@@ -103,7 +105,9 @@ class MCPBody:
                 continue
             value = os.getenv(env_name)
             if value is None:
-                raise RuntimeError(f"required MCP credential environment variable is missing: {env_name}")
+                raise RuntimeError(
+                    f"required MCP credential environment variable is missing: {env_name}"
+                )
             headers[str(header)] = value
         return headers
 
@@ -117,7 +121,11 @@ class MCPBody:
         timeout = max(1.0, min(float(server.get("timeout_seconds", 30.0)), 300.0))
         override = self.target_overrides.get(name)
         if override is not None:
-            async with Client(override, read_timeout_seconds=timeout, raise_exceptions=True) as client:
+            async with Client(
+                override,
+                read_timeout_seconds=timeout,
+                raise_exceptions=True,
+            ) as client:
                 yield client
             return
 
@@ -127,7 +135,9 @@ class MCPBody:
         allow_private = bool(server.get("allow_private", False))
         assert_http_url(url, allow_private=allow_private)
         headers = self._headers(server)
-        if headers and not allow_private and not bool(server.get("network_isolation_confirmed", False)):
+        if headers and not allow_private and not bool(
+            server.get("network_isolation_confirmed", False)
+        ):
             raise RuntimeError(
                 "credentialed public MCP transport requires deployment network isolation confirmation"
             )
@@ -214,7 +224,11 @@ class MCPBody:
         try:
             return BodyResult(True, "mcp_discover", run_sync(self._discover_async(name)))
         except Exception as exc:
-            return BodyResult(False, "mcp_discover", error=f"{type(exc).__name__}: {exc}")
+            return BodyResult(
+                False,
+                "mcp_discover",
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
     @staticmethod
     def _content_blocks(result: Any) -> list[dict[str, Any]]:
@@ -230,7 +244,46 @@ class MCPBody:
             blocks.append(item)
         return blocks
 
-    async def _call_async(self, server_name: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _machine_object(result: Any) -> dict[str, Any] | None:
+        """Normalize the two MCP v2 representations of a machine-readable tool result.
+
+        Servers with an output schema normally populate `structured_content`; other
+        valid SDK paths may serialize a returned mapping as a JSON text content block.
+        ELIA accepts only an actual object from either representation. Arbitrary prose,
+        JSON arrays/scalars and malformed JSON never become structured evidence.
+        """
+
+        structured = getattr(result, "structured_content", None)
+        if isinstance(structured, dict):
+            if set(structured) == {"result"} and isinstance(structured.get("result"), dict):
+                return dict(structured["result"])
+            return dict(structured)
+
+        for block in getattr(result, "content", []) or []:
+            text = getattr(block, "text", None)
+            if not isinstance(text, str):
+                continue
+            candidate = text.strip()
+            if not candidate or not candidate.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if set(parsed) == {"result"} and isinstance(parsed.get("result"), dict):
+                return dict(parsed["result"])
+            return dict(parsed)
+        return None
+
+    async def _call_async(
+        self,
+        server_name: str,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
         server = self._server(server_name)
         if not bool(server.get("allow_tool_calls", False)):
             raise PermissionError("MCP tool calls are disabled for this server")
@@ -243,14 +296,28 @@ class MCPBody:
                 "server": server_name,
                 "tool": tool,
                 "is_error": bool(result.is_error),
-                "structured_content": result.structured_content,
+                "structured_content": self._machine_object(result),
                 "content": self._content_blocks(result),
             }
 
-    def call(self, server: str, tool: str, arguments: dict[str, Any] | None = None) -> BodyResult:
+    def call(
+        self,
+        server: str,
+        tool: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> BodyResult:
         try:
             data = run_sync(self._call_async(server, str(tool), dict(arguments or {})))
-            return BodyResult(not data["is_error"], "mcp_call", data, error="MCP tool returned is_error=true" if data["is_error"] else None)
+            return BodyResult(
+                not data["is_error"],
+                "mcp_call",
+                data,
+                error=(
+                    "MCP tool returned is_error=true"
+                    if data["is_error"]
+                    else None
+                ),
+            )
         except Exception as exc:
             return BodyResult(False, "mcp_call", error=f"{type(exc).__name__}: {exc}")
 
@@ -275,6 +342,14 @@ class MCPBody:
 
     def read_resource(self, server: str, uri: str) -> BodyResult:
         try:
-            return BodyResult(True, "mcp_read_resource", run_sync(self._read_resource_async(server, str(uri))))
+            return BodyResult(
+                True,
+                "mcp_read_resource",
+                run_sync(self._read_resource_async(server, str(uri))),
+            )
         except Exception as exc:
-            return BodyResult(False, "mcp_read_resource", error=f"{type(exc).__name__}: {exc}")
+            return BodyResult(
+                False,
+                "mcp_read_resource",
+                error=f"{type(exc).__name__}: {exc}",
+            )

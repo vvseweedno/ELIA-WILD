@@ -12,17 +12,19 @@ from .chronicle import Chronicle
 from .config import load_config
 from .economy import EconomyStore
 from .executive_status import executive_status_from_state
+from .external_work_runtime import ExternalWorkOrganismRuntime
 from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
 from .metabolism import MetabolismEngine
 from .prompting import PromptTemplate
-from .resource_runtime import ResourceOrganismRuntime
 from .resource_status import public_resource_ecology, resource_ecology_status
 from .skills import SkillRegistry
 from .tools import ToolRegistry
 from .vitals import VitalSigns
+from .work_port_status import public_work_port_state
+from .work_ports import WorkPortRegistry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,7 +133,6 @@ def main() -> None:
     if sum(value is not None for value in checkpoint_modes) > 1:
         raise SystemExit("choose only one checkpoint operation at a time")
 
-    # Recovery/inspection operations stay available even when current vital signs are bad.
     if args.checkpoint_restore:
         manager = _checkpoint_manager(config, args.checkpoint_key_env)
         try:
@@ -191,14 +192,17 @@ def main() -> None:
         identity_store = IdentityStore(state_dir / "memory.sqlite3")
         economy_store = EconomyStore(state_dir / "memory.sqlite3")
         tools = ToolRegistry(state_dir / "workspace", config.raw_tools)
+        work_ports = WorkPortRegistry(state_dir / "workspace", config.raw_tools)
         skills = SkillRegistry(config.skills_dir)
-        capability_catalog = tools.catalog()
+        capability_catalog = dict(tools.catalog())
+        capability_catalog.update(work_ports.catalog())
         capability_health = memory.capability_health_all(list(capability_catalog), window=20)
         skill_state = skills.prompt_catalog(capability_catalog, capability_health)
         economy = economy_store.snapshot(16)
         metabolism, homeostasis = _status_physiology(config, tools)
         ecology_local = resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
         ecology_public = public_resource_ecology(ecology_local)
+        work_ports_public = public_work_port_state(work_ports.diagnostics())
         executive = executive_status_from_state(config, memory=memory, tools=tools)
         executive_inputs = executive.get("inputs") or {}
         resources = executive_inputs.get("resources") or {}
@@ -247,6 +251,7 @@ def main() -> None:
                     "economy": economy,
                     "metabolism": metabolism,
                     "resource_ecology": ecology_public,
+                    "work_ports": work_ports_public,
                     "homeostasis": homeostasis,
                     "executive": executive,
                     "world_model": tools.world_model.snapshot(24),
@@ -322,7 +327,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = ResourceOrganismRuntime(config)
+    runtime = ExternalWorkOrganismRuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
@@ -334,6 +339,7 @@ def main() -> None:
         "self_model_fingerprint": runtime.memory.get_meta("self_model_fingerprint"),
         "executive_enabled": runtime.executive_enabled,
         "resource_ecology": public_resource_ecology(runtime._resource_ecology_snapshot()),
+        "work_ports": public_work_port_state(runtime.work_ports.diagnostics()),
     }
     if auto_checkpoint is not None:
         output["auto_checkpoint"] = auto_checkpoint

@@ -9,18 +9,17 @@ from typing import Any
 from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
+from .external_work_runtime import ExternalWorkOrganismRuntime
 from .identity import IdentityBundle
-from .resource_runtime import ResourceOrganismRuntime
 from .vitals import VitalSigns
 
 
 def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None = None) -> dict[str, Any]:
     """Initialize/continue a zero-GPU ELIA state and prove the current organism path.
 
-    The bootstrap uses the deterministic MockBrain explicitly, so it never imports the
-    configured expensive model backend. It exercises the Genesis 1.4 resource runtime,
-    including Sensorium/World/Causal/Metabolism/Executive wiring plus typed resource
-    ecology, on a fresh CPU machine.
+    The bootstrap uses deterministic MockBrain and exercises the Genesis 1.5 runtime.
+    External work ports remain disabled by default, so bootstrap proves the port organ
+    and rollback-compatible body without requiring MCP credentials or external writes.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -32,7 +31,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = ResourceOrganismRuntime(config, brain=MockBrain())
+    runtime = ExternalWorkOrganismRuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
@@ -49,6 +48,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
         ).as_dict(),
         "metabolism": runtime._metabolism_snapshot(),
         "resource_ecology": runtime._resource_ecology_snapshot(),
+        "work_ports": runtime.work_ports.diagnostics(),
         "homeostasis": runtime._homeostasis_snapshot(),
         "world_model": runtime.tools.world_model.snapshot(12),
         "sensorium": runtime.tools.observations.snapshot(8),

@@ -92,6 +92,7 @@ jobs:
             tests/test_homeostasis_v1.py \
             tests/test_resource_ecology_v1.py \
             tests/test_resource_runtime_v1.py \
+            tests/test_work_ports_v1.py \
             tests/test_organism_overlays_v1.py \
             tests/test_action_log_redaction_v1.py \
             tests/test_provider_context_security_v1.py \
