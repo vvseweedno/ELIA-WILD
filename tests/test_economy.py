@@ -4,11 +4,20 @@ from pathlib import Path
 
 import pytest
 
+from elia.autonomy import derive_needs
 from elia.brain import Decision
 from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.economy import EconomyStore
 from elia.runtime import EliaRuntime
 from elia.tools import ToolRegistry
+from elia.verification import VerificationRegistry
+
+
+VERIFY_KEY = b"test-ledger-key-32-bytes-minimum!!"
+
+
+def _registry() -> VerificationRegistry:
+    return VerificationRegistry({"test:ledger": VERIFY_KEY})
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -84,29 +93,67 @@ def test_unverified_resource_event_never_changes_verified_balance(tmp_path: Path
     assert summary["unverified_delta"] == 500
 
 
-def test_verified_resource_event_requires_authority_and_evidence(tmp_path: Path) -> None:
+def test_verified_resource_event_requires_signed_receipt_not_authority_string(tmp_path: Path) -> None:
     economy = EconomyStore(tmp_path / "memory.sqlite3")
-    with pytest.raises(ValueError, match="verification_authority"):
+    with pytest.raises(ValueError, match="signed VerificationReceipt"):
         economy.record_resource_event(
             asset="cash",
             unit="USD",
             amount=100,
             kind="payment",
             source="trusted_adapter",
+            evidence="receipt:example-001",
             verified=True,
+            verification_authority="payment_adapter:test",
         )
 
+
+def test_verified_resource_receipt_authenticates_exact_claim_and_evidence(tmp_path: Path) -> None:
+    registry = _registry()
+    economy = EconomyStore(tmp_path / "memory.sqlite3", verification_registry=registry)
+    evidence = "receipt:example-001"
+    claim = EconomyStore.resource_claim(
+        asset="cash",
+        unit="USD",
+        amount=100,
+        kind="payment",
+        source="trusted_adapter",
+    )
+    receipt = registry.issue("test:ledger", claim=claim, evidence=evidence, nonce="fixed-test")
     economy.record_resource_event(
         asset="cash",
         unit="USD",
         amount=100,
         kind="payment",
         source="trusted_adapter",
-        evidence="receipt:example-001",
+        evidence=evidence,
         verified=True,
-        verification_authority="payment_adapter:test",
+        verification_receipt=receipt,
     )
     assert economy.verified_balance("cash", "USD") == 100
+
+    with pytest.raises(PermissionError, match="claim digest mismatch"):
+        economy.record_resource_event(
+            asset="cash",
+            unit="USD",
+            amount=999,
+            kind="payment",
+            source="trusted_adapter",
+            evidence=evidence,
+            verified=True,
+            verification_receipt=receipt,
+        )
+    with pytest.raises(PermissionError, match="evidence digest mismatch"):
+        economy.record_resource_event(
+            asset="cash",
+            unit="USD",
+            amount=100,
+            kind="payment",
+            source="trusted_adapter",
+            evidence="tampered receipt",
+            verified=True,
+            verification_receipt=receipt,
+        )
 
 
 def test_opportunity_scoring_uses_expected_net_value_per_gpu_hour(tmp_path: Path) -> None:
