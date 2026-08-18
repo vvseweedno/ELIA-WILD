@@ -10,16 +10,17 @@ from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
 from .identity import IdentityBundle
-from .organism_runtime import OrganismRuntime
+from .metabolic_runtime import MetabolicOrganismRuntime
 from .vitals import VitalSigns
 
 
 def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None = None) -> dict[str, Any]:
-    """Initialize/continue a zero-GPU ELIA state and prove the organism path.
+    """Initialize/continue a zero-GPU ELIA state and prove the current organism path.
 
     The bootstrap uses the deterministic MockBrain explicitly, so it never imports the
-    configured expensive model backend. It exercises the current OrganismRuntime,
-    including durable sensorium/world/causal wiring, on a fresh CPU machine.
+    configured expensive model backend. It exercises the Genesis 1.2 metabolic runtime,
+    including durable sensorium/world/causal wiring and verified resource physiology,
+    on a fresh CPU machine.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -31,7 +32,7 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = OrganismRuntime(config, brain=MockBrain())
+    runtime = MetabolicOrganismRuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
@@ -41,6 +42,8 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
         "vitals": after.as_dict(),
         "brain_backend_used": "mock",
         "configured_brain_backend_not_loaded": config.brain.backend,
+        "metabolism": runtime._metabolism_snapshot(),
+        "homeostasis": runtime._homeostasis_snapshot(),
         "world_model": runtime.tools.world_model.snapshot(12),
         "sensorium": runtime.tools.observations.snapshot(8),
         "causal_memory": runtime.tools.causal.snapshot(8),
