@@ -23,18 +23,38 @@ Therefore:
 
 A later exchange/conversion system may connect two resources only when a trusted conversion relation exists and its cost/slippage/availability are modeled explicitly.
 
+## What “verified” means
+
+Genesis 1.2 no longer treats a caller-supplied string such as `verification_authority="trusted"` as authority.
+
+A verified mutation requires a `VerificationReceipt` authenticated against a `VerificationRegistry` whose verifier key was supplied by trusted runtime/infrastructure configuration. The receipt binds:
+
+```text
+authority
++ normalized claim SHA-256
++ evidence SHA-256
++ nonce
++ HMAC-SHA256 signature
+```
+
+The key is not supplied by the language model or by the claim being verified. Changing claim amount/unit/source/due-date/mutation type or changing evidence invalidates the receipt.
+
+The current local adapter backend uses HMAC because verifier and store live inside one controlled runtime boundary. A future externally verifiable adapter may replace the cryptographic backend with asymmetric signatures while preserving the same fail-closed receipt contract.
+
 ## Verified balances
 
 Balances remain owned by `EconomyStore.resource_events`.
 
 A verified resource event requires:
 
-- non-zero finite amount;
+- a non-zero finite amount;
 - evidence;
-- `verification_authority`;
-- a trusted runtime/adapter call.
+- a trusted `VerificationRegistry`;
+- a signed `VerificationReceipt` over the exact normalized resource-event claim and evidence.
 
-The model decision schema has no operation that inserts a verified resource receipt.
+The persisted row records both the derived verification authority and the signed receipt. Unverified resource reports can still be preserved but cannot change verified balance.
+
+The model decision schema has no operation that inserts a verified resource receipt, and a plain authority string is explicitly rejected by the store.
 
 ## Verified obligations
 
@@ -48,12 +68,13 @@ The model decision schema has no operation that inserts a verified resource rece
 - essential/non-essential flag;
 - source/evidence;
 - verified/unverified state;
-- verification authority;
+- verification authority derived from a valid receipt;
+- persisted verification receipt;
 - active state.
 
-A **verified** obligation requires evidence and a verification authority. Unverified obligations are preserved for inspection but are excluded from burn/runway and cannot create homeostatic survival pressure.
+A **verified** obligation requires evidence and a signed receipt over the exact normalized obligation claim. Unverified obligations are preserved for inspection but are excluded from burn/runway and cannot create homeostatic survival pressure.
 
-Obligation due-date advancement/deactivation is also evidence/authority gated. The organism cannot silently delete a real recurring cost simply because it wants a larger runway number.
+Verified obligation due-date advancement and deactivation are separately receipt-gated over mutation-specific claims. The organism therefore cannot silently move/delete a real recurring cost merely because it wants a larger runway number.
 
 ## GPU energy
 
@@ -104,7 +125,7 @@ MetabolicOrganismRuntime 1.2
 (verified metabolism/runway)
 ```
 
-The parent runtimes remain importable rollback/migration references. CRC treats a tested body/prompt upgrade as an observable mutation, not automatic identity death, while identity/core/constitution/branch/Chronicle remain critical continuity boundaries.
+The parent runtimes remain importable rollback/migration references. Durable persistence boundaries independently redact raw action values so importing an older runtime does not reopen Chronicle/Memory/Metacognition leakage. CRC treats a tested body/prompt upgrade as an observable mutation, not automatic identity death, while identity/core/constitution/branch/Chronicle remain critical continuity boundaries.
 
 ## Cognitive exposure
 
@@ -114,9 +135,9 @@ The language model receives a bounded metabolic contract:
 - verified resource balance/burn/runway vectors;
 - current bottleneck;
 - upcoming verified obligations;
-- count (not authority) of unverified obligations.
+- count/state of unverified obligations without authority to promote them.
 
-It does not receive a mechanism to set its own runway, create a verified obligation, or mint a resource receipt.
+It does not receive verifier keys, a mechanism to set its own runway, create a verified obligation, mutate a verified due date, or mint a valid resource receipt.
 
 ## Current limitation
 
@@ -128,6 +149,7 @@ Therefore Genesis 1.2 **does not yet claim** that opportunity selection is fully
 
 Genesis 1.2 should not be promoted from alpha solely because the formulas exist. Required software evidence includes:
 
+- signed-receipt verification and tamper rejection;
 - verified/unverified obligation separation;
 - independent unit accounting;
 - negative/zero balance behavior;
@@ -135,8 +157,11 @@ Genesis 1.2 should not be promoted from alpha solely because the formulas exist.
 - bottleneck selection;
 - homeostatic pressure only from verified resource state;
 - model inability to mint receipts/obligations/runway;
+- verified-obligation mutation receipt gates;
+- provider/persistence redaction regression;
 - 1.1→1.2 CRC continuity regression;
 - zero-GPU bootstrap through `MetabolicOrganismRuntime`;
-- existing real Chromium/MCP sensorimotor lane remains green.
+- existing real Chromium/MCP sensorimotor lane remains green;
+- installed dependency vulnerability audit remains green.
 
-Long-term empirical evidence still requires real operating costs/resources rather than synthetic test balances.
+Long-term empirical evidence still requires real operating costs/resources and real verifier adapters rather than synthetic test balances.
