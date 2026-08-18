@@ -96,7 +96,6 @@ class ExternalWorkOrganismRuntime(ResourceOrganismRuntime):
 
     def _after_transition_rollback(self) -> None:
         """Repair Resource Ecology from safety-preserved work-port outbox state."""
-        super()._after_transition_rollback()
         self.work_ports._recover_interrupted_intents()
         self.work_ports._reconcile_local_projection()
 
