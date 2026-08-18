@@ -184,7 +184,8 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
     _require_mcp()
     from mcp.server import MCPServer
 
-    config_path = Path(config_path).resolve()
+    # Do not pre-resolve the historical default against cwd here. `load_config`
+    # owns source-vs-wheel resource resolution and still honors explicit paths.
     config = load_config(config_path)
     server = MCPServer("ELIA WILD")
 
