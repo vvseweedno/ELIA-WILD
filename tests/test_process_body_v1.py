@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import pytest
+
 from elia.body.process import BoundedProcessRunner
 
 
@@ -40,5 +42,23 @@ def test_process_runner_rejects_workspace_escape_and_times_out(tmp_path: Path) -
             "max_timeout_seconds": 0.3,
         },
     )
-    escaped = runner.run({"executable": "python", "argv": ["-c", "print('x')"], "cwd": "../outside"})
-    assert escaped.ok is False or False
+    with pytest.raises(ValueError, match="escapes workspace"):
+        runner.run(
+            {
+                "executable": "python",
+                "argv": ["-c", "print('x')"],
+                "cwd": "../outside",
+            }
+        )
+
+    timed = runner.run(
+        {
+            "executable": "python",
+            "argv": ["-c", "import time; time.sleep(2)"],
+            "timeout_seconds": 0.1,
+        }
+    )
+    assert timed.ok is False
+    assert timed.data["timed_out"] is True
+    assert timed.data["returncode"] is not None
+    assert "timed out" in (timed.error or "")
