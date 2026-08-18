@@ -41,10 +41,11 @@ class MemoryStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -169,6 +170,12 @@ class MemoryStore:
             )
             for row in reversed(rows)
         ]
+
+    def count(self) -> int:
+        """Return memory cardinality without materializing autobiographical records."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM memories").fetchone()
+        return int(row["count"] if row else 0)
 
     def set_meta(self, key: str, value: str) -> None:
         with self._connect() as conn:
