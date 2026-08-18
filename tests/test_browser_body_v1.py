@@ -9,12 +9,21 @@ pytest.importorskip("playwright.sync_api")
 from elia.body.browser import BrowserBody
 
 
+def test_browser_requires_network_isolation_attestation(tmp_path: Path) -> None:
+    body = BrowserBody(tmp_path, {"enabled": True, "browser": "chromium", "headless": True})
+    assert body.enabled is False
+    capability = {item.name: item for item in body.capabilities()}["browser_navigate"]
+    assert capability.readiness == "network_isolation_required"
+
+
 def test_real_playwright_context_snapshot_fill_click_and_screenshot(tmp_path: Path) -> None:
     body = BrowserBody(
         tmp_path,
         {
             "enabled": True,
             "interaction_enabled": True,
+            "network_isolation_confirmed": True,
+            "trusted_interaction_origins": ["about:blank"],
             "browser": "chromium",
             "headless": True,
             "timeout_ms": 10_000,
@@ -70,6 +79,7 @@ def test_browser_interaction_is_separately_gated(tmp_path: Path) -> None:
         {
             "enabled": True,
             "interaction_enabled": False,
+            "network_isolation_confirmed": True,
             "browser": "chromium",
             "headless": True,
         },
@@ -79,5 +89,26 @@ def test_browser_interaction_is_separately_gated(tmp_path: Path) -> None:
         denied = body.click({"kind": "text", "text": "Do thing"})
         assert denied.ok is False
         assert "interaction is disabled" in (denied.error or "")
+    finally:
+        body.close()
+
+
+def test_browser_interaction_rejects_untrusted_origin(tmp_path: Path) -> None:
+    body = BrowserBody(
+        tmp_path,
+        {
+            "enabled": True,
+            "interaction_enabled": True,
+            "network_isolation_confirmed": True,
+            "trusted_interaction_origins": ["https://trusted.example"],
+            "browser": "chromium",
+            "headless": True,
+        },
+    )
+    try:
+        body._set_content_for_test("<button>Do thing</button>")
+        denied = body.click({"kind": "text", "text": "Do thing"})
+        assert denied.ok is False
+        assert "not allow-listed" in (denied.error or "")
     finally:
         body.close()
