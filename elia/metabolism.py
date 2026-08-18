@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import json
 import math
 from pathlib import Path
 import sqlite3
@@ -9,6 +10,7 @@ from typing import Any
 
 from .economy import EconomyStore
 from .memory import MemoryStore
+from .verification import VerificationReceipt, VerificationRegistry
 
 
 SECONDS_PER_DAY = 86_400.0
@@ -124,31 +126,37 @@ class MetabolicSnapshot:
             "bottleneck": self.bottleneck,
             "upcoming_verified_obligations": list(self.upcoming_verified_obligations),
             "epistemic_rule": (
-                "Runway is a per-(asset, unit) vector derived from verified balances and "
-                "verified obligations. Unverified claims do not create burn pressure, and "
-                "unrelated units are never summed without an explicit trusted conversion."
+                "Runway is a per-(asset, unit) vector derived from cryptographically "
+                "verified balances and obligations. Unverified claims do not create burn "
+                "pressure, and unrelated units are never summed without an explicit trusted conversion."
             ),
         }
 
 
 class MetabolismStore:
-    """Trusted operating obligations sharing ELIA's authenticated SQLite state.
+    """Trusted operating obligations sharing ELIA's SQLite state.
 
-    Obligations and receipts are separate. This store has no model-facing mutation
-    path in Genesis 1.2: an obligation can affect survival/runway only after a trusted
-    runtime/infrastructure authority records it with evidence.
+    Verified obligations and mutations require signed VerificationReceipts over the
+    exact normalized claim and evidence. A model/caller-provided authority string is
+    not authority and cannot create or mutate verified survival pressure.
     """
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        verification_registry: VerificationRegistry | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.verification_registry = verification_registry
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -170,7 +178,8 @@ class MetabolismStore:
                     active INTEGER NOT NULL DEFAULT 1,
                     source TEXT NOT NULL,
                     evidence TEXT NOT NULL DEFAULT '',
-                    verification_authority TEXT NULL
+                    verification_authority TEXT NULL,
+                    verification_receipt_json TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_resource_obligation_key
                     ON resource_obligations(asset, unit, active, verified, next_due_at);
@@ -184,6 +193,7 @@ class MetabolismStore:
                     event TEXT NOT NULL,
                     evidence TEXT NOT NULL DEFAULT '',
                     authority TEXT NULL,
+                    verification_receipt_json TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(obligation_id)
                         REFERENCES resource_obligations(id)
                         ON DELETE CASCADE
@@ -192,6 +202,22 @@ class MetabolismStore:
                     ON resource_obligation_events(obligation_id, id ASC);
                 """
             )
+            obligation_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(resource_obligations)").fetchall()
+            }
+            if "verification_receipt_json" not in obligation_columns:
+                conn.execute(
+                    "ALTER TABLE resource_obligations ADD COLUMN verification_receipt_json TEXT NOT NULL DEFAULT ''"
+                )
+            event_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(resource_obligation_events)").fetchall()
+            }
+            if "verification_receipt_json" not in event_columns:
+                conn.execute(
+                    "ALTER TABLE resource_obligation_events ADD COLUMN verification_receipt_json TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def _clean(value: Any, *, field: str, maximum: int = 128) -> str:
@@ -231,6 +257,57 @@ class MetabolismStore:
             ),
         )
 
+    @staticmethod
+    def obligation_claim(
+        *,
+        name: str,
+        asset: str,
+        unit: str,
+        amount: float,
+        cadence_seconds: float,
+        next_due_at: str,
+        essential: bool,
+        source: str,
+    ) -> dict[str, Any]:
+        return {
+            "type": "resource_obligation",
+            "name": name,
+            "asset": asset,
+            "unit": unit,
+            "amount": float(amount),
+            "cadence_seconds": float(cadence_seconds),
+            "next_due_at": next_due_at,
+            "essential": bool(essential),
+            "source": source,
+        }
+
+    @staticmethod
+    def mutation_claim(
+        *, obligation_id: int, event: str, periods: int | None = None
+    ) -> dict[str, Any]:
+        claim: dict[str, Any] = {
+            "type": "resource_obligation_mutation",
+            "obligation_id": int(obligation_id),
+            "event": str(event),
+        }
+        if periods is not None:
+            claim["periods"] = int(periods)
+        return claim
+
+    def _verify_receipt(
+        self,
+        receipt: VerificationReceipt | None,
+        *,
+        claim: dict[str, Any],
+        evidence: str,
+    ) -> tuple[str, str]:
+        if self.verification_registry is None or receipt is None:
+            raise ValueError(
+                "verified obligation state requires a trusted verification registry and signed VerificationReceipt"
+            )
+        authority = self.verification_registry.verify(receipt, claim=claim, evidence=evidence)
+        return authority, json.dumps(receipt.as_dict(), ensure_ascii=False, sort_keys=True)
+
     def record_obligation(
         self,
         *,
@@ -244,6 +321,7 @@ class MetabolismStore:
         source: str,
         evidence: str = "",
         verified: bool = False,
+        verification_receipt: VerificationReceipt | None = None,
         verification_authority: str | None = None,
     ) -> int:
         name = self._clean(name, field="name", maximum=240)
@@ -253,16 +331,34 @@ class MetabolismStore:
         amount = self._positive(amount, field="amount")
         cadence_seconds = self._positive(cadence_seconds, field="cadence_seconds")
         due = _parse_time(next_due_at)
+        due_text = _iso(due)
         evidence = str(evidence).strip()[:8000]
-        authority = (
-            str(verification_authority).strip()[:256]
-            if verification_authority
-            else None
-        )
-        if verified and (not evidence or not authority):
-            raise ValueError(
-                "verified obligations require evidence and verification_authority"
+
+        authority: str | None = None
+        receipt_json = ""
+        if verified:
+            if verification_authority is not None and verification_receipt is None:
+                raise ValueError(
+                    "verification_authority strings cannot verify obligations; a signed VerificationReceipt is required"
+                )
+            claim = self.obligation_claim(
+                name=name,
+                asset=asset,
+                unit=unit,
+                amount=amount,
+                cadence_seconds=cadence_seconds,
+                next_due_at=due_text,
+                essential=bool(essential),
+                source=source,
             )
+            authority, receipt_json = self._verify_receipt(
+                verification_receipt,
+                claim=claim,
+                evidence=evidence,
+            )
+        elif verification_receipt is not None or verification_authority is not None:
+            raise ValueError("unverified obligations must not carry verification credentials")
+
         timestamp = _iso(_now())
         with self._connect() as conn:
             cur = conn.execute(
@@ -270,8 +366,8 @@ class MetabolismStore:
                 INSERT INTO resource_obligations(
                     created_at, updated_at, name, asset, unit, amount,
                     cadence_seconds, next_due_at, essential, verified, active,
-                    source, evidence, verification_authority
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    source, evidence, verification_authority, verification_receipt_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -281,22 +377,24 @@ class MetabolismStore:
                     unit,
                     amount,
                     cadence_seconds,
-                    _iso(due),
+                    due_text,
                     1 if essential else 0,
                     1 if verified else 0,
                     source,
                     evidence,
                     authority,
+                    receipt_json,
                 ),
             )
             obligation_id = int(cur.lastrowid)
             conn.execute(
                 """
                 INSERT INTO resource_obligation_events(
-                    obligation_id, timestamp, event, evidence, authority
-                ) VALUES (?, ?, 'created', ?, ?)
+                    obligation_id, timestamp, event, evidence, authority,
+                    verification_receipt_json
+                ) VALUES (?, ?, 'created', ?, ?, ?)
                 """,
-                (obligation_id, timestamp, evidence, authority),
+                (obligation_id, timestamp, evidence, authority, receipt_json),
             )
             return obligation_id
 
@@ -329,13 +427,27 @@ class MetabolismStore:
         obligation_id: int,
         *,
         evidence: str,
-        authority: str,
+        verification_receipt: VerificationReceipt | None = None,
+        authority: str | None = None,
     ) -> ResourceObligation:
         current = self.obligation(obligation_id)
         if current is None:
             raise ValueError(f"unknown obligation: {obligation_id}")
         evidence = self._clean(evidence, field="evidence", maximum=8000)
-        authority = self._clean(authority, field="authority", maximum=256)
+        receipt_json = ""
+        verified_authority: str | None = None
+        if current.verified:
+            if authority is not None and verification_receipt is None:
+                raise ValueError(
+                    "authority strings cannot mutate verified obligations; a signed VerificationReceipt is required"
+                )
+            verified_authority, receipt_json = self._verify_receipt(
+                verification_receipt,
+                claim=self.mutation_claim(obligation_id=current.id, event="deactivated"),
+                evidence=evidence,
+            )
+        elif verification_receipt is not None or authority is not None:
+            raise ValueError("unverified obligation mutation must not carry verification credentials")
         timestamp = _iso(_now())
         with self._connect() as conn:
             conn.execute(
@@ -345,10 +457,11 @@ class MetabolismStore:
             conn.execute(
                 """
                 INSERT INTO resource_obligation_events(
-                    obligation_id, timestamp, event, evidence, authority
-                ) VALUES (?, ?, 'deactivated', ?, ?)
+                    obligation_id, timestamp, event, evidence, authority,
+                    verification_receipt_json
+                ) VALUES (?, ?, 'deactivated', ?, ?, ?)
                 """,
-                (current.id, timestamp, evidence, authority),
+                (current.id, timestamp, evidence, verified_authority, receipt_json),
             )
         updated = self.obligation(current.id)
         if updated is None:
@@ -361,7 +474,8 @@ class MetabolismStore:
         *,
         periods: int = 1,
         evidence: str,
-        authority: str,
+        verification_receipt: VerificationReceipt | None = None,
+        authority: str | None = None,
     ) -> ResourceObligation:
         current = self.obligation(obligation_id)
         if current is None:
@@ -370,7 +484,24 @@ class MetabolismStore:
         if periods <= 0 or periods > 10_000:
             raise ValueError("periods must be in 1..10000")
         evidence = self._clean(evidence, field="evidence", maximum=8000)
-        authority = self._clean(authority, field="authority", maximum=256)
+        receipt_json = ""
+        verified_authority: str | None = None
+        if current.verified:
+            if authority is not None and verification_receipt is None:
+                raise ValueError(
+                    "authority strings cannot mutate verified obligations; a signed VerificationReceipt is required"
+                )
+            verified_authority, receipt_json = self._verify_receipt(
+                verification_receipt,
+                claim=self.mutation_claim(
+                    obligation_id=current.id,
+                    event="due_advanced",
+                    periods=periods,
+                ),
+                evidence=evidence,
+            )
+        elif verification_receipt is not None or authority is not None:
+            raise ValueError("unverified obligation mutation must not carry verification credentials")
         next_due = _parse_time(current.next_due_at) + timedelta(
             seconds=current.cadence_seconds * periods
         )
@@ -383,10 +514,11 @@ class MetabolismStore:
             conn.execute(
                 """
                 INSERT INTO resource_obligation_events(
-                    obligation_id, timestamp, event, evidence, authority
-                ) VALUES (?, ?, 'due_advanced', ?, ?)
+                    obligation_id, timestamp, event, evidence, authority,
+                    verification_receipt_json
+                ) VALUES (?, ?, 'due_advanced', ?, ?, ?)
                 """,
-                (current.id, timestamp, evidence, authority),
+                (current.id, timestamp, evidence, verified_authority, receipt_json),
             )
         updated = self.obligation(current.id)
         if updated is None:
@@ -456,8 +588,6 @@ class MetabolismEngine:
                 else None
             )
             next_due = min(_parse_time(item.next_due_at) for item in items)
-            # An obligation cadence models recurring burn. For immediate solvency we
-            # only sum obligations whose current due timestamp equals the earliest due.
             due_items = [
                 item
                 for item in items
