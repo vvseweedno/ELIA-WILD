@@ -227,6 +227,10 @@ def test_deep_cycle_runs_quorum_then_neutral_judge_then_single_self_decision(
     assert brain.decide_calls == 1
     assert brain.last_context is not None
     assert brain.last_context["epistemic"]["adjudication"]["synthesis"]
+    assert brain.last_context["epistemic_health"]["degraded"] is False
+    assert brain.last_context["epistemic_health"]["successful_count"] == runtime.epistemic_registry.policy.deep_quorum
+    assert "error" not in json.dumps(brain.last_context["epistemic_health"], sort_keys=True).lower()
+    assert report["epistemic_health"]["failed_count"] == 0
     sessions = runtime.epistemic_store.recent_sessions(1)
     assert len(sessions) == 1
     assert sessions[0]["completed_at"] is not None
