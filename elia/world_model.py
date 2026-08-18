@@ -9,13 +9,26 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .verification import (
+    VerificationReceipt,
+    VerificationRegistry,
+    consume_verified_receipt,
+    ensure_receipt_ledger,
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _fingerprint(subject: str, predicate: str, obj: Any) -> str:
@@ -46,25 +59,33 @@ class WorldBelief:
 class WorldModelStore:
     """Evidence-bearing, revisable model of the external world.
 
-    Model-originated beliefs are hypotheses with confidence caps. Only a trusted
-    runtime/adapter can assign `verified` or `refuted`, and that transition requires
-    explicit evidence plus a verification authority.
+    Model-originated beliefs are hypotheses with confidence caps. `verified` and
+    `refuted` are trusted states and therefore require a cryptographic
+    VerificationReceipt over the exact adjudication claim and evidence. A caller
+    string is display metadata, never authority. Trusted receipts are consumed once
+    atomically with the belief/event transition.
     """
 
     MODEL_STATUSES = {"hypothesis", "supported", "disputed"}
     TRUSTED_STATUSES = {"verified", "refuted"}
     ALL_STATUSES = MODEL_STATUSES | TRUSTED_STATUSES | {"superseded"}
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        verification_registry: VerificationRegistry | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.verification_registry = verification_registry
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -101,12 +122,22 @@ class WorldModelStore:
                     event TEXT NOT NULL,
                     evidence TEXT NOT NULL,
                     authority TEXT NULL,
+                    verification_receipt_json TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(belief_id) REFERENCES world_beliefs(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_world_belief_events
                     ON world_belief_events(belief_id, id ASC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(world_belief_events)").fetchall()
+            }
+            if "verification_receipt_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE world_belief_events ADD COLUMN verification_receipt_json TEXT NOT NULL DEFAULT ''"
+                )
+            ensure_receipt_ledger(conn)
 
     @staticmethod
     def _clean_text(value: Any, field: str, maximum: int) -> str:
@@ -142,12 +173,18 @@ class WorldModelStore:
                 if row["last_observation_id"] is not None
                 else None
             ),
-            supersedes_id=int(row["supersedes_id"]) if row["supersedes_id"] is not None else None,
+            supersedes_id=(
+                int(row["supersedes_id"])
+                if row["supersedes_id"] is not None
+                else None
+            ),
         )
 
     def get(self, belief_id: int) -> WorldBelief | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM world_beliefs WHERE id=?", (int(belief_id),)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM world_beliefs WHERE id=?", (int(belief_id),)
+            ).fetchone()
         return self._from_row(row) if row else None
 
     def propose(
@@ -193,14 +230,20 @@ class WorldModelStore:
                         timestamp,
                         next_confidence,
                         evidence,
-                        int(observation_id) if observation_id is not None else current.last_observation_id,
+                        (
+                            int(observation_id)
+                            if observation_id is not None
+                            else current.last_observation_id
+                        ),
                         current.id,
                     ),
                 )
                 conn.execute(
                     """
-                    INSERT INTO world_belief_events(belief_id, timestamp, event, evidence, authority)
-                    VALUES (?, ?, 'additional_evidence', ?, NULL)
+                    INSERT INTO world_belief_events(
+                        belief_id, timestamp, event, evidence, authority,
+                        verification_receipt_json
+                    ) VALUES (?, ?, 'additional_evidence', ?, NULL, '')
                     """,
                     (current.id, timestamp, evidence),
                 )
@@ -231,8 +274,10 @@ class WorldModelStore:
                 belief_id = int(cur.lastrowid)
                 conn.execute(
                     """
-                    INSERT INTO world_belief_events(belief_id, timestamp, event, evidence, authority)
-                    VALUES (?, ?, 'proposed', ?, NULL)
+                    INSERT INTO world_belief_events(
+                        belief_id, timestamp, event, evidence, authority,
+                        verification_receipt_json
+                    ) VALUES (?, ?, 'proposed', ?, NULL, '')
                     """,
                     (belief_id, timestamp, evidence),
                 )
@@ -275,14 +320,20 @@ class WorldModelStore:
                     next_status,
                     next_confidence,
                     evidence,
-                    int(observation_id) if observation_id is not None else current.last_observation_id,
+                    (
+                        int(observation_id)
+                        if observation_id is not None
+                        else current.last_observation_id
+                    ),
                     current.id,
                 ),
             )
             conn.execute(
                 """
-                INSERT INTO world_belief_events(belief_id, timestamp, event, evidence, authority)
-                VALUES (?, ?, 'model_revision', ?, NULL)
+                INSERT INTO world_belief_events(
+                    belief_id, timestamp, event, evidence, authority,
+                    verification_receipt_json
+                ) VALUES (?, ?, 'model_revision', ?, NULL, '')
                 """,
                 (current.id, timestamp, evidence),
             )
@@ -291,6 +342,26 @@ class WorldModelStore:
             raise RuntimeError("world belief disappeared after revision")
         return updated
 
+    @staticmethod
+    def adjudication_claim(
+        current: WorldBelief,
+        *,
+        status: str,
+        confidence: float,
+        observation_id: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "type": "world_belief_adjudication",
+            "belief_id": current.id,
+            "belief_fingerprint": current.fingerprint,
+            "subject": current.subject,
+            "predicate": current.predicate,
+            "object": current.object,
+            "status": status,
+            "confidence": float(confidence),
+            "observation_id": int(observation_id) if observation_id is not None else None,
+        }
+
     def adjudicate(
         self,
         belief_id: int,
@@ -298,8 +369,9 @@ class WorldModelStore:
         status: str,
         confidence: float,
         evidence: str,
-        authority: str,
         observation_id: int | None = None,
+        verification_receipt: VerificationReceipt | None = None,
+        authority: str | None = None,
     ) -> WorldBelief:
         current = self.get(belief_id)
         if current is None:
@@ -308,31 +380,72 @@ class WorldModelStore:
         if status not in self.TRUSTED_STATUSES:
             raise ValueError("trusted adjudication status must be verified or refuted")
         evidence = self._clean_text(evidence, "evidence", 8000)
-        authority = self._clean_text(authority, "authority", 256)
         confidence = self._confidence(confidence, 1.0)
+        if authority is not None and verification_receipt is None:
+            raise ValueError(
+                "authority strings cannot adjudicate trusted world facts; a signed VerificationReceipt is required"
+            )
+        if self.verification_registry is None or verification_receipt is None:
+            raise ValueError(
+                "trusted world adjudication requires a trusted verification registry and signed VerificationReceipt"
+            )
+        claim = self.adjudication_claim(
+            current,
+            status=status,
+            confidence=confidence,
+            observation_id=observation_id,
+        )
+        receipt_json = json.dumps(
+            verification_receipt.as_dict(), ensure_ascii=False, sort_keys=True
+        )
         timestamp = _now()
         with self._connect() as conn:
-            conn.execute(
+            verified_authority = consume_verified_receipt(
+                conn,
+                self.verification_registry,
+                verification_receipt,
+                claim=claim,
+                evidence=evidence,
+                purpose="world_model.adjudicate",
+                subject_ref=str(current.id),
+            )
+            cur = conn.execute(
                 """
                 UPDATE world_beliefs
                 SET updated_at=?, status=?, confidence=?, evidence=?, last_observation_id=?
-                WHERE id=?
+                WHERE id=? AND fingerprint=? AND status=?
                 """,
                 (
                     timestamp,
                     status,
                     confidence,
                     evidence,
-                    int(observation_id) if observation_id is not None else current.last_observation_id,
+                    (
+                        int(observation_id)
+                        if observation_id is not None
+                        else current.last_observation_id
+                    ),
                     current.id,
+                    current.fingerprint,
+                    current.status,
                 ),
             )
+            if cur.rowcount != 1:
+                raise RuntimeError("world belief changed concurrently before trusted adjudication")
             conn.execute(
                 """
-                INSERT INTO world_belief_events(belief_id, timestamp, event, evidence, authority)
-                VALUES (?, ?, 'trusted_adjudication', ?, ?)
+                INSERT INTO world_belief_events(
+                    belief_id, timestamp, event, evidence, authority,
+                    verification_receipt_json
+                ) VALUES (?, ?, 'trusted_adjudication', ?, ?, ?)
                 """,
-                (current.id, timestamp, evidence, authority),
+                (
+                    current.id,
+                    timestamp,
+                    evidence,
+                    verified_authority,
+                    receipt_json,
+                ),
             )
         updated = self.get(current.id)
         if updated is None:
@@ -359,15 +472,17 @@ class WorldModelStore:
                 params.extend(clean)
         if text.strip():
             needle = f"%{text.strip()}%"
-            clauses.append("(subject LIKE ? OR predicate LIKE ? OR object_json LIKE ? OR evidence LIKE ?)")
+            clauses.append(
+                "(subject LIKE ? OR predicate LIKE ? OR object_json LIKE ? OR evidence LIKE ?)"
+            )
             params.extend([needle, needle, needle, needle])
         params.append(max(1, min(int(limit), 256)))
         sql = (
             "SELECT * FROM world_beliefs WHERE "
             + " AND ".join(clauses)
             + " ORDER BY CASE status WHEN 'verified' THEN 0 WHEN 'supported' THEN 1 "
-              "WHEN 'hypothesis' THEN 2 WHEN 'disputed' THEN 3 ELSE 4 END, "
-              "confidence DESC, id DESC LIMIT ?"
+            "WHEN 'hypothesis' THEN 2 WHEN 'disputed' THEN 3 ELSE 4 END, "
+            "confidence DESC, id DESC LIMIT ?"
         )
         with self._connect() as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
@@ -389,7 +504,10 @@ class WorldModelStore:
         return beliefs if len(distinct) > 1 else []
 
     def snapshot(self, limit: int = 24) -> dict[str, Any]:
-        beliefs = self.query(statuses={"verified", "supported", "hypothesis", "disputed"}, limit=limit)
+        beliefs = self.query(
+            statuses={"verified", "supported", "hypothesis", "disputed"},
+            limit=limit,
+        )
         contradictions: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for belief in beliefs:
@@ -409,5 +527,8 @@ class WorldModelStore:
         return {
             "beliefs": [item.as_dict() for item in beliefs],
             "contradictions": contradictions[:16],
-            "epistemic_rule": "beliefs are revisable; model hypotheses are not verified facts",
+            "epistemic_rule": (
+                "beliefs are revisable; model hypotheses are not verified facts; "
+                "trusted adjudication requires a single-use cryptographic receipt"
+            ),
         }
