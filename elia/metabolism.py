@@ -10,7 +10,12 @@ from typing import Any
 
 from .economy import EconomyStore
 from .memory import MemoryStore
-from .verification import VerificationReceipt, VerificationRegistry
+from .verification import (
+    VerificationReceipt,
+    VerificationRegistry,
+    consume_verified_receipt,
+    ensure_receipt_ledger,
+)
 
 
 SECONDS_PER_DAY = 86_400.0
@@ -138,7 +143,8 @@ class MetabolismStore:
 
     Verified obligations and mutations require signed VerificationReceipts over the
     exact normalized claim and evidence. A model/caller-provided authority string is
-    not authority and cannot create or mutate verified survival pressure.
+    not authority and cannot create or mutate verified survival pressure. Receipts are
+    consumed exactly once atomically with the mutation they authorize.
     """
 
     def __init__(
@@ -218,6 +224,7 @@ class MetabolismStore:
                 conn.execute(
                     "ALTER TABLE resource_obligation_events ADD COLUMN verification_receipt_json TEXT NOT NULL DEFAULT ''"
                 )
+            ensure_receipt_ledger(conn)
 
     @staticmethod
     def _clean(value: Any, *, field: str, maximum: int = 128) -> str:
@@ -294,19 +301,37 @@ class MetabolismStore:
             claim["periods"] = int(periods)
         return claim
 
-    def _verify_receipt(
+    def _prepare_receipt(
         self,
         receipt: VerificationReceipt | None,
-        *,
-        claim: dict[str, Any],
-        evidence: str,
-    ) -> tuple[str, str]:
+    ) -> str:
         if self.verification_registry is None or receipt is None:
             raise ValueError(
                 "verified obligation state requires a trusted verification registry and signed VerificationReceipt"
             )
-        authority = self.verification_registry.verify(receipt, claim=claim, evidence=evidence)
-        return authority, json.dumps(receipt.as_dict(), ensure_ascii=False, sort_keys=True)
+        return json.dumps(receipt.as_dict(), ensure_ascii=False, sort_keys=True)
+
+    def _consume_receipt(
+        self,
+        conn: sqlite3.Connection,
+        receipt: VerificationReceipt,
+        *,
+        claim: dict[str, Any],
+        evidence: str,
+        purpose: str,
+        subject_ref: str,
+    ) -> str:
+        if self.verification_registry is None:
+            raise ValueError("trusted verification registry is unavailable")
+        return consume_verified_receipt(
+            conn,
+            self.verification_registry,
+            receipt,
+            claim=claim,
+            evidence=evidence,
+            purpose=purpose,
+            subject_ref=subject_ref,
+        )
 
     def record_obligation(
         self,
@@ -334,13 +359,14 @@ class MetabolismStore:
         due_text = _iso(due)
         evidence = str(evidence).strip()[:8000]
 
-        authority: str | None = None
+        claim: dict[str, Any] | None = None
         receipt_json = ""
         if verified:
             if verification_authority is not None and verification_receipt is None:
                 raise ValueError(
                     "verification_authority strings cannot verify obligations; a signed VerificationReceipt is required"
                 )
+            receipt_json = self._prepare_receipt(verification_receipt)
             claim = self.obligation_claim(
                 name=name,
                 asset=asset,
@@ -351,16 +377,23 @@ class MetabolismStore:
                 essential=bool(essential),
                 source=source,
             )
-            authority, receipt_json = self._verify_receipt(
-                verification_receipt,
-                claim=claim,
-                evidence=evidence,
-            )
         elif verification_receipt is not None or verification_authority is not None:
             raise ValueError("unverified obligations must not carry verification credentials")
 
         timestamp = _iso(_now())
         with self._connect() as conn:
+            authority: str | None = None
+            if verified:
+                assert verification_receipt is not None
+                assert claim is not None
+                authority = self._consume_receipt(
+                    conn,
+                    verification_receipt,
+                    claim=claim,
+                    evidence=evidence,
+                    purpose="metabolism.obligation.create",
+                    subject_ref=f"{asset}:{unit}:{name}",
+                )
             cur = conn.execute(
                 """
                 INSERT INTO resource_obligations(
@@ -434,26 +467,37 @@ class MetabolismStore:
         if current is None:
             raise ValueError(f"unknown obligation: {obligation_id}")
         evidence = self._clean(evidence, field="evidence", maximum=8000)
+        claim: dict[str, Any] | None = None
         receipt_json = ""
-        verified_authority: str | None = None
         if current.verified:
             if authority is not None and verification_receipt is None:
                 raise ValueError(
                     "authority strings cannot mutate verified obligations; a signed VerificationReceipt is required"
                 )
-            verified_authority, receipt_json = self._verify_receipt(
-                verification_receipt,
-                claim=self.mutation_claim(obligation_id=current.id, event="deactivated"),
-                evidence=evidence,
-            )
+            receipt_json = self._prepare_receipt(verification_receipt)
+            claim = self.mutation_claim(obligation_id=current.id, event="deactivated")
         elif verification_receipt is not None or authority is not None:
             raise ValueError("unverified obligation mutation must not carry verification credentials")
         timestamp = _iso(_now())
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE resource_obligations SET active=0, updated_at=? WHERE id=?",
+            verified_authority: str | None = None
+            if current.verified:
+                assert verification_receipt is not None
+                assert claim is not None
+                verified_authority = self._consume_receipt(
+                    conn,
+                    verification_receipt,
+                    claim=claim,
+                    evidence=evidence,
+                    purpose="metabolism.obligation.deactivate",
+                    subject_ref=str(current.id),
+                )
+            cur = conn.execute(
+                "UPDATE resource_obligations SET active=0, updated_at=? WHERE id=? AND active=1",
                 (timestamp, current.id),
             )
+            if cur.rowcount != 1:
+                raise RuntimeError("obligation changed concurrently before deactivation")
             conn.execute(
                 """
                 INSERT INTO resource_obligation_events(
@@ -484,21 +528,18 @@ class MetabolismStore:
         if periods <= 0 or periods > 10_000:
             raise ValueError("periods must be in 1..10000")
         evidence = self._clean(evidence, field="evidence", maximum=8000)
+        claim: dict[str, Any] | None = None
         receipt_json = ""
-        verified_authority: str | None = None
         if current.verified:
             if authority is not None and verification_receipt is None:
                 raise ValueError(
                     "authority strings cannot mutate verified obligations; a signed VerificationReceipt is required"
                 )
-            verified_authority, receipt_json = self._verify_receipt(
-                verification_receipt,
-                claim=self.mutation_claim(
-                    obligation_id=current.id,
-                    event="due_advanced",
-                    periods=periods,
-                ),
-                evidence=evidence,
+            receipt_json = self._prepare_receipt(verification_receipt)
+            claim = self.mutation_claim(
+                obligation_id=current.id,
+                event="due_advanced",
+                periods=periods,
             )
         elif verification_receipt is not None or authority is not None:
             raise ValueError("unverified obligation mutation must not carry verification credentials")
@@ -507,10 +548,28 @@ class MetabolismStore:
         )
         timestamp = _iso(_now())
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE resource_obligations SET next_due_at=?, updated_at=? WHERE id=?",
-                (_iso(next_due), timestamp, current.id),
+            verified_authority: str | None = None
+            if current.verified:
+                assert verification_receipt is not None
+                assert claim is not None
+                verified_authority = self._consume_receipt(
+                    conn,
+                    verification_receipt,
+                    claim=claim,
+                    evidence=evidence,
+                    purpose="metabolism.obligation.advance_due",
+                    subject_ref=str(current.id),
+                )
+            cur = conn.execute(
+                """
+                UPDATE resource_obligations
+                SET next_due_at=?, updated_at=?
+                WHERE id=? AND next_due_at=?
+                """,
+                (_iso(next_due), timestamp, current.id, current.next_due_at),
             )
+            if cur.rowcount != 1:
+                raise RuntimeError("obligation changed concurrently before due advance")
             conn.execute(
                 """
                 INSERT INTO resource_obligation_events(
@@ -582,11 +641,7 @@ class MetabolismEngine:
         for (asset, unit), items in sorted(grouped.items()):
             balance = self.economy.verified_balance(asset, unit)
             daily_burn = sum(item.daily_burn for item in items)
-            runway = (
-                max(0.0, balance) / daily_burn
-                if daily_burn > 0
-                else None
-            )
+            runway = max(0.0, balance) / daily_burn if daily_burn > 0 else None
             next_due = min(_parse_time(item.next_due_at) for item in items)
             due_items = [
                 item
@@ -637,7 +692,10 @@ class MetabolismEngine:
         ]
         if not candidates:
             return None
-        item = min(candidates, key=lambda value: (float(value.runway_days or 0.0), value.asset, value.unit))
+        item = min(
+            candidates,
+            key=lambda value: (float(value.runway_days or 0.0), value.asset, value.unit),
+        )
         return {
             "asset": item.asset,
             "unit": item.unit,
