@@ -186,6 +186,114 @@ def _work_port_metadata(value: Any) -> dict[str, Any]:
     }
 
 
+def _biography_stats(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: deepcopy(value.get(key))
+        for key in (
+            "organ_id",
+            "appearances",
+            "supported_count",
+            "support_rate",
+            "resolved_count",
+            "operational_success_rate",
+            "mean_confidence",
+            "epistemic_warning",
+        )
+        if key in value
+    }
+
+
+def _epistemic_metadata(value: Any) -> dict[str, Any]:
+    """Expose current epistemic conclusions, never the private biography transcript."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {
+        "enabled": bool(value.get("enabled", False)),
+        "triggered": bool(value.get("triggered", False)),
+    }
+    for key in ("reason", "epistemic_rule"):
+        if key in value:
+            result[key] = str(value.get(key, ""))[:2000]
+    if "selected_organs" in value:
+        result["selected_organs"] = [str(item)[:64] for item in list(value.get("selected_organs") or [])[:12]]
+
+    packets: list[dict[str, Any]] = []
+    for raw in list(value.get("packets") or [])[:12]:
+        if not isinstance(raw, dict):
+            continue
+        packets.append(
+            {
+                key: deepcopy(raw.get(key))
+                for key in (
+                    "id",
+                    "organ_id",
+                    "claim",
+                    "evidence",
+                    "counterexample",
+                    "falsifier",
+                    "uncertainty",
+                    "confidence",
+                )
+                if key in raw
+            }
+        )
+    if packets:
+        result["packets"] = packets
+
+    adjudication = value.get("adjudication")
+    if isinstance(adjudication, dict):
+        result["adjudication"] = {
+            key: deepcopy(adjudication.get(key))
+            for key in (
+                "synthesis",
+                "selected_packet_ids",
+                "confidence",
+                "disagreements",
+                "falsification_tests",
+                "recommended_focus",
+            )
+            if key in adjudication
+        }
+
+    organs = []
+    for raw in list(value.get("organs") or [])[:12]:
+        if not isinstance(raw, dict):
+            continue
+        organs.append(
+            {
+                key: deepcopy(raw.get(key))
+                for key in ("id", "name", "archetype", "role_classes")
+                if key in raw
+            }
+        )
+    if organs:
+        result["organs"] = organs
+
+    biographies: dict[str, Any] = {}
+    for organ_id, raw in dict(value.get("biographies") or {}).items():
+        biographies[str(organ_id)[:64]] = _biography_stats(raw)
+    if biographies:
+        result["biographies"] = biographies
+
+    policy = value.get("policy")
+    if isinstance(policy, dict):
+        result["policy"] = {
+            key: deepcopy(policy.get(key))
+            for key in (
+                "trigger_tiers",
+                "trigger_on_world_contradiction",
+                "normal_quorum",
+                "deep_quorum",
+                "full_council",
+            )
+            if key in policy
+        }
+    # Intentionally omit recent_sessions and session IDs from remote provider context.
+    return result
+
+
 def provider_context(context: dict[str, Any]) -> dict[str, Any]:
     """Return the only runtime-context view allowed to leave local trust boundary."""
 
@@ -202,6 +310,9 @@ def provider_context(context: dict[str, Any]) -> dict[str, Any]:
             continue
         if name == "work_ports":
             public[name] = _work_port_metadata(value)
+            continue
+        if name in {"epistemic", "epistemic_ecosystem"}:
+            public[name] = _epistemic_metadata(value)
             continue
         public[name] = deepcopy(value)
     return public
