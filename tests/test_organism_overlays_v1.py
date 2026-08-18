@@ -7,23 +7,46 @@ import pytest
 from elia.organism import OrganismManifest, default_manifest_path
 
 
-def test_default_manifest_loads_genesis_1_4_overlay() -> None:
+def test_default_manifest_loads_latest_genesis_overlays() -> None:
     manifest = OrganismManifest.load()
-    assert manifest.schema_version >= 6
+    assert manifest.schema_version >= 8
     ids = {organ.id for organ in manifest.organs}
     assert {
         "resource_ecology_store",
         "resource_ecology_engine",
         "resource_runtime",
+        "work_port_store",
+        "work_port_registry",
+        "external_work_runtime",
+        "epistemic_registry",
+        "cognitive_biographies",
+        "evidence_view_projector",
+        "epistemic_view_store",
+        "resilient_epistemic_cortex",
+        "epistemic_runtime",
     }.issubset(ids)
     overlay_names = {item["name"] for item in manifest.raw.get("anatomy_overlays", [])}
     assert "1.4-resource-ecology.yaml" in overlay_names
+    assert "1.5-external-work-ports.yaml" in overlay_names
+    assert "1.6-epistemic-ecosystem.yaml" in overlay_names
     report = manifest.audit(expected_identity_id="elia-wild")
     assert report.healthy is True
     required = {item.organ.id: item for item in report.statuses if item.organ.required}
-    assert required["resource_ecology_store"].available is True
-    assert required["resource_ecology_engine"].available is True
-    assert required["resource_runtime"].available is True
+    for organ_id in (
+        "resource_ecology_store",
+        "resource_ecology_engine",
+        "resource_runtime",
+        "work_port_store",
+        "work_port_registry",
+        "external_work_runtime",
+        "epistemic_registry",
+        "cognitive_biographies",
+        "evidence_view_projector",
+        "epistemic_view_store",
+        "resilient_epistemic_cortex",
+        "epistemic_runtime",
+    ):
+        assert required[organ_id].available is True
 
 
 def test_custom_manifest_does_not_implicitly_absorb_project_overlays(tmp_path: Path) -> None:
