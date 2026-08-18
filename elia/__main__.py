@@ -287,7 +287,7 @@ def main() -> None:
                         "incomplete_count": len(incomplete),
                         "incomplete": incomplete[:8],
                     },
-                    "memory_records": len(memory.recent(1000000)),
+                    "memory_records": memory.count(),
                     "active_goals": [asdict(goal) for goal in active_goals],
                     "needs": needs[:16],
                     "scheduler": {
