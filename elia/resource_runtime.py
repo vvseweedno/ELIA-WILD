@@ -6,6 +6,7 @@ from typing import Any
 from .brain import Decision
 from .executive_runtime import ExecutiveOrganismRuntime
 from .resource_ecology import ResourceEcologyEngine, ResourceEcologyStore
+from .resource_status import resource_ecology_needs
 from .tools import ToolResult
 
 
@@ -35,21 +36,6 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
             limit=self.RESOURCE_ECOLOGY_CONTEXT_LIMIT,
         )
 
-    @staticmethod
-    def _resource_need_severity(runway_days: float | None) -> float:
-        if runway_days is None:
-            return 0.45
-        value = max(0.0, float(runway_days))
-        if value <= 3:
-            return 0.94
-        if value <= 7:
-            return 0.84
-        if value <= 14:
-            return 0.72
-        if value <= 30:
-            return 0.58
-        return 0.42
-
     def _state_components(self) -> dict[str, Any]:
         components = super()._state_components()
         ecology = self.resource_ecology.snapshot(
@@ -59,71 +45,11 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
         components["resource_ecology"] = ecology
         needs = list(components.get("needs") or [])
         names = {str(item.get("name", "")) for item in needs if isinstance(item, dict)}
-        bottleneck = ecology.get("bottleneck")
-        if isinstance(bottleneck, dict):
-            runway = bottleneck.get("runway_days")
-            severity = self._resource_need_severity(
-                float(runway) if runway is not None else None
-            )
-            exact_count = int(ecology.get("exact_bottleneck_candidate_count", 0) or 0)
-            if exact_count > 0:
-                name = "resource_execution"
-                reason = (
-                    f"Verified bottleneck {bottleneck.get('asset')}/{bottleneck.get('unit')} "
-                    f"has {runway!r} runway days and {exact_count} exact typed candidate(s)."
-                )
-                hint = (
-                    "Prefer evidence-backed qualification or progress on the best exact resource candidate; "
-                    "do not treat expected reward as received resource."
-                )
-            else:
-                name = "resource_discovery"
-                reason = (
-                    f"Verified bottleneck {bottleneck.get('asset')}/{bottleneck.get('unit')} "
-                    f"has {runway!r} runway days but no exact typed opportunity candidate."
-                )
-                hint = (
-                    "Search for legitimate opportunities that explicitly target this exact resource key; "
-                    "do not substitute unrelated currencies, credits or abstract value."
-                )
-            if name not in names:
-                needs.append(
-                    {
-                        "name": name,
-                        "severity": severity,
-                        "reason": reason,
-                        "response_hint": hint,
-                        "source": "resource_ecology",
-                        "evidence": {
-                            "asset": bottleneck.get("asset"),
-                            "unit": bottleneck.get("unit"),
-                            "runway_days": runway,
-                            "exact_candidate_count": exact_count,
-                        },
-                    }
-                )
+        for item in resource_ecology_needs(ecology):
+            name = str(item.get("name", ""))
+            if name and name not in names:
+                needs.append(item)
                 names.add(name)
-
-        active_work = ecology.get("active_work") or []
-        if active_work and "work_execution" not in names:
-            staged = sum(1 for item in active_work if item.get("status") == "staged")
-            submitted = sum(1 for item in active_work if item.get("status") == "submitted")
-            severity = 0.74 if staged or submitted else 0.62
-            needs.append(
-                {
-                    "name": "work_execution",
-                    "severity": severity,
-                    "reason": (
-                        f"{len(active_work)} active resource work item(s) exist; "
-                        f"{staged} staged and {submitted} submitted."
-                    ),
-                    "response_hint": (
-                        "Advance one evidence-backed work item using only currently authorized capabilities. "
-                        "A local artifact is not submission, and submission is not payment."
-                    ),
-                    "source": "resource_ecology",
-                }
-            )
         needs.sort(
             key=lambda item: (-float(item.get("severity", 0.0)), str(item.get("name", "")))
         )
