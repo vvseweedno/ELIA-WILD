@@ -61,7 +61,7 @@ def test_capability_catalog_is_structured(tmp_path: Path) -> None:
     registry = ToolRegistry(tmp_path / "workspace")
     catalog = registry.catalog()
     assert catalog["http_get"]["authority"] == "public_network_read"
-    assert catalog["http_get"]["network_scope"] == "public_http_https"
+    assert catalog["http_get"]["network_scope"] == "dns_pinned_public_http_https"
     assert catalog["self_check"]["authority"] == "local_self_diagnostic"
     assert catalog["propose_repair"]["side_effects"].startswith("writes a proposal")
 
