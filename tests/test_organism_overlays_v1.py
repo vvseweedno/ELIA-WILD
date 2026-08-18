@@ -7,6 +7,18 @@ import pytest
 from elia.organism import OrganismManifest, default_manifest_path
 
 
+EPISTEMIC_REQUIRED = (
+    "epistemic_registry",
+    "cognitive_biographies",
+    "selective_credit_store",
+    "evidence_view_projector",
+    "epistemic_view_store",
+    "resilient_epistemic_cortex",
+    "epistemic_security_boundary",
+    "epistemic_runtime",
+)
+
+
 def test_default_manifest_loads_latest_genesis_overlays() -> None:
     manifest = OrganismManifest.load()
     assert manifest.schema_version >= 8
@@ -18,12 +30,7 @@ def test_default_manifest_loads_latest_genesis_overlays() -> None:
         "work_port_store",
         "work_port_registry",
         "external_work_runtime",
-        "epistemic_registry",
-        "cognitive_biographies",
-        "evidence_view_projector",
-        "epistemic_view_store",
-        "resilient_epistemic_cortex",
-        "epistemic_runtime",
+        *EPISTEMIC_REQUIRED,
     }.issubset(ids)
     overlay_names = {item["name"] for item in manifest.raw.get("anatomy_overlays", [])}
     assert "1.4-resource-ecology.yaml" in overlay_names
@@ -39,12 +46,7 @@ def test_default_manifest_loads_latest_genesis_overlays() -> None:
         "work_port_store",
         "work_port_registry",
         "external_work_runtime",
-        "epistemic_registry",
-        "cognitive_biographies",
-        "evidence_view_projector",
-        "epistemic_view_store",
-        "resilient_epistemic_cortex",
-        "epistemic_runtime",
+        *EPISTEMIC_REQUIRED,
     ):
         assert required[organ_id].available is True
 
