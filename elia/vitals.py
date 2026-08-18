@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .chronicle import Chronicle
 from .config import Config, load_config
 from .crc import build_crc, compare_crc, read_crc, write_crc
 from .identity import IdentityBundle
@@ -37,6 +38,10 @@ class VitalSigns:
     The last *healthy* CRC is never replaced by a broken comparison. A failed check
     preserves both the trusted prior capsule and separate failure evidence. Materially
     new states are also written into a checkpointed longitudinal series.
+
+    Genesis 1.7 treats Chronicle sequence monotonicity as insufficient: every
+    comparison to the accepted CRC proves that the prior `(seq, hash)` is an exact
+    validated prefix anchor of the current Chronicle.
     """
 
     def __init__(self, config: Config, *, manifest_path: Path | None = None):
@@ -52,11 +57,13 @@ class VitalSigns:
         self.longitudinal = LongitudinalContinuityStore(
             config.runtime.state_dir / "memory.sqlite3"
         )
+        self.chronicle = Chronicle(config.runtime.state_dir / "chronicle.jsonl")
 
     def _persist_report(self, report: VitalSignsReport) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.latest_report_path.write_text(
-            json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
             encoding="utf-8",
         )
 
@@ -71,7 +78,12 @@ class VitalSigns:
         continuity_healthy = capsule.chronicle_valid
         if self.last_healthy_crc_path.is_file():
             previous = read_crc(self.last_healthy_crc_path)
-            comparison = compare_crc(previous, capsule_dict)
+            comparison = compare_crc(
+                previous,
+                capsule_dict,
+                chronicle=self.chronicle,
+                require_ancestry=True,
+            )
             comparison_dict = comparison.as_dict()
             continuity_healthy = continuity_healthy and comparison.status != "broken"
 
