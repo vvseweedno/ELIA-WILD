@@ -120,11 +120,15 @@ def build_crc(config: Config) -> ContinuityRecordCapsule:
     capability_catalog = tools.catalog()
     capability_health = memory.capability_health_all(list(capability_catalog), window=20)
     skill_state = skills.availability(capability_catalog, capability_health)
-    available_skills = tuple(sorted(name for name, item in skill_state.items() if item["available"]))
+    available_skills = tuple(
+        sorted(name for name, item in skill_state.items() if item["available"])
+    )
     lineage = identity_store.lineage(1000)
     head = lineage[-1] if lineage else None
     resource_summary = economy.resource_summary()
-    resource_fp = _hash_text(json.dumps(resource_summary, ensure_ascii=False, sort_keys=True))
+    resource_fp = _hash_text(
+        json.dumps(resource_summary, ensure_ascii=False, sort_keys=True)
+    )
 
     return ContinuityRecordCapsule(
         schema_version=1,
@@ -160,7 +164,10 @@ def write_crc(path: Path, capsule: ContinuityRecordCapsule) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = capsule.as_dict()
     payload["capsule_fingerprint"] = capsule.fingerprint
-    path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def read_crc(path: Path) -> dict[str, Any]:
@@ -170,7 +177,19 @@ def read_crc(path: Path) -> dict[str, Any]:
     return item
 
 
-def compare_crc(left: dict[str, Any], right: dict[str, Any]) -> ContinuityComparison:
+def compare_crc(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    chronicle: Chronicle | None = None,
+    require_ancestry: bool = False,
+) -> ContinuityComparison:
+    """Compare continuity capsules, optionally proving exact Chronicle ancestry.
+
+    Sequence monotonicity alone is only a weak compatibility check. Production vital
+    signs pass the live Chronicle and require ancestry, which proves that the previous
+    accepted `(seq, hash)` remains an exact prefix anchor of the current chain.
+    """
     critical: list[str] = []
     warnings: list[str] = []
     preserved: list[str] = []
@@ -191,13 +210,33 @@ def compare_crc(left: dict[str, Any], right: dict[str, Any]) -> ContinuityCompar
             critical.append(f"{field} changed")
             changed.append(field)
 
+    left_seq = int(left.get("chronicle_seq", 0) or 0)
+    right_seq = int(right.get("chronicle_seq", 0) or 0)
+    left_hash = str(left.get("chronicle_hash", "")).strip().lower()
     if not bool(right.get("chronicle_valid")):
         critical.append("right Chronicle is invalid")
-    elif int(right.get("chronicle_seq", 0)) >= int(left.get("chronicle_seq", 0)):
-        preserved.append("chronicle_monotonicity")
-        score += 0.10
-    else:
+    elif right_seq < left_seq:
         critical.append("Chronicle sequence moved backward")
+    elif chronicle is not None:
+        anchor_ok, anchor_error = chronicle.contains_anchor(left_seq, left_hash)
+        if anchor_ok:
+            preserved.append("chronicle_prefix_ancestry")
+            score += 0.10
+        else:
+            critical.append(
+                "Chronicle prefix ancestry failed: "
+                + (anchor_error or "previous accepted head is not an ancestor")
+            )
+    elif require_ancestry:
+        critical.append("Chronicle ancestry proof was required but no Chronicle was supplied")
+    else:
+        # Backward-compatible weak comparison for offline/synthetic callers. VitalSigns
+        # never uses this branch.
+        preserved.append("chronicle_monotonicity_unproven")
+        warnings.append(
+            "Chronicle sequence is monotonic but exact prefix ancestry was not proven"
+        )
+        score += 0.10
 
     left_goals = set(left.get("goal_fingerprints") or [])
     right_goals = set(right.get("goal_fingerprints") or [])
@@ -207,7 +246,9 @@ def compare_crc(left: dict[str, Any], right: dict[str, Any]) -> ContinuityCompar
         overlap = 1.0
     score += 0.05 * overlap
     if overlap < 0.5:
-        warnings.append(f"less than half of prior active goal fingerprints remain ({overlap:.2f})")
+        warnings.append(
+            f"less than half of prior active goal fingerprints remain ({overlap:.2f})"
+        )
     else:
         preserved.append("goal_continuity")
 
