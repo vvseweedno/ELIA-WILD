@@ -37,6 +37,13 @@ private state Dataset receives a new version
 
 The heartbeat does not remain alive while Kaggle runs. `transport-state.json` carries the pending launch nonce between heartbeats, so later runs can determine whether they are waiting for a kernel, accepting completed output, recording a failure, or launching the next wake.
 
+## Repository locations
+
+- Kaggle deployment template, notebook and notes: `deploy/kaggle/`
+- GitHub heartbeat implementation: `scripts/kaggle/wake.py`
+- first-state bootstrap helper: `scripts/kaggle/bootstrap_state.py`
+- scheduled relay workflow: `.github/workflows/wake.yml`
+
 ## External resources
 
 Create these once in the user's own accounts:
@@ -89,7 +96,7 @@ Set the checkpoint secret locally or in a protected CI environment:
 
 ```bash
 export ELIA_CHECKPOINT_KEY='<long-random-secret>'
-python scripts/bootstrap_kaggle_state.py \
+python scripts/kaggle/bootstrap_state.py \
   --dataset OWNER/elia-wild-state \
   --output .bootstrap/elia-wild-state
 ```
@@ -99,7 +106,7 @@ Inspect the output before upload. The bootstrap creates checkpoint counter 1, a 
 If the official Kaggle CLI is authenticated with `KAGGLE_API_TOKEN`, the same script can create the initial private Dataset:
 
 ```bash
-python scripts/bootstrap_kaggle_state.py \
+python scripts/kaggle/bootstrap_state.py \
   --dataset OWNER/elia-wild-state \
   --output .bootstrap/elia-wild-state \
   --create-dataset
