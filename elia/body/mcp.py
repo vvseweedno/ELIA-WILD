@@ -124,19 +124,22 @@ class MCPBody:
         url = str(server.get("url", "")).strip()
         if not url:
             raise ValueError("configured MCP server has no URL")
-        assert_http_url(url, allow_private=bool(server.get("allow_private", False)))
+        allow_private = bool(server.get("allow_private", False))
+        assert_http_url(url, allow_private=allow_private)
         headers = self._headers(server)
-        if not headers:
-            async with Client(url, read_timeout_seconds=timeout) as client:
-                yield client
-            return
+        if headers and not allow_private and not bool(server.get("network_isolation_confirmed", False)):
+            raise RuntimeError(
+                "credentialed public MCP transport requires deployment network isolation confirmation"
+            )
 
         import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
+        # Redirects are never followed automatically because a redirect can change the
+        # authority receiving credentials and bypass the configured endpoint boundary.
         async with httpx2.AsyncClient(
             headers=headers,
-            follow_redirects=True,
+            follow_redirects=False,
             timeout=httpx2.Timeout(timeout, read=max(timeout, 60.0)),
         ) as http_client:
             transport = streamable_http_client(url, http_client=http_client)
