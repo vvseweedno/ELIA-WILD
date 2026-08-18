@@ -15,6 +15,7 @@ from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
+from .metabolism import MetabolismEngine
 from .tools import ToolRegistry
 from .vitals import VitalSigns
 
@@ -52,13 +53,22 @@ def _safe_sensorium(tools: ToolRegistry, limit: int = 8) -> list[dict[str, Any]]
     return result
 
 
+def _metabolism(config: Config) -> dict[str, Any]:
+    return MetabolismEngine(
+        config.runtime.state_dir / "memory.sqlite3",
+        weekly_gpu_budget_hours=config.runtime.weekly_gpu_budget_hours,
+    ).snapshot().as_dict()
+
+
 def _homeostasis(config: Config, tools: ToolRegistry) -> dict[str, Any]:
+    metabolism = _metabolism(config)
     return HomeostasisEngine(
         config.runtime.state_dir,
         tools.observations,
         tools.world_model,
         tools.state_bus,
         tools.body.diagnostics(),
+        metabolism_snapshot=metabolism,
     ).evaluate().as_dict()
 
 
@@ -103,7 +113,15 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
     brain_seconds = memory.brain_seconds_this_week()
     world = tools.world_model.snapshot(64)
     incomplete = tools.state_bus.incomplete(64)
-    homeostasis = _homeostasis(config, tools)
+    metabolism = _metabolism(config)
+    homeostasis = HomeostasisEngine(
+        state_dir,
+        tools.observations,
+        tools.world_model,
+        tools.state_bus,
+        tools.body.diagnostics(),
+        metabolism_snapshot=metabolism,
+    ).evaluate().as_dict()
     return {
         "identity": _identity_snapshot(config),
         "lifecycle": {
@@ -128,9 +146,11 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
                 (limit_seconds - runtime_seconds) / 3600.0,
             ),
         },
+        "metabolism": metabolism,
         "homeostasis": {
             "mode": homeostasis.get("mode"),
             "signals": list(homeostasis.get("signals") or [])[:12],
+            "metabolism": homeostasis.get("metabolism") or {},
         },
         "world": {
             "active_belief_count": len(world.get("beliefs") or []),
@@ -148,11 +168,11 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
 
 
 def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
-    """Build the real MCP v2 server without starting a transport.
+    """Build the Genesis 1.2 read-oriented MCP organism port without starting transport.
 
-    The exported port is read-oriented by design. It exposes sanitized organism state
-    and world-query functions, never arbitrary shell execution, credentials, raw
-    sensor payloads, mutation/deployment authority, or new external permissions.
+    The exported port exposes sanitized organism state and world-query functions,
+    never arbitrary shell execution, credentials, raw sensor payloads, mutation/
+    deployment authority, or new external permissions.
     """
 
     _require_mcp()
@@ -164,7 +184,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_status() -> dict[str, Any]:
-        """Return sanitized continuity, physiology, resource and body status."""
+        """Return sanitized continuity, physiology, metabolism, resource and body status."""
         return _status_snapshot(config)
 
     @server.tool()
@@ -231,7 +251,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_homeostasis() -> dict[str, Any]:
-        """Return deterministic maintenance physiology derived from local state."""
+        """Return deterministic Genesis 1.2 physiology including verified metabolism."""
         tools = ToolRegistry(
             config.runtime.state_dir / "workspace",
             config.raw_tools,
@@ -281,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=("stdio", "streamable-http"),
         default="stdio",
-        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.1",
+        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.2",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -297,7 +317,7 @@ def main() -> None:
 
     if not _is_loopback_host(args.host):
         raise SystemExit(
-            "Genesis 1.1 MCP HTTP transport is intentionally loopback-only because "
+            "Genesis 1.2 MCP HTTP transport is intentionally loopback-only because "
             "this server does not implement a remote authentication policy. Put an "
             "authenticated reverse proxy/tunnel in front of it instead of exposing it directly."
         )
