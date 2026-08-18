@@ -1,0 +1,44 @@
+schema_version: 8
+identity_id: elia-wild
+
+layers:
+  resource_ingress: independent replay-safe verification of externally observed positive resources
+
+organs:
+  - id: resource_ingress_store
+    layer: resource_ingress
+    kind: python
+    module: elia.resource_ingress
+    symbol: ResourceIngressStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Persists replay-resistant external resource event identities and their linkage
+      to Observations, verified Economy events and optional realized work items.
+
+  - id: resource_ingress_registry
+    layer: resource_ingress
+    kind: python
+    module: elia.resource_ingress
+    symbol: ResourceIngressRegistry
+    required: true
+    maturity: prototype
+    authority: configured_resource_verifier
+    role: >-
+      Binds a verifier name to a fixed MCP evidence source, fixed resource type and
+      independent local signing authority. Model text cannot supply amount, unit,
+      external event id, evidence, signature or verifier key.
+
+  - id: resource_ingress_runtime
+    layer: agency
+    kind: python
+    module: elia.resource_ingress_runtime
+    symbol: ResourceIngressOrganismRuntime
+    required: true
+    maturity: prototype
+    authority: composed
+    role: >-
+      Production Genesis 1.6 runtime integrating independent resource verification
+      into capability health, cognition, verified metabolism and Resource Ecology
+      while preserving Genesis 1.5 as direct rollback ancestry.
