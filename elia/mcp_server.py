@@ -20,6 +20,7 @@ from .metabolism import MetabolismEngine
 from .resource_status import public_resource_ecology, resource_ecology_status
 from .tools import ToolRegistry
 from .vitals import VitalSigns
+from .work_port_status import work_port_status
 
 
 MAX_WORLD_QUERY = 32
@@ -147,13 +148,11 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
             "weekly_gpu_limit_hours": config.runtime.weekly_gpu_budget_hours,
             "runtime_hours_used": runtime_seconds / 3600.0,
             "brain_hours_used": brain_seconds / 3600.0,
-            "runtime_hours_remaining": max(
-                0.0,
-                (limit_seconds - runtime_seconds) / 3600.0,
-            ),
+            "runtime_hours_remaining": max(0.0, (limit_seconds - runtime_seconds) / 3600.0),
         },
         "metabolism": metabolism,
         "resource_ecology": ecology,
+        "work_ports": work_port_status(config),
         "homeostasis": {
             "mode": homeostasis.get("mode"),
             "signals": list(homeostasis.get("signals") or [])[:12],
@@ -168,19 +167,16 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
         "digital_body": tools.body.diagnostics(),
         "state_bus": {
             "incomplete_count": len(incomplete),
-            "incomplete_transaction_ids": [
-                str(item["transaction_id"]) for item in incomplete[:16]
-            ],
+            "incomplete_transaction_ids": [str(item["transaction_id"]) for item in incomplete[:16]],
         },
     }
 
 
 def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
-    """Build the Genesis 1.4 read-oriented MCP organism port without starting transport.
+    """Build the Genesis 1.5 read-oriented MCP organism port without starting transport.
 
-    The exported port exposes sanitized organism state and world/resource query
-    functions, never arbitrary shell execution, credentials, raw sensor payloads,
-    private opportunity evidence, mutation/deployment authority, or new permissions.
+    This MCP port is introspective only: it exposes sanitized external-work readiness
+    and lifecycle metadata but does not itself publish submit/payment mutation tools.
     """
 
     _require_mcp()
@@ -192,7 +188,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_status() -> dict[str, Any]:
-        """Return sanitized continuity, physiology, Executive, resource and body status."""
+        """Return sanitized continuity, physiology, Executive, resource and work-port status."""
         return _status_snapshot(config)
 
     @server.tool()
@@ -230,16 +226,14 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
         )
 
     @server.tool()
-    def elia_world_query(
-        text: str = "",
-        domain: str = "",
-        limit: int = 16,
-    ) -> dict[str, Any]:
+    def elia_work_ports() -> dict[str, Any]:
+        """Return sanitized configured external-work port readiness and active statuses."""
+        return work_port_status(config)
+
+    @server.tool()
+    def elia_world_query(text: str = "", domain: str = "", limit: int = 16) -> dict[str, Any]:
         """Query evidence-bearing world beliefs without changing their status."""
-        tools = ToolRegistry(
-            config.runtime.state_dir / "workspace",
-            config.raw_tools,
-        )
+        tools = ToolRegistry(config.runtime.state_dir / "workspace", config.raw_tools)
         beliefs = tools.world_model.query(
             text=str(text),
             domain=str(domain).strip() or None,
@@ -255,43 +249,31 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
     @server.tool()
     def elia_sensorium_recent(limit: int = 8) -> dict[str, Any]:
         """Return recent observation metadata/digests without raw sensor payloads."""
-        tools = ToolRegistry(
-            config.runtime.state_dir / "workspace",
-            config.raw_tools,
-        )
+        tools = ToolRegistry(config.runtime.state_dir / "workspace", config.raw_tools)
         return {"observations": _safe_sensorium(tools, limit)}
 
     @server.tool()
     def elia_body_diagnostics() -> dict[str, Any]:
         """Return configured digital-body capability readiness without credentials."""
-        tools = ToolRegistry(
-            config.runtime.state_dir / "workspace",
-            config.raw_tools,
-        )
+        tools = ToolRegistry(config.runtime.state_dir / "workspace", config.raw_tools)
         return tools.body.diagnostics()
 
     @server.tool()
     def elia_homeostasis() -> dict[str, Any]:
-        """Return deterministic Genesis 1.4 physiology including verified metabolism."""
-        tools = ToolRegistry(
-            config.runtime.state_dir / "workspace",
-            config.raw_tools,
-        )
+        """Return deterministic Genesis 1.5 physiology including verified metabolism."""
+        tools = ToolRegistry(config.runtime.state_dir / "workspace", config.raw_tools)
         return _homeostasis(config, tools)
 
     @server.resource("elia://identity")
     def identity_resource() -> str:
-        """ELIA identity/lineage fingerprints and current body version."""
         return json.dumps(_identity_snapshot(config), ensure_ascii=False, sort_keys=True)
 
     @server.resource("elia://status")
     def status_resource() -> str:
-        """Sanitized organism status snapshot including Executive/resource state."""
         return json.dumps(_status_snapshot(config), ensure_ascii=False, sort_keys=True)
 
     @server.resource("elia://resource-ecology")
     def resource_ecology_resource() -> str:
-        """Sanitized typed resource-opportunity and work-lifecycle projection."""
         metabolism = _metabolism(config)
         return json.dumps(
             public_resource_ecology(
@@ -301,13 +283,13 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
             sort_keys=True,
         )
 
+    @server.resource("elia://work-ports")
+    def work_ports_resource() -> str:
+        return json.dumps(work_port_status(config), ensure_ascii=False, sort_keys=True)
+
     @server.resource("elia://sensorium/recent")
     def sensorium_resource() -> str:
-        """Recent observation metadata and content digests, never raw payloads."""
-        tools = ToolRegistry(
-            config.runtime.state_dir / "workspace",
-            config.raw_tools,
-        )
+        tools = ToolRegistry(config.runtime.state_dir / "workspace", config.raw_tools)
         return json.dumps(
             {"observations": _safe_sensorium(tools, 8)},
             ensure_ascii=False,
@@ -334,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=("stdio", "streamable-http"),
         default="stdio",
-        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.4",
+        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.5",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -350,7 +332,7 @@ def main() -> None:
 
     if not _is_loopback_host(args.host):
         raise SystemExit(
-            "Genesis 1.4 MCP HTTP transport is intentionally loopback-only because "
+            "Genesis 1.5 MCP HTTP transport is intentionally loopback-only because "
             "this server does not implement a remote authentication policy. Put an "
             "authenticated reverse proxy/tunnel in front of it instead of exposing it directly."
         )
