@@ -38,6 +38,7 @@ elia-vitals = "elia.vitals:main"
 elia-doctor = "elia.doctor:main"
 elia-bootstrap = "elia.bootstrap:main"
 elia-fork = "elia.branching:main"
+elia-mcp = "elia.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["elia*"]
