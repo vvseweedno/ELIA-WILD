@@ -11,8 +11,9 @@ from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
 from .economy import EconomyStore
+from .epistemic_runtime import EpistemicOrganismRuntime
+from .epistemic_status import epistemic_status
 from .executive_status import executive_status_from_state
-from .external_work_runtime import ExternalWorkOrganismRuntime
 from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
@@ -203,6 +204,7 @@ def main() -> None:
         ecology_local = resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
         ecology_public = public_resource_ecology(ecology_local)
         work_ports_public = public_work_port_state(work_ports.diagnostics())
+        epistemic_public = epistemic_status(config)
         executive = executive_status_from_state(config, memory=memory, tools=tools)
         executive_inputs = executive.get("inputs") or {}
         resources = executive_inputs.get("resources") or {}
@@ -252,6 +254,7 @@ def main() -> None:
                     "metabolism": metabolism,
                     "resource_ecology": ecology_public,
                     "work_ports": work_ports_public,
+                    "epistemic_ecosystem": epistemic_public,
                     "homeostasis": homeostasis,
                     "executive": executive,
                     "world_model": tools.world_model.snapshot(24),
@@ -327,7 +330,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = ExternalWorkOrganismRuntime(config)
+    runtime = EpistemicOrganismRuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
@@ -340,6 +343,7 @@ def main() -> None:
         "executive_enabled": runtime.executive_enabled,
         "resource_ecology": public_resource_ecology(runtime._resource_ecology_snapshot()),
         "work_ports": public_work_port_state(runtime.work_ports.diagnostics()),
+        "epistemic_ecosystem": epistemic_status(config),
     }
     if auto_checkpoint is not None:
         output["auto_checkpoint"] = auto_checkpoint
