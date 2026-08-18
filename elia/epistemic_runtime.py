@@ -4,8 +4,9 @@ import json
 import time
 from typing import Any
 
-from .epistemic import CognitiveBiographyStore, EpistemicRegistry
-from .epistemic_views import EpistemicViewStore, ResilientEpistemicCortex
+from .epistemic import EpistemicRegistry
+from .epistemic_hardening import HardenedEpistemicCortex, SelectiveCreditBiographyStore
+from .epistemic_views import EpistemicViewStore
 from .executive import ExecutivePlan
 from .external_work_runtime import ExternalWorkOrganismRuntime
 
@@ -19,6 +20,10 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
     identity-neutral adjudicator preserves disagreement; the single ELIA Self then
     makes the ordinary one-action decision through the existing assurance boundary.
 
+    Epistemic subcalls have their own explicit untrusted-data boundary. Operational
+    outcome credit is attached only to adjudicator-supported packets and remains weak
+    credit rather than a truth label.
+
     Epistemic deliberation is a cognitive enhancement, not a single point of failure:
     individual organs and the adjudicator may degrade without granting authority or
     crashing the organism merely because one perspective failed to answer.
@@ -30,9 +35,9 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
             raise TypeError("EpistemicOrganismRuntime requires Config as the first argument")
         database = config.runtime.state_dir / "memory.sqlite3"
         self.epistemic_registry = EpistemicRegistry.load(config.epistemic_path)
-        self.epistemic_store = CognitiveBiographyStore(database)
+        self.epistemic_store = SelectiveCreditBiographyStore(database)
         self.epistemic_view_store = EpistemicViewStore(database)
-        self.epistemic_cortex = ResilientEpistemicCortex(
+        self.epistemic_cortex = HardenedEpistemicCortex(
             self.epistemic_registry,
             self.epistemic_store,
             self.epistemic_view_store,
@@ -110,10 +115,7 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
     def cycle(self) -> dict[str, Any]:
         self._current_epistemic_session_id = None
         self._current_epistemic_result = None
-        try:
-            report = super().cycle()
-        except BaseException:
-            raise
+        report = super().cycle()
 
         session_id = self._current_epistemic_session_id
         if session_id:
