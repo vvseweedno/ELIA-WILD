@@ -43,6 +43,18 @@ DATASET_READY_TIMEOUT_SECONDS = 180
 DATASET_POLL_SECONDS = 5
 
 
+def _kaggle_child_env() -> dict[str, str]:
+    """Least-privilege environment for the external Kaggle CLI.
+
+    The relay itself needs ELIA_CHECKPOINT_KEY to authenticate local checkpoints, but
+    the Kaggle CLI only needs its own API credential. Never delegate the identity-state
+    HMAC key to an unrelated child process.
+    """
+    env = os.environ.copy()
+    env.pop("ELIA_CHECKPOINT_KEY", None)
+    return env
+
+
 def command(
     args: list[str], *, cwd: Path | None = None, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -53,6 +65,7 @@ def command(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        env=_kaggle_child_env(),
     )
     if check and result.returncode != 0:
         tail = (result.stdout or "")[-6000:]
