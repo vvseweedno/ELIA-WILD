@@ -8,21 +8,44 @@ import pytest
 from elia.economy import EconomyStore
 from elia.memory import MemoryStore
 from elia.metabolism import MetabolismEngine, MetabolismStore, SECONDS_PER_DAY
+from elia.verification import VerificationRegistry
 
 
 NOW = datetime(2026, 8, 18, 8, 0, tzinfo=timezone.utc)
+VERIFY_KEY = b"metabolism-test-verifier-key-32bytes!"
+
+
+def _registry() -> VerificationRegistry:
+    return VerificationRegistry(
+        {
+            "test:ledger": VERIFY_KEY,
+            "test:infrastructure": VERIFY_KEY,
+            "test:billing": VERIFY_KEY,
+        }
+    )
 
 
 def _verified_balance(economy: EconomyStore, *, asset: str, unit: str, amount: float) -> None:
+    evidence = f"test receipt for {asset}/{unit}"
+    claim = EconomyStore.resource_claim(
+        asset=asset,
+        unit=unit,
+        amount=amount,
+        kind="trusted_balance_adjustment",
+        source="test_adapter",
+    )
+    registry = economy.verification_registry
+    assert registry is not None
+    receipt = registry.issue("test:ledger", claim=claim, evidence=evidence)
     economy.record_resource_event(
         asset=asset,
         unit=unit,
         amount=amount,
         kind="trusted_balance_adjustment",
         source="test_adapter",
-        evidence=f"test receipt for {asset}/{unit}",
+        evidence=evidence,
         verified=True,
-        verification_authority="test:ledger",
+        verification_receipt=receipt,
     )
 
 
@@ -37,24 +60,40 @@ def _verified_obligation(
     due_days: float = 1.0,
     essential: bool = True,
 ) -> int:
+    due = NOW + timedelta(days=due_days)
+    due_text = due.isoformat()
+    evidence = f"contract evidence for {name}"
+    claim = MetabolismStore.obligation_claim(
+        name=name,
+        asset=asset,
+        unit=unit,
+        amount=amount,
+        cadence_seconds=cadence_seconds,
+        next_due_at=due_text,
+        essential=essential,
+        source="test_infrastructure",
+    )
+    registry = store.verification_registry
+    assert registry is not None
+    receipt = registry.issue("test:infrastructure", claim=claim, evidence=evidence)
     return store.record_obligation(
         name=name,
         asset=asset,
         unit=unit,
         amount=amount,
         cadence_seconds=cadence_seconds,
-        next_due_at=NOW + timedelta(days=due_days),
+        next_due_at=due,
         essential=essential,
         source="test_infrastructure",
-        evidence=f"contract evidence for {name}",
+        evidence=evidence,
         verified=True,
-        verification_authority="test:infrastructure",
+        verification_receipt=receipt,
     )
 
 
-def test_verified_obligation_requires_evidence_and_authority(tmp_path: Path) -> None:
+def test_verified_obligation_rejects_plain_authority_string(tmp_path: Path) -> None:
     store = MetabolismStore(tmp_path / "memory.sqlite3")
-    with pytest.raises(ValueError, match="evidence and verification_authority"):
+    with pytest.raises(ValueError, match="signed VerificationReceipt"):
         store.record_obligation(
             name="Compute bill",
             asset="cash",
@@ -64,14 +103,63 @@ def test_verified_obligation_requires_evidence_and_authority(tmp_path: Path) -> 
             next_due_at=NOW,
             essential=True,
             source="model_claim",
+            evidence="claimed invoice",
             verified=True,
+            verification_authority="model:says-trusted",
+        )
+
+
+def test_verified_obligation_receipt_binds_exact_claim_and_evidence(tmp_path: Path) -> None:
+    registry = _registry()
+    store = MetabolismStore(tmp_path / "memory.sqlite3", verification_registry=registry)
+    evidence = "contract receipt A"
+    claim = MetabolismStore.obligation_claim(
+        name="Compute bill",
+        asset="cash",
+        unit="USD",
+        amount=10,
+        cadence_seconds=SECONDS_PER_DAY,
+        next_due_at=NOW.isoformat(),
+        essential=True,
+        source="test_infrastructure",
+    )
+    receipt = registry.issue("test:infrastructure", claim=claim, evidence=evidence)
+    obligation_id = store.record_obligation(
+        name="Compute bill",
+        asset="cash",
+        unit="USD",
+        amount=10,
+        cadence_seconds=SECONDS_PER_DAY,
+        next_due_at=NOW,
+        essential=True,
+        source="test_infrastructure",
+        evidence=evidence,
+        verified=True,
+        verification_receipt=receipt,
+    )
+    assert store.obligation(obligation_id).verified is True
+
+    with pytest.raises(PermissionError, match="claim digest mismatch"):
+        store.record_obligation(
+            name="Compute bill",
+            asset="cash",
+            unit="USD",
+            amount=1000,
+            cadence_seconds=SECONDS_PER_DAY,
+            next_due_at=NOW,
+            essential=True,
+            source="test_infrastructure",
+            evidence=evidence,
+            verified=True,
+            verification_receipt=receipt,
         )
 
 
 def test_unverified_obligation_never_creates_runway_pressure(tmp_path: Path) -> None:
     db = tmp_path / "memory.sqlite3"
-    economy = EconomyStore(db)
-    obligations = MetabolismStore(db)
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
     _verified_balance(economy, asset="cash", unit="USD", amount=100)
     obligations.record_obligation(
         name="Unverified scary invoice",
@@ -94,8 +182,9 @@ def test_unverified_obligation_never_creates_runway_pressure(tmp_path: Path) -> 
 
 def test_runway_is_vector_and_never_sums_unrelated_units(tmp_path: Path) -> None:
     db = tmp_path / "memory.sqlite3"
-    economy = EconomyStore(db)
-    obligations = MetabolismStore(db)
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
     _verified_balance(economy, asset="cash", unit="USD", amount=100)
     _verified_balance(economy, asset="cash", unit="RUB", amount=100_000)
     _verified_balance(economy, asset="api_credit", unit="CREDIT", amount=50)
@@ -120,14 +209,14 @@ def test_runway_is_vector_and_never_sums_unrelated_units(tmp_path: Path) -> None
     assert set(by_key) == {("cash", "USD"), ("api_credit", "CREDIT")}
     assert by_key[("cash", "USD")].runway_days == pytest.approx(10.0)
     assert by_key[("api_credit", "CREDIT")].runway_days == pytest.approx(10.0)
-    # RUB exists in the ledger but cannot subsidize USD without a trusted conversion.
     assert ("cash", "RUB") not in by_key
 
 
 def test_negative_balance_has_zero_runway_and_uncovered_due(tmp_path: Path) -> None:
     db = tmp_path / "memory.sqlite3"
-    economy = EconomyStore(db)
-    obligations = MetabolismStore(db)
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
     _verified_balance(economy, asset="cash", unit="USD", amount=-5)
     _verified_obligation(
         obligations,
@@ -160,8 +249,9 @@ def test_compute_energy_uses_actual_runtime_metrics(tmp_path: Path) -> None:
 
 def test_bottleneck_is_lowest_essential_verified_runway(tmp_path: Path) -> None:
     db = tmp_path / "memory.sqlite3"
-    economy = EconomyStore(db)
-    obligations = MetabolismStore(db)
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
     _verified_balance(economy, asset="cash", unit="USD", amount=100)
     _verified_balance(economy, asset="api", unit="CREDIT", amount=20)
     _verified_obligation(
@@ -185,8 +275,9 @@ def test_bottleneck_is_lowest_essential_verified_runway(tmp_path: Path) -> None:
     assert snapshot.bottleneck["runway_days"] == pytest.approx(4.0)
 
 
-def test_due_advance_and_deactivation_are_evidence_gated(tmp_path: Path) -> None:
-    store = MetabolismStore(tmp_path / "memory.sqlite3")
+def test_due_advance_and_deactivation_require_signed_receipts(tmp_path: Path) -> None:
+    registry = _registry()
+    store = MetabolismStore(tmp_path / "memory.sqlite3", verification_registry=registry)
     obligation_id = _verified_obligation(
         store,
         name="Hosting",
@@ -196,16 +287,44 @@ def test_due_advance_and_deactivation_are_evidence_gated(tmp_path: Path) -> None
     )
     before = store.obligation(obligation_id)
     assert before is not None
+
+    advance_evidence = "two verified billing periods processed"
+    advance_receipt = registry.issue(
+        "test:billing",
+        claim=MetabolismStore.mutation_claim(
+            obligation_id=obligation_id,
+            event="due_advanced",
+            periods=2,
+        ),
+        evidence=advance_evidence,
+    )
     advanced = store.advance_due(
         obligation_id,
         periods=2,
-        evidence="two verified billing periods processed",
-        authority="test:billing",
+        evidence=advance_evidence,
+        verification_receipt=advance_receipt,
     )
     assert datetime.fromisoformat(advanced.next_due_at) > datetime.fromisoformat(before.next_due_at)
+
+    with pytest.raises(ValueError, match="signed VerificationReceipt"):
+        store.deactivate(
+            obligation_id,
+            evidence="claimed termination",
+            authority="model:trusted",
+        )
+
+    deactivate_evidence = "verified contract terminated"
+    deactivate_receipt = registry.issue(
+        "test:billing",
+        claim=MetabolismStore.mutation_claim(
+            obligation_id=obligation_id,
+            event="deactivated",
+        ),
+        evidence=deactivate_evidence,
+    )
     inactive = store.deactivate(
         obligation_id,
-        evidence="verified contract terminated",
-        authority="test:billing",
+        evidence=deactivate_evidence,
+        verification_receipt=deactivate_receipt,
     )
     assert inactive.active is False
