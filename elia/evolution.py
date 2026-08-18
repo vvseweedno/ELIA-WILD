@@ -8,7 +8,12 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .verification import VerificationReceipt, VerificationRegistry
+from .verification import (
+    VerificationReceipt,
+    VerificationRegistry,
+    consume_verified_receipt,
+    ensure_receipt_ledger,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +119,8 @@ class BodyRevisionStore:
     when a signed evaluator receipt authenticates the exact test/continuity/metric
     claim and evidence. A caller-supplied evaluator string is not authority. The store
     never edits source, changes Git refs, deploys code or grants new capabilities.
+    Evaluation receipts are consumed exactly once atomically with the status/event
+    transition they authorize.
     """
 
     STATUSES = {"proposed", "testing", "validated", "rejected", "retired"}
@@ -170,6 +177,7 @@ class BodyRevisionStore:
                     ON body_revision_events(revision_id, id ASC);
                 """
             )
+            ensure_receipt_ledger(conn)
 
     @staticmethod
     def now() -> str:
@@ -189,7 +197,11 @@ class BodyRevisionStore:
     ) -> int:
         title = str(title).strip()[:240]
         hypothesis = str(hypothesis).strip()[:8000]
-        targets = tuple(dict.fromkeys(str(item).strip()[:128] for item in target_organs if str(item).strip()))
+        targets = tuple(
+            dict.fromkeys(
+                str(item).strip()[:128] for item in target_organs if str(item).strip()
+            )
+        )
         change = str(proposed_change).strip()[:16000]
         regression = str(regression_plan).strip()[:8000]
         rollback = str(rollback_plan).strip()[:8000]
@@ -255,7 +267,9 @@ class BodyRevisionStore:
 
     def get(self, revision_id: int) -> BodyRevision | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM body_revisions WHERE id=?", (int(revision_id),)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM body_revisions WHERE id=?", (int(revision_id),)
+            ).fetchone()
         return self._from_row(row) if row else None
 
     def active(self, limit: int = 32) -> list[BodyRevision]:
@@ -331,11 +345,6 @@ class BodyRevisionStore:
             continuity_status=continuity_status,
             metrics=metrics,
         )
-        authority = self.verification_registry.verify(
-            verification_receipt,
-            claim=claim,
-            evidence=evidence,
-        )
         report = RevisionGate().evaluate(
             tests_passed=tests_passed,
             organism_healthy=organism_healthy,
@@ -343,17 +352,50 @@ class BodyRevisionStore:
             metrics=metrics,
         )
         next_status = "validated" if report.accepted else "rejected"
-        updated = self._transition(
-            revision_id,
-            next_status,
-            evidence=evidence,
-            payload={
+        timestamp = self.now()
+        with self._connect() as conn:
+            authority = consume_verified_receipt(
+                conn,
+                self.verification_registry,
+                verification_receipt,
+                claim=claim,
+                evidence=evidence,
+                purpose="evolution.revision.evaluate",
+                subject_ref=str(revision_id),
+            )
+            cur = conn.execute(
+                """
+                UPDATE body_revisions
+                SET updated_at=?, status=?, evidence=?
+                WHERE id=? AND status IN ('proposed','testing')
+                """,
+                (timestamp, next_status, evidence, int(revision_id)),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("revision changed concurrently before evaluation commit")
+            payload = {
                 "evaluator_authority": authority,
                 "verification_receipt": verification_receipt.as_dict(),
                 "gate": report.as_dict(),
                 "metrics": metrics,
-            },
-        )
+            }
+            conn.execute(
+                """
+                INSERT INTO body_revision_events(
+                    revision_id, timestamp, kind, evidence, payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    int(revision_id),
+                    timestamp,
+                    next_status,
+                    evidence,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True)[:24000],
+                ),
+            )
+        updated = self.get(revision_id)
+        if updated is None:
+            raise RuntimeError("body revision disappeared after evaluation")
         return updated, report
 
     def retire(self, revision_id: int, *, evidence: str) -> BodyRevision:
