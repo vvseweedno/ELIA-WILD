@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any, Protocol
 
 import httpx
@@ -28,6 +29,15 @@ class Decision:
 class Brain(Protocol):
     def decide(self, context: dict[str, Any]) -> Decision: ...
 
+    def complete_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str: ...
+
 
 FALLBACK_SYSTEM_PROMPT = """You are the cognitive substrate of ELIA WILD, not the whole identity.
 Use only declared capabilities, choose exactly one action, preserve uncertainty, do not invent tool results, authority, receipts or verified resources, and return only the requested JSON decision object. Prefer noop when evidence does not justify action."""
@@ -48,13 +58,16 @@ def _extract_json(text: str) -> dict[str, Any]:
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     try:
-        return json.loads(stripped)
+        value = json.loads(stripped)
     except json.JSONDecodeError:
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start == -1 or end <= start:
             raise ValueError("Model response did not contain a JSON object")
-        return json.loads(stripped[start : end + 1])
+        value = json.loads(stripped[start : end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("Model response JSON must be an object")
+    return value
 
 
 def _bounded_prediction(value: Any) -> dict[str, Any]:
@@ -115,6 +128,39 @@ class MockBrain:
     def __init__(self) -> None:
         self.cycles = 0
 
+    def complete_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        del max_tokens, temperature
+        if "Epistemic Adjudicator" in system_prompt:
+            packet_ids = [int(value) for value in re.findall(r'"id"\s*:\s*(\d+)', user_prompt)]
+            selected = packet_ids[:2]
+            return json.dumps(
+                {
+                    "synthesis": "Mock adjudication preserves evidence and dissent without claiming external truth.",
+                    "selected_packet_ids": selected,
+                    "confidence": 0.55,
+                    "disagreements": ["Mock substrate cannot evaluate domain evidence."],
+                    "falsification_tests": ["Obtain an external observation that distinguishes the candidate claims."],
+                    "recommended_focus": "Prefer a bounded observation action.",
+                }
+            )
+        organ_match = re.search(r"cognitive organ inside ELIA WILD:\s*([^\n]+)", system_prompt)
+        organ = organ_match.group(1).strip() if organ_match else "Mock organ"
+        return (
+            f"CLAIM: {organ} recommends gathering one discriminating observation before stronger commitment.\n"
+            "EVIDENCE: The mock substrate has no external domain evidence beyond the supplied verified context.\n"
+            "COUNTEREXAMPLE: Existing evidence may already be sufficient for a low-risk reversible action.\n"
+            "FALSIFIER: A verified observation showing the next action is already uniquely determined.\n"
+            "UNCERTAINTY: Domain evidence is intentionally unavailable in mock mode.\n"
+            "CONFIDENCE: 0.55"
+        )
+
     def decide(self, context: dict[str, Any]) -> Decision:
         self.cycles += 1
         if self.cycles == 1:
@@ -167,20 +213,22 @@ class OpenAICompatibleBrain:
     def __init__(self, config: BrainConfig):
         self.config = config
 
-    def decide(self, context: dict[str, Any]) -> Decision:
-        system_prompt, public_context = _system_and_public_context(context)
+    def complete_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
         payload: dict[str, Any] = {
             "model": self.config.model_id,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": "Current verified runtime context:\n"
-                    + json.dumps(public_context, ensure_ascii=False, sort_keys=True),
-                },
+                {"role": "system", "content": str(system_prompt)},
+                {"role": "user", "content": str(user_prompt)},
             ],
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
+            "max_tokens": max(1, min(int(max_tokens), max(1, int(self.config.max_tokens)))),
+            "temperature": max(0.0, min(float(temperature), 2.0)),
             "top_p": self.config.top_p,
             "top_k": 20,
             "chat_template_kwargs": {"enable_thinking": self.config.thinking},
@@ -190,7 +238,17 @@ class OpenAICompatibleBrain:
             response = client.post(url, json=payload)
             response.raise_for_status()
             body = response.json()
-        content = body["choices"][0]["message"].get("content") or ""
+        return str(body["choices"][0]["message"].get("content") or "")
+
+    def decide(self, context: dict[str, Any]) -> Decision:
+        system_prompt, public_context = _system_and_public_context(context)
+        content = self.complete_text(
+            system_prompt=system_prompt,
+            user_prompt="Current verified runtime context:\n"
+            + json.dumps(public_context, ensure_ascii=False, sort_keys=True),
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
+        )
         return _decision_from_item(_extract_json(content))
 
 
@@ -224,15 +282,17 @@ class Transformers4BitBrain:
         )
         self.model.eval()
 
-    def decide(self, context: dict[str, Any]) -> Decision:
-        system_prompt, public_context = _system_and_public_context(context)
+    def complete_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
         messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": "Current verified runtime context:\n"
-                + json.dumps(public_context, ensure_ascii=False, sort_keys=True),
-            },
+            {"role": "system", "content": str(system_prompt)},
+            {"role": "user", "content": str(user_prompt)},
         ]
         inputs = self.processor.apply_chat_template(
             messages,
@@ -242,10 +302,12 @@ class Transformers4BitBrain:
             return_tensors="pt",
             enable_thinking=self.config.thinking,
         ).to(self.model.device)
+        bounded_tokens = max(1, min(int(max_tokens), max(1, int(self.config.max_tokens))))
+        bounded_temperature = max(0.01, min(float(temperature), 2.0))
         generation_kwargs: dict[str, Any] = {
-            "max_new_tokens": self.config.max_tokens,
+            "max_new_tokens": bounded_tokens,
             "do_sample": True,
-            "temperature": self.config.temperature,
+            "temperature": bounded_temperature,
             "top_p": self.config.top_p,
             "top_k": 20,
             "pad_token_id": self.processor.tokenizer.eos_token_id,
@@ -253,7 +315,17 @@ class Transformers4BitBrain:
         with self._torch.inference_mode():
             outputs = self.model.generate(**inputs, **generation_kwargs)
         generated = outputs[0][inputs["input_ids"].shape[-1] :]
-        content = self.processor.decode(generated, skip_special_tokens=True)
+        return str(self.processor.decode(generated, skip_special_tokens=True))
+
+    def decide(self, context: dict[str, Any]) -> Decision:
+        system_prompt, public_context = _system_and_public_context(context)
+        content = self.complete_text(
+            system_prompt=system_prompt,
+            user_prompt="Current verified runtime context:\n"
+            + json.dumps(public_context, ensure_ascii=False, sort_keys=True),
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
+        )
         return _decision_from_item(_extract_json(content))
 
 
