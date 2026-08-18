@@ -27,8 +27,10 @@ jobs:
       - name: Static correctness gates
         run: |
           python -m pip check
-          python -m compileall -q elia tests
-          ruff check elia tests
+          python -m compileall -q elia tests tools
+          ruff check elia tests tools
+      - name: Repository integrity audit
+        run: python tools/audit_repository.py
       - name: Known-vulnerability audit
         run: python -m pip_audit
       - name: Test
