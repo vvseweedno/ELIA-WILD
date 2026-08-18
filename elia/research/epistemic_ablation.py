@@ -10,6 +10,7 @@ from ..epistemic import EpistemicRegistry, parse_epistemic_packet
 
 
 AblationCondition = Literal["pearson12", "homogeneous", "random_roles", "domain_experts"]
+TokenCounter = Callable[[str], int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +39,10 @@ class AblationResponse:
 class AblationMetrics:
     condition: AblationCondition
     call_count: int
-    max_tokens_per_call: int
+    max_output_tokens_per_call: int
+    output_token_ceiling_total: int
+    input_char_total: int
+    input_token_total: int | None
     mean_pairwise_jaccard_distance: float
     unique_claim_ratio: float
     counterexample_coverage: float
@@ -122,12 +126,14 @@ def _mean_pairwise_distance(responses: list[AblationResponse]) -> float:
 
 
 class EpistemicAblationHarness:
-    """Equal-compute comparison of epistemic-role strategies.
+    """Budget-audited comparison of epistemic-role strategies.
 
-    The harness does not claim that lexical diversity is reasoning quality. It measures
-    diversity/coverage directly and accepts an optional external evaluator for factual,
-    calibration or task-performance metrics. Without an evaluator, no accuracy claim is
-    produced.
+    Call count and maximum *output* token ceilings can be equalized without knowing a
+    model tokenizer. Exact total-token equality additionally requires a tokenizer-aware
+    `token_counter`; the harness refuses to claim it otherwise.
+
+    Built-in metrics measure diversity/coverage, not factual accuracy. Accuracy,
+    calibration or task-performance claims require an external evaluator/ground truth.
     """
 
     CONDITIONS: tuple[AblationCondition, ...] = (
@@ -151,7 +157,6 @@ class EpistemicAblationHarness:
         prompts: list[AblationPrompt] = []
         if condition == "pearson12":
             specs = self.registry.all()
-            # A fixed deterministic rotation avoids condition-specific cherry-picking.
             offset = int(seed) % len(specs)
             ordered = specs[offset:] + specs[:offset]
             for spec in ordered[:count]:
@@ -209,14 +214,23 @@ Known failure mode: {spec.failure_mode}
         raise ValueError(f"unsupported ablation condition: {condition}")
 
     @staticmethod
-    def _complete(brain: Any, prompt: AblationPrompt, question: str, public_context: str, max_tokens: int) -> AblationResponse:
+    def _user_prompt(question: str, public_context: str) -> str:
+        return f"QUESTION:\n{question}\n\nPUBLIC CONTEXT:\n{public_context}"
+
+    @staticmethod
+    def _complete(
+        brain: Any,
+        prompt: AblationPrompt,
+        user_prompt: str,
+        max_tokens: int,
+    ) -> AblationResponse:
         complete = getattr(brain, "complete_text", None)
         if not callable(complete):
             raise RuntimeError("ablation brain must implement complete_text")
         text = str(
             complete(
                 system_prompt=prompt.system_prompt,
-                user_prompt=f"QUESTION:\n{question}\n\nPUBLIC CONTEXT:\n{public_context}",
+                user_prompt=user_prompt,
                 max_tokens=int(max_tokens),
                 temperature=0.85,
             )
@@ -244,10 +258,19 @@ Known failure mode: {spec.failure_mode}
         max_tokens_per_call: int = 220,
         seed: int = 0,
         external_evaluator: Callable[[list[AblationResponse]], dict[str, float]] | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> tuple[list[AblationResponse], AblationMetrics]:
         prompts = self.prompts(condition, call_budget=call_budget, seed=seed)
+        user_prompt = self._user_prompt(str(question), str(public_context))
+        input_texts = [prompt.system_prompt + "\n" + user_prompt for prompt in prompts]
+        input_char_total = sum(len(text) for text in input_texts)
+        input_token_total = (
+            sum(max(0, int(token_counter(text))) for text in input_texts)
+            if token_counter is not None
+            else None
+        )
         responses = [
-            self._complete(brain, prompt, str(question), str(public_context), max_tokens_per_call)
+            self._complete(brain, prompt, user_prompt, max_tokens_per_call)
             for prompt in prompts
         ]
         confidences = [item.confidence for item in responses]
@@ -269,7 +292,10 @@ Known failure mode: {spec.failure_mode}
         metrics = AblationMetrics(
             condition=condition,
             call_count=len(responses),
-            max_tokens_per_call=int(max_tokens_per_call),
+            max_output_tokens_per_call=int(max_tokens_per_call),
+            output_token_ceiling_total=len(responses) * int(max_tokens_per_call),
+            input_char_total=input_char_total,
+            input_token_total=input_token_total,
             mean_pairwise_jaccard_distance=_mean_pairwise_distance(responses),
             unique_claim_ratio=len(normalized_claims) / len(responses) if responses else 0.0,
             counterexample_coverage=(
@@ -300,6 +326,7 @@ Known failure mode: {spec.failure_mode}
         seed: int = 0,
         evaluator_factory: Callable[[AblationCondition], Callable[[list[AblationResponse]], dict[str, float]] | None]
         | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> dict[str, Any]:
         selected = tuple(conditions or self.CONDITIONS)
         results: dict[str, Any] = {}
@@ -314,25 +341,41 @@ Known failure mode: {spec.failure_mode}
                 max_tokens_per_call=max_tokens_per_call,
                 seed=seed,
                 external_evaluator=evaluator,
+                token_counter=token_counter,
             )
             results[condition] = {
                 "metrics": metrics.as_dict(),
                 "responses": [asdict(item) for item in responses],
             }
 
-        budgets = {
-            (entry["metrics"]["call_count"], entry["metrics"]["max_tokens_per_call"])
+        call_output_budgets = {
+            (
+                entry["metrics"]["call_count"],
+                entry["metrics"]["output_token_ceiling_total"],
+            )
             for entry in results.values()
         }
-        if len(budgets) != 1:
-            raise RuntimeError("ablation conditions did not receive equal call/token budgets")
+        if len(call_output_budgets) != 1:
+            raise RuntimeError("ablation conditions did not receive equal call/output-token ceilings")
+
+        input_totals = [entry["metrics"]["input_token_total"] for entry in results.values()]
+        exact_input_equal: bool | None
+        if token_counter is None:
+            exact_input_equal = None
+        else:
+            exact_input_equal = len(set(int(value or 0) for value in input_totals)) == 1
+
         return {
-            "equal_budget": True,
+            "equal_call_and_output_ceiling": True,
+            "exact_equal_input_token_budget": exact_input_equal,
+            "exact_equal_total_token_budget": (
+                bool(exact_input_equal) if exact_input_equal is not None else None
+            ),
             "call_budget": int(call_budget),
-            "max_tokens_per_call": int(max_tokens_per_call),
+            "max_output_tokens_per_call": int(max_tokens_per_call),
             "conditions": results,
             "interpretation_boundary": (
-                "Built-in metrics measure response diversity/coverage only. Accuracy or epistemic superiority "
-                "requires an external evaluator or ground truth and must not be inferred from diversity alone."
+                "Call counts and maximum output-token ceilings are equal. Exact input/total-token equality may be claimed only when a tokenizer-aware token_counter is supplied and reports equal totals. "
+                "Built-in metrics measure response diversity/coverage only; accuracy or epistemic superiority requires external ground truth/evaluation."
             ),
         }
