@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .verification import VerificationReceipt, VerificationRegistry
+
 
 @dataclass(frozen=True, slots=True)
 class BodyRevision:
@@ -48,9 +50,9 @@ class RevisionGateReport:
 class RevisionGate:
     """Deterministic gate separating a proposed mutation from a validated body revision.
 
-    This gate never applies code. It only decides whether supplied evidence is
-    sufficient to call a candidate revision validated. Promotion requires successful
-    tests, healthy organism anatomy, non-broken continuity and declared metric checks.
+    This gate never applies code. It only decides whether supplied measured evidence
+    satisfies the declared regression/continuity/metric rules. Promotion/deployment is
+    a separate authority boundary.
     """
 
     @staticmethod
@@ -108,22 +110,29 @@ class RevisionGate:
 class BodyRevisionStore:
     """Persistent revision proposals sharing ELIA's SQLite database.
 
-    A language model or repair process may create a proposal, but only an explicit
-    evaluator call with evidence can mark it validated. The store never edits source,
-    changes Git refs, deploys code or grants itself authority.
+    A model may propose a revision, but the store can mark it validated/rejected only
+    when a signed evaluator receipt authenticates the exact test/continuity/metric
+    claim and evidence. A caller-supplied evaluator string is not authority. The store
+    never edits source, changes Git refs, deploys code or grants new capabilities.
     """
 
     STATUSES = {"proposed", "testing", "validated", "rejected", "retired"}
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        verification_registry: VerificationRegistry | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.verification_registry = verification_registry
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -269,6 +278,24 @@ class BodyRevisionStore:
             raise ValueError(f"revision cannot enter testing from {current.status}")
         return self._transition(revision_id, "testing", evidence=evidence, payload={})
 
+    @staticmethod
+    def evaluation_claim(
+        *,
+        revision_id: int,
+        tests_passed: bool,
+        organism_healthy: bool,
+        continuity_status: str,
+        metrics: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "type": "body_revision_evaluation",
+            "revision_id": int(revision_id),
+            "tests_passed": bool(tests_passed),
+            "organism_healthy": bool(organism_healthy),
+            "continuity_status": str(continuity_status).strip().lower(),
+            "metrics": dict(metrics or {}),
+        }
+
     def evaluate(
         self,
         revision_id: int,
@@ -278,7 +305,8 @@ class BodyRevisionStore:
         continuity_status: str,
         metrics: dict[str, dict[str, Any]],
         evidence: str,
-        evaluator_authority: str,
+        verification_receipt: VerificationReceipt | None = None,
+        evaluator_authority: str | None = None,
     ) -> tuple[BodyRevision, RevisionGateReport]:
         current = self.get(revision_id)
         if current is None:
@@ -286,9 +314,28 @@ class BodyRevisionStore:
         if current.status not in {"proposed", "testing"}:
             raise ValueError(f"revision cannot be evaluated from {current.status}")
         evidence = str(evidence).strip()[:16000]
-        authority = str(evaluator_authority).strip()[:256]
-        if not evidence or not authority:
-            raise ValueError("evaluation requires evidence and evaluator_authority")
+        if not evidence:
+            raise ValueError("evaluation requires evidence")
+        if evaluator_authority is not None and verification_receipt is None:
+            raise ValueError(
+                "evaluator_authority strings cannot certify revisions; a signed VerificationReceipt is required"
+            )
+        if self.verification_registry is None or verification_receipt is None:
+            raise ValueError(
+                "revision evaluation requires a trusted verification registry and signed VerificationReceipt"
+            )
+        claim = self.evaluation_claim(
+            revision_id=revision_id,
+            tests_passed=tests_passed,
+            organism_healthy=organism_healthy,
+            continuity_status=continuity_status,
+            metrics=metrics,
+        )
+        authority = self.verification_registry.verify(
+            verification_receipt,
+            claim=claim,
+            evidence=evidence,
+        )
         report = RevisionGate().evaluate(
             tests_passed=tests_passed,
             organism_healthy=organism_healthy,
@@ -302,6 +349,7 @@ class BodyRevisionStore:
             evidence=evidence,
             payload={
                 "evaluator_authority": authority,
+                "verification_receipt": verification_receipt.as_dict(),
                 "gate": report.as_dict(),
                 "metrics": metrics,
             },
