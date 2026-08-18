@@ -1,8 +1,31 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+from hashlib import sha256
+import json
 from typing import Any
 
 from .runtime import EliaRuntime as GenesisRuntime
+
+
+def _fingerprint(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _safe_action_descriptor(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Describe an action for durable logs without persisting argument values."""
+    return {
+        "name": str(name),
+        "argument_keys": sorted(str(key) for key in args)[:64],
+        "arguments_fingerprint": _fingerprint(args),
+    }
 
 
 class OrganismRuntime(GenesisRuntime):
@@ -11,6 +34,10 @@ class OrganismRuntime(GenesisRuntime):
     The proven Genesis runtime remains the stable base. This layer makes lived
     external experience part of every future cognitive context without depending on
     the model to remember to write an autobiographical memory after an action.
+
+    Raw body/action arguments are deliberately excluded from Chronicle and ordinary
+    autobiographical records. Full normalized outcomes live in the private Sensorium;
+    durable high-level logs keep fingerprints and provenance pointers instead.
     """
 
     WORLD_CONTEXT_LIMIT = 24
@@ -94,6 +121,20 @@ class OrganismRuntime(GenesisRuntime):
         context["_system_prompt"] = self.prompt_template.render(context)
         return context
 
+    def _latest_action_observation(self, action_name: str) -> dict[str, Any] | None:
+        items = self.tools.observations.recent(1)
+        if not items or items[0].source_ref != action_name:
+            return None
+        item = items[0]
+        return {
+            "id": item.id,
+            "transaction_id": item.transaction_id,
+            "payload_sha256": item.payload_sha256,
+            "source_kind": item.source_kind,
+            "success": item.success,
+            "summary": item.summary[:1000],
+        }
+
     def cycle(self) -> dict[str, Any]:
         cycle_tx = self.tools.state_bus.begin(
             "cognitive_cycle",
@@ -109,11 +150,205 @@ class OrganismRuntime(GenesisRuntime):
                 "brain_loaded": self.brain_loaded,
             },
         )
+
         try:
-            report = super().cycle()
+            context = self._context()
+            proposed = self._think(context)
+            assurance_report = self.assurance.review(proposed, context).as_dict()
+            decision = (
+                proposed
+                if assurance_report["accepted"]
+                else self._safe_decision_after_rejection(proposed, assurance_report)
+            )
+
+            memory_ids = (
+                self._store_model_memories(decision) if assurance_report["accepted"] else []
+            )
+            self_changes = (
+                self._apply_self_updates(decision) if assurance_report["accepted"] else []
+            )
+            goal_changes = (
+                self._apply_goal_updates(decision) if assurance_report["accepted"] else []
+            )
+            opportunity_changes = (
+                self._apply_opportunity_updates(decision)
+                if assurance_report["accepted"]
+                else []
+            )
+
+            # Forecast is committed BEFORE the intervention.
+            forecast_id = self._record_forecast(decision)
+            result = self._execute_action(decision.action_name, decision.action_args)
+            result_full = result.as_dict()
+            brier_score = self.metacognition.resolve(
+                forecast_id,
+                success=result.ok,
+                observation=result_full,
+            )
+            calibration = self.metacognition.calibration(100)
+
+            result_dict = result_full
+            max_chars = self.config.runtime.max_action_output_chars
+            serialized = json.dumps(result_dict, ensure_ascii=False, sort_keys=True, default=str)
+            if len(serialized) > max_chars:
+                result_dict = {
+                    "ok": result.ok,
+                    "tool": result.tool,
+                    "data": {"truncated_result": serialized[:max_chars]},
+                    "error": result.error,
+                }
+
+            sleep_seconds, next_wake_at = self._schedule_next_wake(decision.sleep_seconds)
+            self_model_id, self_model_fingerprint, post_components = self._record_self_model(
+                source="cycle"
+            )
+
+            observation_ref = self._latest_action_observation(decision.action_name)
+            safe_result = {
+                "ok": result.ok,
+                "tool": result.tool,
+                "error": (str(result.error)[:1000] if result.error else None),
+                "observation": observation_ref,
+            }
+            action_record = {
+                "identity_fingerprint": self.identity.fingerprint,
+                "prompt_fingerprint": self.prompt_template.fingerprint,
+                "body_version": __import__("elia").__version__,
+                "objective": decision.objective,
+                "summary": decision.summary,
+                "skill": decision.skill_name,
+                "proposed": {
+                    "objective": proposed.objective,
+                    "summary": proposed.summary,
+                    "skill": proposed.skill_name,
+                    "prediction": proposed.prediction,
+                    "action": _safe_action_descriptor(
+                        proposed.action_name,
+                        proposed.action_args,
+                    ),
+                },
+                "assurance": assurance_report,
+                "forecast": {
+                    "id": forecast_id,
+                    "prediction": decision.prediction,
+                    "brier_score": brier_score,
+                    "calibration": calibration,
+                },
+                "action": _safe_action_descriptor(
+                    decision.action_name,
+                    decision.action_args,
+                ),
+                "result": safe_result,
+                "memory_ids": memory_ids,
+                "self_changes": self_changes,
+                "goal_changes": goal_changes,
+                "opportunity_changes": opportunity_changes,
+                "capability_health": self.memory.capability_health(decision.action_name),
+                "self_model": {
+                    "row_id": self_model_id,
+                    "fingerprint": self_model_fingerprint,
+                    "drift": post_components["drift"],
+                },
+                "scheduler": {
+                    "sleep_seconds": sleep_seconds,
+                    "next_wake_at": next_wake_at,
+                },
+            }
+            self.memory.set_meta(
+                "last_action",
+                json.dumps(action_record, ensure_ascii=False, sort_keys=True),
+            )
+            self.memory.remember(
+                "action_result",
+                json.dumps(action_record, ensure_ascii=False, sort_keys=True)[:16000],
+                importance=0.6 if result.ok and assurance_report["accepted"] else 0.85,
+                source="organism_runtime",
+                metadata={
+                    "identity_fingerprint": self.identity.fingerprint,
+                    "self_model_fingerprint": self_model_fingerprint,
+                    "forecast_id": forecast_id,
+                    "brier_score": brier_score,
+                    "observation_id": (
+                        observation_ref.get("id") if observation_ref is not None else None
+                    ),
+                    "observation_sha256": (
+                        observation_ref.get("payload_sha256")
+                        if observation_ref is not None
+                        else None
+                    ),
+                },
+            )
+            entry = self.chronicle.append("CYCLE", action_record)
+            self._account_runtime()
+
+            report = {
+                "chronicle_seq": entry.seq,
+                "identity_fingerprint": self.identity.fingerprint,
+                "self_model_fingerprint": self_model_fingerprint,
+                "decision": {
+                    "objective": decision.objective,
+                    "summary": decision.summary,
+                    "skill": decision.skill_name,
+                    "action_name": decision.action_name,
+                },
+                "assurance": assurance_report,
+                "forecast": {
+                    "id": forecast_id,
+                    "prediction": decision.prediction,
+                    "brier_score": brier_score,
+                    "calibration": calibration,
+                },
+                "result": result_dict,
+                "observation": observation_ref,
+                "self_changes": self_changes,
+                "goal_changes": goal_changes,
+                "opportunity_changes": opportunity_changes,
+                "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
+                "self_hypotheses": self.self_hypotheses.snapshot(24),
+                "economy": self.economy.snapshot(16),
+                "capability_health": self.memory.capability_health(decision.action_name),
+                "identity_drift": post_components["drift"],
+                "resources": self.budget(),
+                "sleep_seconds": sleep_seconds,
+                "next_wake_at": next_wake_at,
+            }
+
+            self.tools.state_bus.append(
+                cycle_tx,
+                phase="learning",
+                kind="COGNITIVE_OUTCOME",
+                payload={
+                    "chronicle_seq": entry.seq,
+                    "action_name": decision.action_name,
+                    "action_arguments_fingerprint": _fingerprint(decision.action_args),
+                    "result_ok": result.ok,
+                    "observation_id": (
+                        observation_ref.get("id") if observation_ref is not None else None
+                    ),
+                    "observation_sha256": (
+                        observation_ref.get("payload_sha256")
+                        if observation_ref is not None
+                        else None
+                    ),
+                    "self_model_fingerprint": self_model_fingerprint,
+                    "next_wake_at": next_wake_at,
+                },
+            )
+            self.tools.state_bus.commit(
+                cycle_tx,
+                {
+                    "chronicle_seq": entry.seq,
+                    "next_wake_at": next_wake_at,
+                },
+            )
+            report["organism_transaction_id"] = cycle_tx
+            report["world_model"] = self.tools.world_model.snapshot(12)
+            report["causal_memory"] = self.tools.causal.snapshot(8)
+            return report
+
         except BaseException as exc:
-            # The state bus records the interrupted/failed cognitive transition.
-            # We intentionally do not swallow the original exception.
+            # Preserve the original exception while attempting to close the
+            # write-ahead transaction as explicitly aborted.
             try:
                 self.tools.state_bus.abort(
                     cycle_tx,
@@ -122,30 +357,6 @@ class OrganismRuntime(GenesisRuntime):
             except Exception:
                 pass
             raise
-
-        self.tools.state_bus.append(
-            cycle_tx,
-            phase="learning",
-            kind="COGNITIVE_OUTCOME",
-            payload={
-                "chronicle_seq": report.get("chronicle_seq"),
-                "action_name": (report.get("decision") or {}).get("action_name"),
-                "result_ok": (report.get("result") or {}).get("ok"),
-                "self_model_fingerprint": report.get("self_model_fingerprint"),
-                "next_wake_at": report.get("next_wake_at"),
-            },
-        )
-        self.tools.state_bus.commit(
-            cycle_tx,
-            {
-                "chronicle_seq": report.get("chronicle_seq"),
-                "next_wake_at": report.get("next_wake_at"),
-            },
-        )
-        report["organism_transaction_id"] = cycle_tx
-        report["world_model"] = self.tools.world_model.snapshot(12)
-        report["causal_memory"] = self.tools.causal.snapshot(8)
-        return report
 
 
 # Explicit alias for callers that want the latest organism runtime while the older
