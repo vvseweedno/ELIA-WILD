@@ -36,7 +36,7 @@ jobs:
           rm -rf dist /tmp/elia-wheel-venv /tmp/elia-wheel-run
           python -m pip wheel . --no-deps --wheel-dir dist
           python -m venv /tmp/elia-wheel-venv
-          /tmp/elia-wheel-venv/bin/python -m pip install --no-deps dist/elia_wild-*.whl
+          /tmp/elia-wheel-venv/bin/python -m pip install dist/elia_wild-*.whl
           mkdir -p /tmp/elia-wheel-run
           cd /tmp/elia-wheel-run
           /tmp/elia-wheel-venv/bin/python -c "import elia; print(elia.__version__)"
