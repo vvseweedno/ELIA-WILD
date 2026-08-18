@@ -25,8 +25,22 @@ organs:
     maturity: prototype
     authority: local_state
     role: >-
-      Persists organ-specific packet/session history and weak operational credit while
-      explicitly refusing to interpret successful downstream actions as truth labels.
+      Base persistence contract for organ-specific packet/session history and weak
+      operational outcome association. Production credit semantics are tightened by
+      the selective_credit_store organ below.
+
+  - id: selective_credit_store
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_hardening
+    symbol: SelectiveCreditBiographyStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Applies downstream operational outcome credit only to adjudicator-supported
+      packets while keeping unsupported/dissenting packets unresolved. The signal
+      remains weak operational credit and is never interpreted as epistemic truth.
 
   - id: evidence_view_projector
     layer: epistemic_ecosystem
@@ -61,8 +75,21 @@ organs:
     maturity: prototype
     authority: cognition_only
     role: >-
-      Runs Executive-gated divergence and identity-neutral adjudication. Individual
-      organ/judge failures degrade safely; below quorum no packet is promoted to synthesis.
+      Base fail-soft divergence/adjudication implementation. Individual organ/judge
+      failures degrade safely; below quorum no packet is promoted to synthesis.
+
+  - id: epistemic_security_boundary
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_hardening
+    symbol: HardenedEpistemicCortex
+    required: true
+    maturity: prototype
+    authority: cognition_only
+    role: >-
+      Production epistemic cortex that treats questions, evidence views, biographies
+      and packet fields as untrusted data. Embedded instructions cannot grant tool,
+      identity, account, payment or state-mutation authority.
 
   - id: epistemic_runtime
     layer: agency
@@ -86,8 +113,9 @@ organs:
     maturity: prototype
     authority: none
     role: >-
-      Equal-call/token-budget comparison of Pearson-12, homogeneous, random-role and
-      domain-expert conditions. Built-in diversity metrics never masquerade as accuracy.
+      Equal-call and equal maximum-output-token-ceiling comparison of Pearson-12,
+      homogeneous, random-role and domain-expert conditions. Exact input/total-token
+      equality requires tokenizer-aware accounting; diversity metrics are not accuracy.
 
   - id: cognitive_biography_hysteresis
     layer: research
