@@ -68,6 +68,9 @@ tools:
     max_bytes: 1000000
   workspace:
     enabled: true
+  work_ports:
+    enabled: false
+    ports: {}
   body:
     browser:
       enabled: false
