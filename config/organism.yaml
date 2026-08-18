@@ -1,15 +1,18 @@
-schema_version: 1
+schema_version: 2
 identity_id: elia-wild
 name: ELIA WILD Organism
 principle: >-
   Identity continuity is carried by verified state and invariant-preserving behavior
   across replaceable model and machine substrates. Core organs are required for a
-  viable boot; research organs are explicitly non-authoritative and maturity-labelled.
+  viable boot; external body adapters are replaceable; research organs are explicitly
+  non-authoritative and maturity-labelled.
 
 layers:
   identity: immutable identity contract and lineage
   cognition: replaceable inference plus prompting and calibration
   memory: durable episodic, semantic and adaptive self state
+  sensorium: normalized observations and replaceable digital body adapters
+  world: evidence-bearing beliefs and empirical intervention experience
   assurance: critic, drift, continuity verification and revision validation
   agency: goals, needs, capabilities, skills, bounded action and body-revision proposals
   metabolism: compute/resource accounting and opportunity economy
@@ -95,6 +98,87 @@ organs:
     maturity: core
     authority: local_state
     role: Revisable evidence-bearing hypotheses about self.
+  - id: observation_store
+    layer: sensorium
+    kind: python
+    module: elia.observations
+    symbol: ObservationStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: Normalizes every capability outcome into durable evidence with provenance and payload digests.
+  - id: world_model
+    layer: world
+    kind: python
+    module: elia.world_model
+    symbol: WorldModelStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: Stores revisable beliefs, contradictions and trusted-only verification state about the external world.
+  - id: causal_memory
+    layer: world
+    kind: python
+    module: elia.causal
+    symbol: CausalMemoryStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: Stores empirical interventions and outcomes without promoting correlation to causal proof.
+  - id: organism_state_bus
+    layer: sensorium
+    kind: python
+    module: elia.state_bus
+    symbol: OrganismStateBus
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: Hash-chained write-ahead history for causal organism transitions and interruption recovery.
+  - id: sensorimotor_fabric
+    layer: sensorium
+    kind: python
+    module: elia.body.fabric
+    symbol: SensorimotorFabric
+    required: true
+    maturity: prototype
+    authority: configured_body
+    role: Composes replaceable browser, protocol, process and MCP adapters behind one capability contract.
+  - id: browser_body
+    layer: sensorium
+    kind: python
+    module: elia.body.browser
+    symbol: BrowserBody
+    required: false
+    maturity: prototype
+    authority: configured_browser
+    role: Playwright browser organ with isolated contexts and separately gated interaction.
+  - id: mcp_body
+    layer: sensorium
+    kind: python
+    module: elia.body.mcp
+    symbol: MCPBody
+    required: false
+    maturity: prototype
+    authority: configured_mcp_servers
+    role: MCP v2 discovery, resource and allow-listed tool-call adapter over configured servers.
+  - id: bounded_process_body
+    layer: sensorium
+    kind: python
+    module: elia.body.process
+    symbol: BoundedProcessRunner
+    required: false
+    maturity: prototype
+    authority: configured_executables
+    role: No-shell subprocess execution restricted to explicit executable aliases, workspace cwd and bounded resources.
+  - id: jsonrpc_body
+    layer: sensorium
+    kind: python
+    module: elia.body.protocols
+    symbol: JSONRPCBody
+    required: false
+    maturity: prototype
+    authority: configured_endpoints_methods
+    role: JSON-RPC 2.0 transport restricted to configured endpoints and method allowlists.
   - id: metacognition
     layer: cognition
     kind: python
@@ -166,7 +250,7 @@ organs:
     required: true
     maturity: core
     authority: bounded_actions
-    role: Explicit executable authority boundary.
+    role: Explicit executable authority boundary and automatic observation provenance.
   - id: skill_registry
     layer: agency
     kind: python
@@ -230,15 +314,24 @@ organs:
     maturity: prototype
     authority: configured_kaggle_relay
     role: External authenticated wake/state relay for ephemeral GPU sessions.
-  - id: runtime
+  - id: genesis_runtime
     layer: agency
     kind: python
     module: elia.runtime
     symbol: EliaRuntime
     required: true
-    maturity: core
+    maturity: proven
     authority: composed
-    role: Integrates identity, memory, assurance, action and persistence into cycles.
+    role: Stable Genesis runtime retained as rollback and migration-compatible base.
+  - id: organism_runtime
+    layer: agency
+    kind: python
+    module: elia.organism_runtime
+    symbol: OrganismRuntime
+    required: true
+    maturity: prototype
+    authority: composed
+    role: Production 1.1 runtime integrating sensorium, world model, causal experience and state-bus continuity into every wake.
   - id: research_registry
     layer: research
     kind: python
