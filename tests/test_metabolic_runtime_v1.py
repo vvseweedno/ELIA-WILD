@@ -8,6 +8,19 @@ from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.economy import EconomyStore
 from elia.metabolic_runtime import MetabolicOrganismRuntime
 from elia.metabolism import MetabolismStore, SECONDS_PER_DAY
+from elia.verification import VerificationRegistry
+
+
+VERIFY_KEY = b"metabolic-runtime-verifier-key-32bytes"
+
+
+def _registry() -> VerificationRegistry:
+    return VerificationRegistry(
+        {
+            "test:ledger": VERIFY_KEY,
+            "test:infrastructure": VERIFY_KEY,
+        }
+    )
 
 
 def _config(tmp_path: Path) -> Config:
@@ -62,32 +75,75 @@ class CaptureBrain:
         )
 
 
+def _record_verified_balance(
+    economy: EconomyStore,
+    *,
+    asset: str,
+    unit: str,
+    amount: float,
+    kind: str,
+    evidence: str,
+) -> None:
+    registry = economy.verification_registry
+    assert registry is not None
+    claim = EconomyStore.resource_claim(
+        asset=asset,
+        unit=unit,
+        amount=amount,
+        kind=kind,
+        source="test_adapter",
+    )
+    receipt = registry.issue("test:ledger", claim=claim, evidence=evidence)
+    economy.record_resource_event(
+        asset=asset,
+        unit=unit,
+        amount=amount,
+        kind=kind,
+        source="test_adapter",
+        evidence=evidence,
+        verified=True,
+        verification_receipt=receipt,
+    )
+
+
 def _seed_verified_resource(config: Config) -> None:
     db = config.runtime.state_dir / "memory.sqlite3"
-    economy = EconomyStore(db)
-    obligations = MetabolismStore(db)
-    economy.record_resource_event(
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
+    _record_verified_balance(
+        economy,
         asset="api",
         unit="CREDIT",
         amount=20,
         kind="verified_credit_balance",
-        source="test_adapter",
         evidence="verified test credit receipt",
-        verified=True,
-        verification_authority="test:ledger",
     )
+    due = datetime.now(timezone.utc) + timedelta(days=1)
+    evidence = "verified test inference obligation"
+    claim = MetabolismStore.obligation_claim(
+        name="Inference credits",
+        asset="api",
+        unit="CREDIT",
+        amount=5,
+        cadence_seconds=SECONDS_PER_DAY,
+        next_due_at=due.isoformat(),
+        essential=True,
+        source="test_infrastructure",
+    )
+    receipt = registry.issue("test:infrastructure", claim=claim, evidence=evidence)
     obligations.record_obligation(
         name="Inference credits",
         asset="api",
         unit="CREDIT",
         amount=5,
         cadence_seconds=SECONDS_PER_DAY,
-        next_due_at=datetime.now(timezone.utc) + timedelta(days=1),
+        next_due_at=due,
         essential=True,
         source="test_infrastructure",
-        evidence="verified test inference obligation",
+        evidence=evidence,
         verified=True,
-        verification_authority="test:infrastructure",
+        verification_receipt=receipt,
     )
 
 
@@ -110,17 +166,16 @@ def test_verified_four_day_runway_becomes_deterministic_need(tmp_path: Path) -> 
 def test_unverified_obligation_does_not_create_resource_need(tmp_path: Path) -> None:
     config = _config(tmp_path)
     db = config.runtime.state_dir / "memory.sqlite3"
-    economy = EconomyStore(db)
-    obligations = MetabolismStore(db)
-    economy.record_resource_event(
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
+    _record_verified_balance(
+        economy,
         asset="cash",
         unit="USD",
         amount=100,
         kind="verified_cash",
-        source="test_adapter",
         evidence="verified receipt",
-        verified=True,
-        verification_authority="test:ledger",
     )
     obligations.record_obligation(
         name="Rumored bill",
@@ -152,6 +207,7 @@ def test_model_has_no_capability_to_create_verified_obligation_or_receipt(tmp_pa
         "verify_resource",
         "create_obligation",
         "verify_obligation",
+        "issue_verification_receipt",
         "set_runway",
     }
     assert forbidden.isdisjoint(catalog)
