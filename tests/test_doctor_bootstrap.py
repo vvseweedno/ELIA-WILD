@@ -24,6 +24,9 @@ def make_config(tmp_path: Path):
         "system_prompt: system_prompt.md",
         f"system_prompt: {root / 'config' / 'system_prompt.md'}",
     ).replace(
+        "epistemic_registry: epistemic.yaml",
+        f"epistemic_registry: {root / 'config' / 'epistemic.yaml'}",
+    ).replace(
         "skills_dir: skills",
         f"skills_dir: {root / 'skills'}",
     ).replace(
