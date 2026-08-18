@@ -73,21 +73,41 @@ def is_safe_browser_subresource(url: str, *, allow_private: bool = False) -> boo
     return True
 
 
-def pinned_http_get(
+def _header_pair(name: str, value: str) -> tuple[str, str]:
+    name = str(name)
+    value = str(value)
+    if not name or any(ch in name for ch in "\r\n:"):
+        raise ValueError("invalid HTTP header name")
+    if any(ch in value for ch in "\r\n"):
+        raise ValueError(f"invalid HTTP header value for {name!r}")
+    return name, value
+
+
+def pinned_http_request(
+    method: str,
     url: str,
     *,
+    body: bytes | None = None,
     timeout: float = 20.0,
     max_bytes: int = 1_000_000,
+    max_request_bytes: int = 1_000_000,
     headers: Mapping[str, str] | None = None,
     allow_private: bool = False,
 ) -> PinnedHTTPResponse:
-    """GET a URL while pinning the connection to a prevalidated resolved IP.
+    """Perform one HTTP request pinned to a prevalidated resolved IP.
 
     The hostname is retained for HTTP Host and TLS SNI/certificate verification, but
-    the TCP connection is made to an already validated address. The connected peer is
-    checked again after connect. Redirects are intentionally not followed; callers may
-    inspect Location and independently validate a subsequent request.
+    TCP connects only to an address that was already validated. The connected peer is
+    checked again after connect. Redirects are never followed automatically.
     """
+
+    method = str(method).strip().upper()
+    if method not in {"GET", "POST"}:
+        raise ValueError("pinned transport currently permits only GET and POST")
+    body = bytes(body or b"")
+    max_request_bytes = max(0, min(int(max_request_bytes), 8_000_000))
+    if len(body) > max_request_bytes:
+        raise ValueError("HTTP request body exceeds configured limit")
 
     parsed = urlparse(str(url))
     hostname, port, addresses = resolve_http_target(url, allow_private=allow_private)
@@ -97,13 +117,20 @@ def pinned_http_get(
     if parsed.query:
         path += "?" + parsed.query
     default_port = 443 if parsed.scheme == "https" else 80
-    host_header = hostname if port == default_port else f"{hostname}:{port}"
-    request_headers = {
+    host_name_for_header = f"[{hostname}]" if ":" in hostname else hostname
+    host_header = host_name_for_header if port == default_port else f"{host_name_for_header}:{port}"
+    request_headers: dict[str, str] = {
         "Host": host_header,
         "Connection": "close",
         "Accept-Encoding": "identity",
-        **{str(k): str(v) for k, v in (headers or {}).items()},
     }
+    for raw_name, raw_value in (headers or {}).items():
+        name, value = _header_pair(str(raw_name), str(raw_value))
+        if name.lower() in {"host", "connection", "content-length", "transfer-encoding"}:
+            raise ValueError(f"caller may not override transport-owned HTTP header: {name}")
+        request_headers[name] = value
+    if body:
+        request_headers["Content-Length"] = str(len(body))
 
     last_error: Exception | None = None
     for address in addresses:
@@ -121,10 +148,10 @@ def pinned_http_get(
                 stream = raw_socket
                 raw_socket = None
 
-            request = [f"GET {path} HTTP/1.1"]
+            request = [f"{method} {path} HTTP/1.1"]
             request.extend(f"{key}: {value}" for key, value in request_headers.items())
-            payload = ("\r\n".join(request) + "\r\n\r\n").encode("iso-8859-1")
-            stream.sendall(payload)
+            wire = ("\r\n".join(request) + "\r\n\r\n").encode("iso-8859-1") + body
+            stream.sendall(wire)
 
             response = http.client.HTTPResponse(stream)
             response.begin()
@@ -158,3 +185,21 @@ def pinned_http_get(
     if last_error is not None:
         raise last_error
     raise OSError("no validated destination address could be connected")
+
+
+def pinned_http_get(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    max_bytes: int = 1_000_000,
+    headers: Mapping[str, str] | None = None,
+    allow_private: bool = False,
+) -> PinnedHTTPResponse:
+    return pinned_http_request(
+        "GET",
+        url,
+        timeout=timeout,
+        max_bytes=max_bytes,
+        headers=headers,
+        allow_private=allow_private,
+    )
