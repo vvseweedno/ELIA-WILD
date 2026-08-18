@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -31,13 +31,24 @@ jobs:
           ruff check elia tests tools
       - name: Repository integrity audit
         run: python tools/audit_repository.py
+      - name: Wheel/package-resource smoke
+        run: |
+          rm -rf dist /tmp/elia-wheel-venv /tmp/elia-wheel-run
+          python -m pip wheel . --no-deps --wheel-dir dist
+          python -m venv /tmp/elia-wheel-venv
+          /tmp/elia-wheel-venv/bin/python -m pip install --no-deps dist/elia_wild-*.whl
+          mkdir -p /tmp/elia-wheel-run
+          cd /tmp/elia-wheel-run
+          /tmp/elia-wheel-venv/bin/python -c "import elia; print(elia.__version__)"
+          /tmp/elia-wheel-venv/bin/elia-wild --preflight
+          /tmp/elia-wheel-venv/bin/elia-doctor
       - name: Known-vulnerability audit
         run: python -m pip_audit
       - name: Test
         run: pytest -q --junitxml=pytest-report.xml
       - name: Upload pytest report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b540449e92b4886f43607fa02 # v4
         with:
           name: pytest-report
           path: pytest-report.xml
