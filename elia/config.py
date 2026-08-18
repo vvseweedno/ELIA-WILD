@@ -18,6 +18,7 @@ class BrainConfig:
     temperature: float
     top_p: float
     thinking: bool
+    model_revision: str | None = None
 
 
 @dataclass(slots=True)
@@ -54,16 +55,16 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _resolve_config_path(config_path: Path, value: str | Path) -> Path:
-    candidate = Path(value)
+    candidate = Path(value).expanduser()
     if candidate.is_absolute():
-        return candidate
+        return candidate.resolve()
     return (config_path.parent / candidate).resolve()
 
 
 def _resolve_project_path(config_path: Path, value: str | Path) -> Path:
-    candidate = Path(value)
+    candidate = Path(value).expanduser()
     if candidate.is_absolute():
-        return candidate
+        return candidate.resolve()
     project_root = config_path.parent.parent
     return (project_root / candidate).resolve()
 
@@ -84,18 +85,23 @@ def _persisted_branch_id(state_dir: Path) -> str | None:
 
 
 def load_config(path: str | Path = "config/genesis.yaml") -> Config:
-    path = Path(path).resolve()
+    path = Path(path).expanduser().resolve()
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     identity = data["identity"]
     runtime = data["runtime"]
     brain = data["brain"]
     gpu_budget = runtime.get("weekly_gpu_budget_hours", runtime.get("weekly_brain_budget_hours", 30))
+
+    state_dir_raw = os.getenv("ELIA_STATE_DIR", str(runtime["state_dir"]))
+    state_dir = _resolve_project_path(path, state_dir_raw)
     auto_checkpoint_raw = os.getenv(
         "ELIA_AUTO_CHECKPOINT_PATH", str(runtime.get("auto_checkpoint_path", "")).strip()
     ).strip()
+    auto_checkpoint_path = (
+        _resolve_project_path(path, auto_checkpoint_raw) if auto_checkpoint_raw else None
+    )
 
-    state_dir = Path(os.getenv("ELIA_STATE_DIR", runtime["state_dir"]))
     explicit_branch = os.getenv("ELIA_BRANCH_ID")
     branch_id = (
         explicit_branch.strip()
@@ -118,6 +124,9 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         str(identity.get("system_prompt", "system_prompt.md")),
     )
     skills_raw = os.getenv("ELIA_SKILLS_DIR", str(data.get("skills_dir", "skills")))
+    model_revision_raw = os.getenv(
+        "ELIA_MODEL_REVISION", str(brain.get("model_revision", "")).strip()
+    ).strip()
 
     return Config(
         identity_name=os.getenv("ELIA_IDENTITY_NAME", identity["name"]),
@@ -132,6 +141,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
             temperature=float(os.getenv("ELIA_TEMPERATURE", brain["temperature"])),
             top_p=float(os.getenv("ELIA_TOP_P", brain["top_p"])),
             thinking=_env_bool("ELIA_THINKING", bool(brain.get("thinking", False))),
+            model_revision=model_revision_raw or None,
         ),
         runtime=RuntimeConfig(
             state_dir=state_dir,
@@ -147,7 +157,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
                     runtime.get("max_in_session_sleep_seconds", 5),
                 )
             ),
-            auto_checkpoint_path=(Path(auto_checkpoint_raw) if auto_checkpoint_raw else None),
+            auto_checkpoint_path=auto_checkpoint_path,
         ),
         raw_tools=dict(data.get("tools", {})),
         subject_core_path=_resolve_config_path(path, subject_core_raw),

@@ -9,6 +9,21 @@ import sqlite3
 from typing import Any
 
 
+# These capabilities are still preserved in the raw audit table, but they are local
+# introspection/no-op operations and must not dominate strategic intervention stats.
+OBSERVATIONAL_ONLY_ACTIONS = frozenset(
+    {
+        "noop",
+        "list_workspace",
+        "read_workspace",
+        "sensorium_recent",
+        "causal_snapshot",
+        "world_model_query",
+        "body_diagnostics",
+    }
+)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -38,6 +53,10 @@ class InterventionExperience:
 
 class CausalMemoryStore:
     """Experience memory over actual interventions and their observed outcomes.
+
+    Every capability execution remains auditable in the raw table. Strategic causal
+    summaries exclude pure local introspection/no-op actions so the organism cannot
+    mistake looking at itself for evidence that an external strategy works.
 
     An action/outcome pair is evidence about an intervention, not proof of causality.
     The store intentionally reports empirical strategy statistics and never upgrades
@@ -78,6 +97,10 @@ class CausalMemoryStore:
                     ON intervention_experiences(transaction_id, id ASC);
                 """
             )
+
+    @staticmethod
+    def is_strategic_intervention(action_name: str) -> bool:
+        return str(action_name) not in OBSERVATIONAL_ONLY_ACTIONS
 
     def record_intervention(
         self,
@@ -149,6 +172,7 @@ class CausalMemoryStore:
         return self._from_row(row) if row else None
 
     def recent(self, limit: int = 32) -> list[InterventionExperience]:
+        """Raw audit history, including introspection/no-op capability executions."""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM intervention_experiences ORDER BY id DESC LIMIT ?",
@@ -156,21 +180,32 @@ class CausalMemoryStore:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def recent_interventions(self, limit: int = 32) -> list[InterventionExperience]:
+        limit = max(1, min(int(limit), 512))
+        # Fetch a larger audit window then filter; this keeps the schema migration-free
+        # while bounding work and preserving older databases.
+        raw = self.recent(min(512, max(limit * 8, limit)))
+        return [item for item in raw if self.is_strategic_intervention(item.action_name)][:limit]
+
     def action_statistics(self, limit: int = 64) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in OBSERVATIONAL_ONLY_ACTIONS)
+        params: list[Any] = list(sorted(OBSERVATIONAL_ONLY_ACTIONS))
+        params.append(max(1, min(int(limit), 256)))
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT action_name,
                        COUNT(*) AS attempts,
                        SUM(success) AS successes,
                        AVG(duration_ms) AS avg_duration_ms,
                        MAX(id) AS last_id
                 FROM intervention_experiences
+                WHERE action_name NOT IN ({placeholders})
                 GROUP BY action_name
                 ORDER BY attempts DESC, action_name ASC
                 LIMIT ?
                 """,
-                (max(1, min(int(limit), 256)),),
+                tuple(params),
             ).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
@@ -191,6 +226,12 @@ class CausalMemoryStore:
 
     def snapshot(self, recent_limit: int = 12) -> dict[str, Any]:
         return {
-            "recent_interventions": [item.as_dict() for item in self.recent(recent_limit)],
+            "recent_interventions": [
+                item.as_dict() for item in self.recent_interventions(recent_limit)
+            ],
             "strategy_statistics": self.action_statistics(),
+            "audit_note": (
+                "Pure local introspection/no-op actions remain in the raw audit table but "
+                "are excluded from strategic intervention summaries."
+            ),
         }

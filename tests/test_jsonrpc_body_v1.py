@@ -55,6 +55,7 @@ def test_jsonrpc_real_http_roundtrip_and_method_allowlist() -> None:
         result = body.call("local", "add", {"a": 20, "b": 22})
         assert result.ok is True
         assert result.data["result"] == 42
+        assert result.data["peer_ip"] == "127.0.0.1"
 
         denied = body.call("local", "delete_everything", {})
         assert denied.ok is False
@@ -63,3 +64,23 @@ def test_jsonrpc_real_http_roundtrip_and_method_allowlist() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_jsonrpc_rejects_oversized_model_controlled_request_before_network() -> None:
+    body = JSONRPCBody(
+        {
+            "enabled": True,
+            "endpoints": {
+                "bounded": {
+                    "enabled": True,
+                    "url": "http://127.0.0.1:9",
+                    "allow_private": True,
+                    "allowed_methods": ["add"],
+                    "max_request_bytes": 1024,
+                }
+            },
+        }
+    )
+    result = body.call("bounded", "add", {"a": "x" * 5000, "b": 1})
+    assert result.ok is False
+    assert "request body exceeds" in (result.error or "")

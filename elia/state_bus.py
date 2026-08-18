@@ -52,10 +52,9 @@ class BusEvent:
 class OrganismStateBus:
     """Durable causal transition journal for organism activity.
 
-    This is intentionally not described as a distributed ACID transaction manager:
-    external side effects cannot be rolled back by SQLite. Instead the bus provides
-    a hash-chained write-ahead history so interrupted cycles are detectable and can
-    be reconciled rather than silently forgotten.
+    External effects cannot be rolled back by SQLite, but every local transition is
+    serialized with BEGIN IMMEDIATE so event sequencing and terminal state changes
+    cannot split across competing writers or ordinary process interruption.
     """
 
     TERMINAL = {"committed", "aborted"}
@@ -66,10 +65,11 @@ class OrganismStateBus:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -107,6 +107,75 @@ class OrganismStateBus:
                 """
             )
 
+    @staticmethod
+    def _require_open(conn: sqlite3.Connection, transaction_id: str) -> None:
+        row = conn.execute(
+            "SELECT status FROM organism_transactions WHERE transaction_id=?",
+            (transaction_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown organism transaction: {transaction_id}")
+        if str(row["status"]) != "open":
+            raise RuntimeError("cannot append to a closed organism transaction")
+
+    def _append_locked(
+        self,
+        conn: sqlite3.Connection,
+        transaction_id: str,
+        *,
+        phase: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+    ) -> BusEvent:
+        self._require_open(conn, transaction_id)
+        payload_json = _canonical(payload or {})
+        timestamp = _now()
+        phase = str(phase).strip()[:64]
+        kind = str(kind).strip()[:128]
+        if not phase or not kind:
+            raise ValueError("phase and kind are required")
+        previous = conn.execute(
+            """
+            SELECT seq, event_hash FROM organism_events
+            WHERE transaction_id=? ORDER BY seq DESC LIMIT 1
+            """,
+            (transaction_id,),
+        ).fetchone()
+        seq = int(previous["seq"]) + 1 if previous else 1
+        prev_hash = str(previous["event_hash"]) if previous else "0" * 64
+        event_hash = _event_hash(
+            transaction_id, seq, timestamp, phase, kind, payload_json, prev_hash
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO organism_events(
+                transaction_id, seq, timestamp, phase, kind, payload_json,
+                prev_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transaction_id,
+                seq,
+                timestamp,
+                phase,
+                kind,
+                payload_json,
+                prev_hash,
+                event_hash,
+            ),
+        )
+        return BusEvent(
+            int(cur.lastrowid),
+            transaction_id,
+            seq,
+            timestamp,
+            phase,
+            kind,
+            json.loads(payload_json),
+            prev_hash,
+            event_hash,
+        )
+
     def begin(
         self,
         label: str,
@@ -120,6 +189,7 @@ class OrganismStateBus:
         if not label:
             raise ValueError("transaction label is required")
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO organism_transactions(
@@ -135,18 +205,15 @@ class OrganismStateBus:
                     str(parent_transaction_id)[:128] if parent_transaction_id else None,
                 ),
             )
-        self.append(transaction_id, phase="begin", kind="TRANSACTION_BEGIN", payload={"label": label})
+            self._append_locked(
+                conn,
+                transaction_id,
+                phase="begin",
+                kind="TRANSACTION_BEGIN",
+                payload={"label": label},
+            )
+            conn.commit()
         return transaction_id
-
-    def _status(self, transaction_id: str) -> str:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT status FROM organism_transactions WHERE transaction_id=?",
-                (transaction_id,),
-            ).fetchone()
-        if row is None:
-            raise ValueError(f"unknown organism transaction: {transaction_id}")
-        return str(row["status"])
 
     def append(
         self,
@@ -156,76 +223,41 @@ class OrganismStateBus:
         kind: str,
         payload: dict[str, Any] | None = None,
     ) -> BusEvent:
-        if self._status(transaction_id) != "open":
-            raise RuntimeError("cannot append to a closed organism transaction")
-        payload_json = _canonical(payload or {})
-        timestamp = _now()
-        phase = str(phase).strip()[:64]
-        kind = str(kind).strip()[:128]
-        if not phase or not kind:
-            raise ValueError("phase and kind are required")
         with self._connect() as conn:
-            previous = conn.execute(
-                """
-                SELECT seq, event_hash FROM organism_events
-                WHERE transaction_id=? ORDER BY seq DESC LIMIT 1
-                """,
-                (transaction_id,),
-            ).fetchone()
-            seq = int(previous["seq"]) + 1 if previous else 1
-            prev_hash = str(previous["event_hash"]) if previous else "0" * 64
-            event_hash = _event_hash(
-                transaction_id, seq, timestamp, phase, kind, payload_json, prev_hash
+            conn.execute("BEGIN IMMEDIATE")
+            event = self._append_locked(
+                conn,
+                transaction_id,
+                phase=phase,
+                kind=kind,
+                payload=payload,
             )
-            cur = conn.execute(
-                """
-                INSERT INTO organism_events(
-                    transaction_id, seq, timestamp, phase, kind, payload_json,
-                    prev_hash, event_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    transaction_id,
-                    seq,
-                    timestamp,
-                    phase,
-                    kind,
-                    payload_json,
-                    prev_hash,
-                    event_hash,
-                ),
-            )
-            event_id = int(cur.lastrowid)
-        return BusEvent(
-            event_id,
-            transaction_id,
-            seq,
-            timestamp,
-            phase,
-            kind,
-            json.loads(payload_json),
-            prev_hash,
-            event_hash,
-        )
+            conn.commit()
+            return event
 
     def _finish(self, transaction_id: str, status: str, payload: dict[str, Any]) -> BusEvent:
         if status not in self.TERMINAL:
             raise ValueError(f"invalid terminal state: {status}")
-        event = self.append(
-            transaction_id,
-            phase="end",
-            kind="TRANSACTION_COMMIT" if status == "committed" else "TRANSACTION_ABORT",
-            payload=payload,
-        )
         with self._connect() as conn:
-            conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            event = self._append_locked(
+                conn,
+                transaction_id,
+                phase="end",
+                kind="TRANSACTION_COMMIT" if status == "committed" else "TRANSACTION_ABORT",
+                payload=payload,
+            )
+            cur = conn.execute(
                 """
                 UPDATE organism_transactions
                 SET status=?, finished_at=? WHERE transaction_id=? AND status='open'
                 """,
                 (status, _now(), transaction_id),
             )
-        return event
+            if cur.rowcount != 1:
+                raise RuntimeError("transaction terminal state changed concurrently")
+            conn.commit()
+            return event
 
     def commit(self, transaction_id: str, payload: dict[str, Any] | None = None) -> BusEvent:
         return self._finish(transaction_id, "committed", payload or {})
@@ -296,6 +328,9 @@ class OrganismStateBus:
     def reconcile_incomplete(self, reason: str = "recovered after process interruption") -> int:
         count = 0
         for item in self.incomplete(1000):
-            self.abort(str(item["transaction_id"]), reason)
+            try:
+                self.abort(str(item["transaction_id"]), reason)
+            except RuntimeError:
+                continue
             count += 1
         return count

@@ -10,6 +10,9 @@ from typing import Any
 
 
 MAX_STORED_PAYLOAD_BYTES = 512_000
+FULL_PAYLOAD_WINDOW = 512
+COMPACTION_INTERVAL = 64
+COMPACTION_BATCH = 512
 
 
 def _now() -> str:
@@ -60,9 +63,10 @@ class Observation:
 class ObservationStore:
     """Durable normalized sensorium shared by all external adapters.
 
-    Observations are evidence, not authority. The store preserves provenance and a
-    hash of the complete payload even when an oversized payload must be represented
-    by a bounded preview in SQLite.
+    Fresh observations retain bounded payloads. Older payloads are compacted to their
+    original digest and byte count while metadata/provenance remain queryable. This
+    preserves evidence identity without allowing long-lived operation to accumulate
+    an unbounded archive of page bodies and tool output.
     """
 
     def __init__(self, path: Path):
@@ -71,10 +75,11 @@ class ObservationStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -120,6 +125,46 @@ class ObservationStore:
             "preview": preview,
         }
         return _canonical_json(bounded), digest
+
+    def compact_aged_payloads(
+        self,
+        *,
+        keep_recent: int = FULL_PAYLOAD_WINDOW,
+        batch: int = COMPACTION_BATCH,
+    ) -> int:
+        keep_recent = max(1, int(keep_recent))
+        batch = max(1, min(int(batch), 4096))
+        with self._connect() as conn:
+            cutoff_row = conn.execute(
+                "SELECT id FROM observations ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (keep_recent - 1,),
+            ).fetchone()
+            if cutoff_row is None:
+                return 0
+            cutoff = int(cutoff_row["id"])
+            rows = conn.execute(
+                """
+                SELECT id, payload_json, payload_sha256
+                FROM observations
+                WHERE id < ? AND payload_json NOT LIKE '%\"_compacted\":true%'
+                ORDER BY id ASC LIMIT ?
+                """,
+                (cutoff, batch),
+            ).fetchall()
+            for row in rows:
+                raw = str(row["payload_json"]).encode("utf-8")
+                compacted = _canonical_json(
+                    {
+                        "_compacted": True,
+                        "original_sha256": str(row["payload_sha256"]),
+                        "previous_stored_bytes": len(raw),
+                    }
+                )
+                conn.execute(
+                    "UPDATE observations SET payload_json=? WHERE id=?",
+                    (compacted, int(row["id"])),
+                )
+            return len(rows)
 
     def record(
         self,
@@ -170,6 +215,8 @@ class ObservationStore:
                 ),
             )
             observation_id = int(cur.lastrowid)
+        if observation_id % COMPACTION_INTERVAL == 0:
+            self.compact_aged_payloads()
         observation = self.get(observation_id)
         if observation is None:
             raise RuntimeError("observation disappeared after insert")

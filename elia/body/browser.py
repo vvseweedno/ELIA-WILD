@@ -4,7 +4,7 @@ import atexit
 from hashlib import sha256
 import importlib.util
 from pathlib import Path
-import re
+from urllib.parse import urlparse
 from typing import Any
 from uuid import uuid4
 
@@ -13,7 +13,14 @@ from .types import BodyCapability, BodyResult
 
 
 class BrowserBody:
-    """Playwright-backed browser organ with an isolated ephemeral BrowserContext."""
+    """Playwright-backed browser organ with an isolated ephemeral BrowserContext.
+
+    Application-layer URL validation cannot fully defeat DNS rebinding, WebSockets or
+    browser network-stack races. Enabling this organ therefore requires an explicit
+    network-isolation attestation from the deployment layer (container/firewall policy
+    denying loopback, RFC1918, link-local and metadata ranges unless intentionally
+    permitted). Interactive actions additionally require an origin allow-list.
+    """
 
     def __init__(self, workspace: Path, config: dict[str, Any] | None = None):
         self.workspace = Path(workspace).resolve()
@@ -30,15 +37,46 @@ class BrowserBody:
         return importlib.util.find_spec("playwright") is not None
 
     @property
+    def network_isolation_confirmed(self) -> bool:
+        return bool(self.config.get("network_isolation_confirmed", False))
+
+    @property
     def enabled(self) -> bool:
-        return bool(self.config.get("enabled", False)) and self.installed
+        return (
+            bool(self.config.get("enabled", False))
+            and self.installed
+            and self.network_isolation_confirmed
+        )
+
+    def _trusted_interaction_origins(self) -> set[str]:
+        raw = self.config.get("trusted_interaction_origins") or []
+        if not isinstance(raw, list):
+            return set()
+        return {str(item).strip().lower().rstrip("/") for item in raw if str(item).strip()}
 
     @property
     def interaction_enabled(self) -> bool:
-        return self.enabled and bool(self.config.get("interaction_enabled", False))
+        return (
+            self.enabled
+            and bool(self.config.get("interaction_enabled", False))
+            and bool(self._trusted_interaction_origins())
+        )
 
     def capabilities(self) -> list[BodyCapability]:
-        readiness = "ready" if self.installed else "playwright_not_installed"
+        if not bool(self.config.get("enabled", False)):
+            readiness = "disabled"
+        elif not self.installed:
+            readiness = "playwright_not_installed"
+        elif not self.network_isolation_confirmed:
+            readiness = "network_isolation_required"
+        else:
+            readiness = "ready"
+        interaction_readiness = readiness
+        if readiness == "ready" and bool(self.config.get("interaction_enabled", False)):
+            if not self._trusted_interaction_origins():
+                interaction_readiness = "trusted_interaction_origins_required"
+        elif readiness == "ready":
+            interaction_readiness = "interaction_disabled"
         return [
             BodyCapability(
                 "browser_navigate",
@@ -46,10 +84,10 @@ class BrowserBody:
                 "{url: str}",
                 "configured_browser_read",
                 "network navigation and page resource requests",
-                "public_http_https_or_explicit_private_scope",
+                "deployment_isolated_public_http_https_or_explicit_private_scope",
                 "network",
                 self.enabled,
-                readiness if self.config.get("enabled", False) else "disabled",
+                readiness,
             ),
             BodyCapability(
                 "browser_snapshot",
@@ -60,29 +98,29 @@ class BrowserBody:
                 "none",
                 "low",
                 self.enabled,
-                readiness if self.config.get("enabled", False) else "disabled",
+                readiness,
             ),
             BodyCapability(
                 "browser_click",
-                "Click one locator in the current page using role/text/css targeting.",
+                "Click one locator only on a configured trusted interaction origin.",
                 "{locator: {kind: role|text|css, role?: str, name?: str, text?: str, selector?: str}}",
                 "configured_browser_interaction",
-                "may cause remote state changes through the web application",
-                "current_page",
+                "may cause remote state changes through an allow-listed web origin",
+                "current_trusted_origin",
                 "network",
                 self.interaction_enabled,
-                "ready" if self.interaction_enabled else "interaction_disabled",
+                interaction_readiness,
             ),
             BodyCapability(
                 "browser_fill",
-                "Fill one form control in the current page without submitting it.",
+                "Fill one form control only on a configured trusted interaction origin without submitting it.",
                 "{locator: {...}, value: str}",
                 "configured_browser_interaction",
-                "changes current browser form state; may trigger application events",
-                "current_page",
+                "changes current browser form state and may trigger application events",
+                "current_trusted_origin",
                 "network",
                 self.interaction_enabled,
-                "ready" if self.interaction_enabled else "interaction_disabled",
+                interaction_readiness,
             ),
             BodyCapability(
                 "browser_screenshot",
@@ -93,13 +131,18 @@ class BrowserBody:
                 "none",
                 "low",
                 self.enabled,
-                readiness if self.config.get("enabled", False) else "disabled",
+                readiness,
             ),
         ]
 
     def _ensure_started(self) -> None:
         if not self.enabled:
-            reason = "Playwright dependency is missing" if not self.installed else "browser body is disabled"
+            if not self.installed:
+                reason = "Playwright dependency is missing"
+            elif not self.network_isolation_confirmed:
+                reason = "browser network isolation has not been confirmed"
+            else:
+                reason = "browser body is disabled"
             raise RuntimeError(reason)
         if self._page is not None:
             return
@@ -114,6 +157,7 @@ class BrowserBody:
         self._context = self._browser.new_context(
             viewport={"width": int(self.config.get("viewport_width", 1280)), "height": int(self.config.get("viewport_height", 720))},
             accept_downloads=False,
+            service_workers="block",
         )
         allow_private = bool(self.config.get("allow_private", False))
 
@@ -140,6 +184,24 @@ class BrowserBody:
                 playwright.stop()
             except Exception:
                 pass
+
+    @staticmethod
+    def _origin(url: str) -> str:
+        parsed = urlparse(str(url))
+        if parsed.scheme in {"about", "data", "blob"}:
+            return str(url).lower().rstrip("/")
+        if not parsed.scheme or not parsed.hostname:
+            return ""
+        port = parsed.port
+        default = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
+        suffix = "" if port is None or default else f":{port}"
+        return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{suffix}"
+
+    def _assert_interaction_origin(self) -> None:
+        self._ensure_started()
+        origin = self._origin(self._page.url)
+        if origin not in self._trusted_interaction_origins():
+            raise PermissionError(f"browser interaction origin is not allow-listed: {origin or self._page.url!r}")
 
     def _locator(self, spec: dict[str, Any]) -> Any:
         self._ensure_started()
@@ -185,7 +247,7 @@ class BrowserBody:
 
     def navigate(self, url: str) -> BodyResult:
         if not self.enabled:
-            return BodyResult(False, "browser_navigate", error="browser body is disabled or Playwright is unavailable")
+            return BodyResult(False, "browser_navigate", error="browser body is disabled/unavailable")
         assert_http_url(url, allow_private=bool(self.config.get("allow_private", False)))
         self._ensure_started()
         response = self._page.goto(
@@ -193,6 +255,8 @@ class BrowserBody:
             wait_until="domcontentloaded",
             timeout=int(self.config.get("timeout_ms", 20_000)),
         )
+        final_url = self._page.url
+        assert_http_url(final_url, allow_private=bool(self.config.get("allow_private", False)))
         data = self._snapshot()
         data["status_code"] = response.status if response is not None else None
         return BodyResult(True, "browser_navigate", data)
@@ -205,19 +269,27 @@ class BrowserBody:
 
     def click(self, locator: dict[str, Any]) -> BodyResult:
         if not self.interaction_enabled:
-            return BodyResult(False, "browser_click", error="browser interaction is disabled")
-        target = self._locator(locator)
-        target.click(timeout=int(self.config.get("timeout_ms", 20_000)))
-        return BodyResult(True, "browser_click", self._snapshot())
+            return BodyResult(False, "browser_click", error="browser interaction is disabled/unavailable")
+        try:
+            self._assert_interaction_origin()
+            target = self._locator(locator)
+            target.click(timeout=int(self.config.get("timeout_ms", 20_000)))
+            return BodyResult(True, "browser_click", self._snapshot())
+        except Exception as exc:
+            return BodyResult(False, "browser_click", error=f"{type(exc).__name__}: {exc}")
 
     def fill(self, locator: dict[str, Any], value: str) -> BodyResult:
         if not self.interaction_enabled:
-            return BodyResult(False, "browser_fill", error="browser interaction is disabled")
+            return BodyResult(False, "browser_fill", error="browser interaction is disabled/unavailable")
         if len(str(value)) > 32_000:
             return BodyResult(False, "browser_fill", error="fill value exceeds 32k characters")
-        target = self._locator(locator)
-        target.fill(str(value), timeout=int(self.config.get("timeout_ms", 20_000)))
-        return BodyResult(True, "browser_fill", self._snapshot())
+        try:
+            self._assert_interaction_origin()
+            target = self._locator(locator)
+            target.fill(str(value), timeout=int(self.config.get("timeout_ms", 20_000)))
+            return BodyResult(True, "browser_fill", self._snapshot())
+        except Exception as exc:
+            return BodyResult(False, "browser_fill", error=f"{type(exc).__name__}: {exc}")
 
     def screenshot(self, full_page: bool = False) -> BodyResult:
         self._ensure_started()

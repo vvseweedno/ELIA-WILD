@@ -34,6 +34,7 @@ runtime:
 brain:
   backend: transformers_4bit
   model_id: Qwen/Qwen3.5-9B
+  model_revision: e0330a142393d4516eca6ab0145ce66ac513e842
   base_url: http://127.0.0.1:8000/v1
   timeout_seconds: 180
   max_tokens: 1024
@@ -55,6 +56,8 @@ tools:
       browser: chromium
       headless: true
       allow_private: false
+      network_isolation_confirmed: false
+      trusted_interaction_origins: []
       timeout_ms: 20000
       max_text_chars: 50000
       viewport_width: 1280
@@ -62,6 +65,8 @@ tools:
     process:
       enabled: false
       executables: {}
+      sandbox_command: []
+      unsafe_allow_unisolated: false
       timeout_seconds: 30
       max_timeout_seconds: 120
     mcp:

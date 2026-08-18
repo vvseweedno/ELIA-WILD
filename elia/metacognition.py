@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .redaction import safe_tool_result
+
 
 @dataclass(frozen=True, slots=True)
 class Forecast:
@@ -32,7 +34,8 @@ class MetacognitionStore:
     """Persistent forecast/outcome calibration state.
 
     Forecasts are committed before action execution so later explanations cannot
-    retroactively change what ELIA expected to happen.
+    retroactively change what ELIA expected. Resolution stores only a redacted result
+    descriptor/fingerprint, never raw tool output.
     """
 
     def __init__(self, path: Path):
@@ -41,9 +44,10 @@ class MetacognitionStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -132,6 +136,7 @@ class MetacognitionStore:
             return int(cur.lastrowid)
 
     def resolve(self, forecast_id: int, *, success: bool, observation: dict[str, Any]) -> float:
+        safe_observation = safe_tool_result(observation)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT success_probability, resolved FROM cognitive_forecasts WHERE id=?",
@@ -157,7 +162,7 @@ class MetacognitionStore:
                 (
                     self.now(),
                     1 if success else 0,
-                    json.dumps(observation, ensure_ascii=False, sort_keys=True)[:12000],
+                    json.dumps(safe_observation, ensure_ascii=False, sort_keys=True)[:12000],
                     brier,
                     int(forecast_id),
                 ),

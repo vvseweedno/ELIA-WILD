@@ -74,10 +74,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sqlite_dump_digest(path: Path) -> str:
+    """Digest logical SQLite contents, independent of WAL/page layout."""
+    digest = sha256()
+    with sqlite3.connect(path) as conn:
+        for statement in conn.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    temp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temp, path)
 
 
@@ -91,11 +104,10 @@ def _safe_member(name: str) -> PurePosixPath:
 class CheckpointManager:
     """Authenticated, versioned checkpoint export/restore for ELIA state.
 
-    The authentication key is deliberately external to the checkpoint and repository.
-    A local anchor detects rollback on an existing machine. On a completely fresh
-    machine, strict rollback protection requires an externally trusted expected digest.
-    Identity fingerprints are carried as authenticated metadata when the current body
-    has established them; legacy v1 checkpoints without those fields remain readable.
+    Export is fail-closed: Chronicle, logical SQLite state and workspace must remain
+    stable throughout capture. The authentication key is external to the checkpoint.
+    A local anchor detects rollback on an existing machine; a fresh machine requires
+    an externally trusted expected digest for strict rollback protection.
     """
 
     def __init__(
@@ -105,7 +117,7 @@ class CheckpointManager:
         key: bytes,
         identity_fingerprint: str | None = None,
     ):
-        self.state_dir = Path(state_dir)
+        self.state_dir = Path(state_dir).resolve()
         self.identity_name = identity_name
         self.identity_fingerprint = (
             str(identity_fingerprint).strip() if identity_fingerprint else None
@@ -131,13 +143,32 @@ class CheckpointManager:
 
     def _backup_sqlite(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        source_conn = sqlite3.connect(source)
+        source_conn = sqlite3.connect(source, timeout=30.0)
         dest_conn = sqlite3.connect(destination)
         try:
+            source_conn.execute("PRAGMA busy_timeout=30000")
             source_conn.backup(dest_conn)
         finally:
             dest_conn.close()
             source_conn.close()
+
+    def _workspace_fingerprint(self) -> str:
+        workspace = self.state_dir / "workspace"
+        digest = sha256()
+        if not workspace.exists():
+            return digest.hexdigest()
+        for source in sorted(workspace.rglob("*")):
+            relative = source.relative_to(workspace).as_posix()
+            if source.is_symlink():
+                raise CheckpointError(f"workspace symlink is not checkpointable: {relative}")
+            kind = "D" if source.is_dir() else "F" if source.is_file() else "O"
+            digest.update(f"{kind}\0{relative}\0".encode("utf-8"))
+            if source.is_file():
+                digest.update(str(source.stat().st_size).encode("ascii"))
+                digest.update(b"\0")
+                digest.update(_sha256_file(source).encode("ascii"))
+                digest.update(b"\n")
+        return digest.hexdigest()
 
     def _copy_workspace(self, destination: Path) -> None:
         workspace = self.state_dir / "workspace"
@@ -168,7 +199,8 @@ class CheckpointManager:
 
     def export(self, destination: Path) -> CheckpointInfo:
         destination = Path(destination)
-        if not (self.state_dir / "memory.sqlite3").exists():
+        memory_path = self.state_dir / "memory.sqlite3"
+        if not memory_path.exists():
             raise CheckpointError("cannot checkpoint before memory.sqlite3 exists")
 
         chronicle = Chronicle(self.state_dir / "chronicle.jsonl")
@@ -176,13 +208,24 @@ class CheckpointManager:
         if not valid:
             raise CheckpointError(f"Chronicle integrity failure: {error}")
         before_seq, before_hash = chronicle.head()
+        workspace_before = self._workspace_fingerprint()
 
         memory = self._memory()
         previous_counter = int(memory.get_meta("checkpoint_counter", "0") or "0")
         previous_digest = memory.get_meta("checkpoint_digest", "") or ""
         counter = previous_counter + 1
-
         persisted_identity_fp = memory.get_meta("identity_bundle_fingerprint")
+        identity_meta = {
+            "boot_count": memory.get_meta("boot_count", "0"),
+            "genesis_initialized": memory.get_meta("genesis_initialized", "0"),
+            "identity_bundle_fingerprint": persisted_identity_fp or self.identity_fingerprint,
+            "subject_core_fingerprint": memory.get_meta("subject_core_fingerprint"),
+            "constitution_fingerprint": memory.get_meta("constitution_fingerprint"),
+            "prompt_fingerprint": memory.get_meta("prompt_fingerprint"),
+            "self_model_fingerprint": memory.get_meta("self_model_fingerprint"),
+            "body_version": memory.get_meta("body_version"),
+            "branch_id": memory.get_meta("branch_id"),
+        }
         if (
             self.identity_fingerprint
             and persisted_identity_fp
@@ -200,8 +243,12 @@ class CheckpointManager:
                 temp_dir = Path(temp_dir_raw)
                 staged_state = temp_dir / "state"
                 staged_state.mkdir(parents=True)
+                staged_memory = staged_state / "memory.sqlite3"
+                verification_memory = temp_dir / "memory-after.sqlite3"
 
-                self._backup_sqlite(self.state_dir / "memory.sqlite3", staged_state / "memory.sqlite3")
+                self._backup_sqlite(memory_path, staged_memory)
+                staged_sqlite_digest = _sqlite_dump_digest(staged_memory)
+
                 chronicle_path = self.state_dir / "chronicle.jsonl"
                 if chronicle_path.exists():
                     shutil.copy2(chronicle_path, staged_state / "chronicle.jsonl")
@@ -209,11 +256,25 @@ class CheckpointManager:
                     (staged_state / "chronicle.jsonl").write_text("", encoding="utf-8")
                 self._copy_workspace(staged_state)
 
+                # A second logical SQLite backup plus source fingerprints turn a
+                # concurrent mutation into an explicit failed checkpoint rather than
+                # a signed but internally inconsistent state bundle.
+                self._backup_sqlite(memory_path, verification_memory)
+                sqlite_after = _sqlite_dump_digest(verification_memory)
+                workspace_after = self._workspace_fingerprint()
                 valid_after, error_after = chronicle.verify()
                 after_seq, after_hash = chronicle.head()
+                changed = []
                 if not valid_after or (after_seq, after_hash) != (before_seq, before_hash):
+                    changed.append("chronicle")
+                if sqlite_after != staged_sqlite_digest:
+                    changed.append("sqlite")
+                if workspace_after != workspace_before:
+                    changed.append("workspace")
+                if changed:
+                    detail = ", ".join(changed)
                     raise CheckpointError(
-                        "state changed while checkpointing; stop the runtime and retry"
+                        f"state changed while checkpointing ({detail}); stop/quiesce the runtime and retry"
                         + (f": {error_after}" if error_after else "")
                     )
 
@@ -225,17 +286,10 @@ class CheckpointManager:
                     "checkpoint_counter": counter,
                     "previous_checkpoint_digest": previous_digest,
                     "chronicle": {"seq": before_seq, "hash": before_hash},
-                    "identity_meta": {
-                        "boot_count": memory.get_meta("boot_count", "0"),
-                        "genesis_initialized": memory.get_meta("genesis_initialized", "0"),
-                        "identity_bundle_fingerprint": persisted_identity_fp
-                        or self.identity_fingerprint,
-                        "subject_core_fingerprint": memory.get_meta("subject_core_fingerprint"),
-                        "constitution_fingerprint": memory.get_meta("constitution_fingerprint"),
-                        "prompt_fingerprint": memory.get_meta("prompt_fingerprint"),
-                        "self_model_fingerprint": memory.get_meta("self_model_fingerprint"),
-                        "body_version": memory.get_meta("body_version"),
-                        "branch_id": memory.get_meta("branch_id"),
+                    "identity_meta": identity_meta,
+                    "capture_consistency": {
+                        "sqlite_logical_sha256": staged_sqlite_digest,
+                        "workspace_sha256": workspace_before,
                     },
                     "files": self._manifest_files(staged_state),
                 }
@@ -389,6 +443,11 @@ class CheckpointManager:
                 result = conn.execute("PRAGMA integrity_check").fetchone()
                 if not result or result[0] != "ok":
                     raise CheckpointError(f"SQLite integrity check failed: {result}")
+
+            consistency = manifest.get("capture_consistency") or {}
+            expected_sqlite = str(consistency.get("sqlite_logical_sha256") or "")
+            if expected_sqlite and _sqlite_dump_digest(memory_path) != expected_sqlite:
+                raise CheckpointError("restored SQLite logical state does not match capture digest")
 
             restored_chronicle = Chronicle(staging / "chronicle.jsonl")
             valid, error = restored_chronicle.verify()

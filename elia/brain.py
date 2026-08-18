@@ -7,6 +7,7 @@ from typing import Any, Protocol
 import httpx
 
 from .config import BrainConfig
+from .provider_context import provider_context
 
 
 @dataclass(slots=True)
@@ -34,8 +35,7 @@ Use only declared capabilities, choose exactly one action, preserve uncertainty,
 
 def _system_and_public_context(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     system_prompt = str(context.get("_system_prompt") or FALLBACK_SYSTEM_PROMPT)
-    public = {key: value for key, value in context.items() if not str(key).startswith("_")}
-    return system_prompt, public
+    return system_prompt, provider_context(context)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -212,13 +212,15 @@ class Transformers4BitBrain:
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.float16,
         )
-        self.processor = AutoProcessor.from_pretrained(config.model_id)
+        revision_args = {"revision": config.model_revision} if config.model_revision else {}
+        self.processor = AutoProcessor.from_pretrained(config.model_id, **revision_args)
         self.model = AutoModelForMultimodalLM.from_pretrained(
             config.model_id,
             device_map="auto",
             quantization_config=quantization,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
+            **revision_args,
         )
         self.model.eval()
 

@@ -7,6 +7,8 @@ import json
 import sqlite3
 from typing import Any
 
+from .redaction import redact_serialized_action_record
+
 
 @dataclass(slots=True)
 class MemoryRecord:
@@ -41,10 +43,11 @@ class MemoryStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -129,6 +132,9 @@ class MemoryStore:
         metadata: dict[str, Any] | None = None,
     ) -> int:
         importance = max(0.0, min(1.0, float(importance)))
+        kind = str(kind)[:64]
+        if kind == "action_result":
+            content = redact_serialized_action_record(content)
         with self._connect() as conn:
             cur = conn.execute(
                 """
@@ -170,7 +176,15 @@ class MemoryStore:
             for row in reversed(rows)
         ]
 
+    def count(self) -> int:
+        """Return memory cardinality without materializing autobiographical records."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM memories").fetchone()
+        return int(row["count"] if row else 0)
+
     def set_meta(self, key: str, value: str) -> None:
+        if str(key) == "last_action":
+            value = redact_serialized_action_record(value)
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES(?, ?) "
