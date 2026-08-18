@@ -7,7 +7,7 @@ layers:
 organs:
   - id: epistemic_registry
     layer: epistemic_ecosystem
-    kind: config
+    kind: artifact
     path: config/epistemic.yaml
     required: true
     maturity: prototype
