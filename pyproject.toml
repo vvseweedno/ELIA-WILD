@@ -48,6 +48,21 @@ elia-mcp = "elia.mcp_server:main"
 [tool.setuptools.packages.find]
 include = ["elia*"]
 
+# The source tree keeps one canonical operator-facing config/ and skills/ tree.
+# Built wheels install those exact files under <prefix>/share/elia-wild so runtime
+# identity/configuration resources remain available outside a repository checkout.
+[tool.setuptools.data-files]
+"share/elia-wild/config" = [
+  "config/*.yaml",
+  "config/*.md",
+]
+"share/elia-wild/config/organism.d" = [
+  "config/organism.d/*.yaml",
+]
+"share/elia-wild/skills" = [
+  "skills/*.yaml",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
