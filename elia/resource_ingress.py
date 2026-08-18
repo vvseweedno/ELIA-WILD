@@ -420,11 +420,11 @@ class ResourceIngressRegistry:
         work = self.resource_ecology.work_item(int(work_item_id))
         if work is None:
             raise ValueError(f"work item does not exist: {work_item_id}")
-        if work.status != "accepted":
-            raise ValueError("linked resource ingress requires an accepted work item")
+        if work.status not in {"accepted", "realized"}:
+            raise ValueError("linked resource ingress requires accepted or already-realized work")
         profile = self.resource_ecology.profile(work.opportunity_id)
         if profile is None:
-            raise ValueError("accepted work has no resource profile")
+            raise ValueError("linked work has no resource profile")
         if profile.target_asset != asset or profile.target_unit != unit:
             raise ValueError("resource verifier target does not match accepted work resource profile")
 
@@ -519,6 +519,10 @@ class ResourceIngressRegistry:
             unit = _clean(verifier["unit"], field="unit", maximum=64)
             kind = _clean(verifier["kind"], field="kind", maximum=64)
             authority = _clean(verifier["authority"], field="authority", maximum=256)
+            # Validate local signing authority before any network call. This prevents an
+            # accidental key_env reuse in MCP transport credentials from leaking the
+            # verifier signing key even when the remote call would otherwise succeed.
+            key = self._key(verifier)
             self._validate_work_target(work_item_id, asset=asset, unit=unit)
 
             raw = self.mcp.call(
@@ -623,7 +627,6 @@ class ResourceIngressRegistry:
                     raise PermissionError("existing verified ingress event conflicts with current verifier evidence")
                 resource_event_id = int(existing["id"])
             else:
-                key = self._key(verifier)
                 registry = VerificationRegistry({authority: key})
                 economy = EconomyStore(self.store.path, verification_registry=registry)
                 claim = EconomyStore.resource_claim(
@@ -647,14 +650,27 @@ class ResourceIngressRegistry:
 
             realized = self.store.mark_realized(reservation.id, resource_event_id)
             if work_item_id is not None:
-                self.resource_ecology.link_verified_resource_event(
-                    work_item_id=int(work_item_id),
-                    resource_event_id=resource_event_id,
-                    evidence=(
-                        f"Independent resource verifier {verifier_name!r} observed external event "
-                        f"{reservation.external_event_sha256}."
-                    ),
-                )
+                work = self.resource_ecology.work_item(int(work_item_id))
+                if work is None:
+                    raise RuntimeError("linked work disappeared during resource realization")
+                if work.status == "accepted":
+                    self.resource_ecology.link_verified_resource_event(
+                        work_item_id=int(work_item_id),
+                        resource_event_id=resource_event_id,
+                        evidence=(
+                            f"Independent resource verifier {verifier_name!r} observed external event "
+                            f"{reservation.external_event_sha256}."
+                        ),
+                    )
+                elif work.status == "realized":
+                    if work.resource_event_id != resource_event_id:
+                        raise PermissionError(
+                            "replayed ingress conflicts with the resource event already linked to realized work"
+                        )
+                else:
+                    raise PermissionError(
+                        "linked work changed to an invalid state during resource realization"
+                    )
             self.state_bus.commit(
                 transaction_id,
                 {
