@@ -1,0 +1,90 @@
+schema_version: 8
+identity_id: elia-wild
+
+layers:
+  epistemic_ecosystem: differentiated temporary cognitive organs, evidence views, biographies and neutral adjudication
+
+organs:
+  - id: epistemic_registry
+    layer: epistemic_ecosystem
+    kind: config
+    path: config/epistemic.yaml
+    required: true
+    maturity: prototype
+    authority: none
+    role: >-
+      Defines exactly twelve Pearson-derived cognitive attention/evidence policies.
+      Archetype labels are not identities, permissions or truth authorities.
+
+  - id: cognitive_biographies
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic
+    symbol: CognitiveBiographyStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Persists organ-specific packet/session history and weak operational credit while
+      explicitly refusing to interpret successful downstream actions as truth labels.
+
+  - id: evidence_view_projector
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_views
+    symbol: EvidenceViewProjector
+    required: true
+    maturity: prototype
+    authority: none
+    role: >-
+      Gives different organs different privacy-bounded evidence diets derived only
+      from the provider-safe context boundary. Absence from a view is not evidence of absence.
+
+  - id: epistemic_view_store
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_views
+    symbol: EpistemicViewStore
+    required: true
+    maturity: prototype
+    authority: local_state
+    role: >-
+      Stores evidence-view digests, included field sets, size and failure state without
+      duplicating raw private context into a second long-lived memory store.
+
+  - id: resilient_epistemic_cortex
+    layer: epistemic_ecosystem
+    kind: python
+    module: elia.epistemic_views
+    symbol: ResilientEpistemicCortex
+    required: true
+    maturity: prototype
+    authority: cognition_only
+    role: >-
+      Runs Executive-gated divergence and identity-neutral adjudication. Individual
+      organ/judge failures degrade safely; below quorum no packet is promoted to synthesis.
+
+  - id: epistemic_runtime
+    layer: agency
+    kind: python
+    module: elia.epistemic_runtime
+    symbol: EpistemicOrganismRuntime
+    required: true
+    maturity: prototype
+    authority: composed
+    role: >-
+      Genesis 1.6 runtime integrating differentiated cognition inside the existing
+      Executive energy envelope while preserving one Self, one assurance boundary and
+      Genesis 1.5 as direct rollback ancestry.
+
+  - id: epistemic_diversity_ablation
+    layer: research
+    kind: python
+    module: elia.research.epistemic_ablation
+    symbol: EpistemicAblationHarness
+    required: false
+    maturity: prototype
+    authority: none
+    role: >-
+      Equal-call/token-budget comparison of Pearson-12, homogeneous, random-role and
+      domain-expert conditions. Built-in diversity metrics never masquerade as accuracy.
