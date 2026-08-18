@@ -56,7 +56,7 @@ class AblationBrain:
         )
 
 
-def test_all_ablation_conditions_receive_identical_call_and_token_budget() -> None:
+def test_all_conditions_receive_identical_calls_and_output_token_ceilings() -> None:
     registry = EpistemicRegistry.load(ROOT / "config" / "epistemic.yaml")
     harness = EpistemicAblationHarness(registry)
     brains: list[AblationBrain] = []
@@ -74,7 +74,9 @@ def test_all_ablation_conditions_receive_identical_call_and_token_budget() -> No
         max_tokens_per_call=180,
         seed=7,
     )
-    assert result["equal_budget"] is True
+    assert result["equal_call_and_output_ceiling"] is True
+    assert result["exact_equal_input_token_budget"] is None
+    assert result["exact_equal_total_token_budget"] is None
     assert len(brains) == 4
     for brain in brains:
         assert len(brain.calls) == 5
@@ -82,8 +84,28 @@ def test_all_ablation_conditions_receive_identical_call_and_token_budget() -> No
     for condition in harness.CONDITIONS:
         metrics = result["conditions"][condition]["metrics"]
         assert metrics["call_count"] == 5
-        assert metrics["max_tokens_per_call"] == 180
-    assert "must not be inferred" in result["interpretation_boundary"]
+        assert metrics["max_output_tokens_per_call"] == 180
+        assert metrics["output_token_ceiling_total"] == 900
+        assert metrics["input_token_total"] is None
+    assert "Exact input/total-token equality" in result["interpretation_boundary"]
+
+
+def test_tokenizer_counter_makes_input_budget_inequality_explicit() -> None:
+    registry = EpistemicRegistry.load(ROOT / "config" / "epistemic.yaml")
+    harness = EpistemicAblationHarness(registry)
+    result = harness.compare(
+        AblationBrain,
+        question="q",
+        public_context="same evidence",
+        call_budget=3,
+        max_tokens_per_call=120,
+        token_counter=lambda text: len(text.split()),
+    )
+    assert result["equal_call_and_output_ceiling"] is True
+    assert isinstance(result["exact_equal_input_token_budget"], bool)
+    # Different role-policy prompts are not silently advertised as exactly equal input compute.
+    assert result["exact_equal_input_token_budget"] is False
+    assert result["exact_equal_total_token_budget"] is False
 
 
 def test_harness_measures_diversity_without_calling_it_accuracy() -> None:
