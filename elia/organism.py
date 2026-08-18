@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from .paths import default_config_dir
 from .research.registry import RESEARCH_REGISTRY, maturity_summary
 
 
@@ -32,7 +33,7 @@ def _fingerprint(value: Any) -> str:
 
 
 def default_manifest_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "organism.yaml"
+    return default_config_dir() / "organism.yaml"
 
 
 def _load_yaml_object(path: Path) -> dict[str, Any]:
