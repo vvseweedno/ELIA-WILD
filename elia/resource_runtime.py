@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import json
 from typing import Any
 
 from .brain import Decision
@@ -22,10 +21,13 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
     RESOURCE_ECOLOGY_CONTEXT_LIMIT = 12
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        database = self.config.runtime.state_dir / "memory.sqlite3"
+        config = args[0] if args else kwargs.get("config")
+        if config is None:
+            raise TypeError("ResourceOrganismRuntime requires Config as the first argument")
+        database = config.runtime.state_dir / "memory.sqlite3"
         self.resource_ecology_store = ResourceEcologyStore(database)
         self.resource_ecology = ResourceEcologyEngine(database)
+        super().__init__(*args, **kwargs)
 
     def _resource_ecology_snapshot(self) -> dict[str, Any]:
         return self.resource_ecology.snapshot(
