@@ -101,6 +101,76 @@ def _bounded_sensorium(items: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _bounded_metabolism(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compute = value.get("compute_energy") or {}
+    resources: list[dict[str, Any]] = []
+    for item in list(value.get("resources") or [])[:16]:
+        if not isinstance(item, dict):
+            continue
+        resources.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "asset",
+                    "unit",
+                    "verified_balance",
+                    "verified_daily_burn",
+                    "runway_days",
+                    "essential",
+                    "next_due_at",
+                    "next_due_amount",
+                    "next_due_covered",
+                )
+                if key in item
+            }
+        )
+    upcoming: list[dict[str, Any]] = []
+    for item in list(value.get("upcoming_verified_obligations") or [])[:12]:
+        if not isinstance(item, dict):
+            continue
+        upcoming.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "id",
+                    "name",
+                    "asset",
+                    "unit",
+                    "amount",
+                    "cadence_seconds",
+                    "next_due_at",
+                    "due_in_seconds",
+                    "essential",
+                )
+                if key in item
+            }
+        )
+    return {
+        "compute_energy": {
+            key: compute.get(key)
+            for key in (
+                "asset",
+                "unit",
+                "weekly_limit",
+                "used",
+                "remaining",
+                "remaining_ratio",
+                "reset_at",
+                "seconds_until_reset",
+                "brain_hours_used",
+            )
+            if key in compute
+        },
+        "resources": resources,
+        "bottleneck": value.get("bottleneck"),
+        "upcoming_verified_obligations": upcoming,
+        "unverified_obligation_count": len(value.get("unverified_obligations") or []),
+        "epistemic_rule": value.get("epistemic_rule"),
+    }
+
+
 def _bounded_homeostasis(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -157,6 +227,8 @@ class PromptTemplate:
 
         world = context.get("world_model") or {}
         causal = context.get("causal_memory") or {}
+        homeostasis = context.get("homeostasis") or {}
+        metabolism = context.get("metabolism") or homeostasis.get("metabolism") or {}
         contract = {
             "identity": identity_contract,
             "organism": default_organism_contract(),
@@ -186,7 +258,8 @@ class PromptTemplate:
             },
             "recent_sensorium": _bounded_sensorium(context.get("sensorium")),
             "causal_strategy_statistics": list(causal.get("strategy_statistics") or [])[:16],
-            "homeostasis": _bounded_homeostasis(context.get("homeostasis")),
+            "metabolism": _bounded_metabolism(metabolism),
+            "homeostasis": _bounded_homeostasis(homeostasis),
             "digital_body": context.get("digital_body") or {},
             "organism_state_bus": context.get("organism_state_bus") or {},
             "metacognitive_calibration": context.get("metacognition") or {},
