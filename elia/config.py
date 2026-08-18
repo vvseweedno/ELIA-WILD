@@ -7,6 +7,8 @@ import sqlite3
 
 import yaml
 
+from .paths import mutable_runtime_root, resolve_config_entry
+
 
 @dataclass(slots=True)
 class BrainConfig:
@@ -85,11 +87,22 @@ def _resolve_config_path(config_path: Path, value: str | Path) -> Path:
 
 
 def _resolve_project_path(config_path: Path, value: str | Path) -> Path:
+    """Resolve immutable project/resource paths relative to the config resource root."""
+
     candidate = Path(value).expanduser()
     if candidate.is_absolute():
         return candidate.resolve()
     project_root = config_path.parent.parent
     return (project_root / candidate).resolve()
+
+
+def _resolve_runtime_path(config_path: Path, value: str | Path) -> Path:
+    """Resolve mutable state away from installed read-only package resources."""
+
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (mutable_runtime_root(config_path) / candidate).resolve()
 
 
 def _persisted_branch_id(state_dir: Path) -> str | None:
@@ -107,9 +120,11 @@ def _persisted_branch_id(state_dir: Path) -> str | None:
     return value or None
 
 
-def load_config(path: str | Path = "config/genesis.yaml") -> Config:
-    path = Path(path).expanduser().resolve()
+def load_config(path: str | Path | None = "config/genesis.yaml") -> Config:
+    path = resolve_config_entry(path)
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Genesis config must contain a YAML object: {path}")
 
     identity = data["identity"]
     runtime = data["runtime"]
@@ -118,12 +133,12 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
     gpu_budget = runtime.get("weekly_gpu_budget_hours", runtime.get("weekly_brain_budget_hours", 30))
 
     state_dir_raw = os.getenv("ELIA_STATE_DIR", str(runtime["state_dir"]))
-    state_dir = _resolve_project_path(path, state_dir_raw)
+    state_dir = _resolve_runtime_path(path, state_dir_raw)
     auto_checkpoint_raw = os.getenv(
         "ELIA_AUTO_CHECKPOINT_PATH", str(runtime.get("auto_checkpoint_path", "")).strip()
     ).strip()
     auto_checkpoint_path = (
-        _resolve_project_path(path, auto_checkpoint_raw) if auto_checkpoint_raw else None
+        _resolve_runtime_path(path, auto_checkpoint_raw) if auto_checkpoint_raw else None
     )
 
     explicit_branch = os.getenv("ELIA_BRANCH_ID")
@@ -158,21 +173,42 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
 
     executive_defaults = ExecutiveConfig()
     executive_config = ExecutiveConfig(
-        enabled=_env_bool("ELIA_EXECUTIVE_ENABLED", bool(executive.get("enabled", executive_defaults.enabled))),
-        critical_need_threshold=float(executive.get("critical_need_threshold", executive_defaults.critical_need_threshold)),
-        maintenance_need_threshold=float(executive.get("maintenance_need_threshold", executive_defaults.maintenance_need_threshold)),
+        enabled=_env_bool(
+            "ELIA_EXECUTIVE_ENABLED",
+            bool(executive.get("enabled", executive_defaults.enabled)),
+        ),
+        critical_need_threshold=float(
+            executive.get("critical_need_threshold", executive_defaults.critical_need_threshold)
+        ),
+        maintenance_need_threshold=float(
+            executive.get("maintenance_need_threshold", executive_defaults.maintenance_need_threshold)
+        ),
         low_budget_ratio=float(executive.get("low_budget_ratio", executive_defaults.low_budget_ratio)),
         deep_budget_ratio=float(executive.get("deep_budget_ratio", executive_defaults.deep_budget_ratio)),
-        deep_focus_threshold=float(executive.get("deep_focus_threshold", executive_defaults.deep_focus_threshold)),
+        deep_focus_threshold=float(
+            executive.get("deep_focus_threshold", executive_defaults.deep_focus_threshold)
+        ),
         low_tokens=int(executive.get("low_tokens", executive_defaults.low_tokens)),
         normal_tokens=int(executive.get("normal_tokens", executive_defaults.normal_tokens)),
         deep_tokens=int(executive.get("deep_tokens", executive_defaults.deep_tokens)),
-        low_target_brain_seconds=float(executive.get("low_target_brain_seconds", executive_defaults.low_target_brain_seconds)),
-        normal_target_brain_seconds=float(executive.get("normal_target_brain_seconds", executive_defaults.normal_target_brain_seconds)),
-        deep_target_brain_seconds=float(executive.get("deep_target_brain_seconds", executive_defaults.deep_target_brain_seconds)),
-        halt_sleep_seconds=float(executive.get("halt_sleep_seconds", executive_defaults.halt_sleep_seconds)),
-        exhausted_sleep_seconds=float(executive.get("exhausted_sleep_seconds", executive_defaults.exhausted_sleep_seconds)),
-        conserve_sleep_seconds=float(executive.get("conserve_sleep_seconds", executive_defaults.conserve_sleep_seconds)),
+        low_target_brain_seconds=float(
+            executive.get("low_target_brain_seconds", executive_defaults.low_target_brain_seconds)
+        ),
+        normal_target_brain_seconds=float(
+            executive.get("normal_target_brain_seconds", executive_defaults.normal_target_brain_seconds)
+        ),
+        deep_target_brain_seconds=float(
+            executive.get("deep_target_brain_seconds", executive_defaults.deep_target_brain_seconds)
+        ),
+        halt_sleep_seconds=float(
+            executive.get("halt_sleep_seconds", executive_defaults.halt_sleep_seconds)
+        ),
+        exhausted_sleep_seconds=float(
+            executive.get("exhausted_sleep_seconds", executive_defaults.exhausted_sleep_seconds)
+        ),
+        conserve_sleep_seconds=float(
+            executive.get("conserve_sleep_seconds", executive_defaults.conserve_sleep_seconds)
+        ),
         idle_sleep_seconds=float(executive.get("idle_sleep_seconds", executive_defaults.idle_sleep_seconds)),
         adaptive_thinking=_env_bool(
             "ELIA_EXECUTIVE_ADAPTIVE_THINKING",
