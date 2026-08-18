@@ -28,6 +28,12 @@ from elia.wake_transport import (
 )
 
 
+def _kaggle_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("ELIA_CHECKPOINT_KEY", None)
+    return env
+
+
 def command(args: list[str]) -> None:
     result = subprocess.run(
         args,
@@ -35,6 +41,7 @@ def command(args: list[str]) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        env=_kaggle_child_env(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"command failed ({result.returncode}): {' '.join(args[:4])}\n{result.stdout[-6000:]}")
