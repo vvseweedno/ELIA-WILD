@@ -4,9 +4,6 @@ from copy import deepcopy
 from typing import Any
 
 
-# A remote model provider is a different trust boundary from ELIA's local runtime.
-# Only explicitly projected sensor metadata may cross that boundary. Raw sensor payloads
-# stay in the local Sensorium and are addressed by digest/observation id when needed.
 _SENSOR_FIELDS = (
     "id",
     "observed_at",
@@ -58,9 +55,7 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
         if not isinstance(raw, dict):
             continue
         opportunity = raw.get("opportunity") if isinstance(raw.get("opportunity"), dict) else {}
-        profile = (
-            raw.get("resource_profile") if isinstance(raw.get("resource_profile"), dict) else {}
-        )
+        profile = raw.get("resource_profile") if isinstance(raw.get("resource_profile"), dict) else {}
         work_items = []
         for work in list(raw.get("work_items") or [])[:8]:
             if not isinstance(work, dict):
@@ -150,15 +145,49 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
     return result
 
 
-def provider_context(context: dict[str, Any]) -> dict[str, Any]:
-    """Return the only context view allowed to leave the local trust boundary.
+def _work_port_metadata(value: Any) -> dict[str, Any]:
+    """Remove remote references/fingerprints while preserving actionable port state."""
+    if not isinstance(value, dict):
+        return {}
+    ports: dict[str, Any] = {}
+    for name, raw in dict(value.get("ports") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        ports[str(name)[:128]] = {
+            key: deepcopy(raw.get(key))
+            for key in ("server", "submit_tool", "outcome_tool")
+            if key in raw
+        }
+    active = []
+    for raw in list(value.get("active_submissions") or [])[:32]:
+        if not isinstance(raw, dict):
+            continue
+        active.append(
+            {
+                key: deepcopy(raw.get(key))
+                for key in (
+                    "id",
+                    "work_item_id",
+                    "port_name",
+                    "submitted_at",
+                    "updated_at",
+                    "submission_observation_id",
+                    "remote_status",
+                    "last_outcome_observation_id",
+                )
+                if key in raw
+            }
+        )
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "readiness": deepcopy(value.get("readiness")),
+        "ports": ports,
+        "active_submissions": active,
+    }
 
-    Private/internal keys (leading underscore) are excluded. Sensorium raw payloads
-    are replaced with metadata + cryptographic digests. Resource-ecology evidence,
-    private notes and external-response text are reduced to typed lifecycle metadata.
-    Other already-public runtime structures are deep-copied so provider serialization
-    cannot mutate local state.
-    """
+
+def provider_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Return the only runtime-context view allowed to leave local trust boundary."""
 
     public: dict[str, Any] = {}
     for key, value in context.items():
@@ -170,6 +199,9 @@ def provider_context(context: dict[str, Any]) -> dict[str, Any]:
             continue
         if name == "resource_ecology":
             public[name] = _resource_ecology_metadata(value)
+            continue
+        if name == "work_ports":
+            public[name] = _work_port_metadata(value)
             continue
         public[name] = deepcopy(value)
     return public
