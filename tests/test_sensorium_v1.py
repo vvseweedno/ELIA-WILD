@@ -30,7 +30,6 @@ def test_sensorium_payload_is_bounded_but_full_digest_is_stable(tmp_path: Path) 
         source_kind="test",
         source_ref="oversized",
         payload=huge,
-        evidence if False else None,
     )
     assert observation.payload["_truncated"] is True
     assert observation.payload["original_sha256"] == observation.payload_sha256
