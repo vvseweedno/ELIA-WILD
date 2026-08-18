@@ -68,10 +68,14 @@ jobs:
             tests/test_process_body_v1.py \
             tests/test_jsonrpc_body_v1.py \
             tests/test_mcp_body_v1.py \
+            tests/test_mcp_server_v1.py \
             tests/test_browser_body_v1.py \
             tests/test_sensorium_v1.py \
             tests/test_world_model_v1.py \
             tests/test_state_bus_v1.py \
+            tests/test_organism_runtime_v1.py \
+            tests/test_homeostasis_v1.py \
+            tests/test_action_log_redaction_v1.py \
             --junitxml=sensorimotor-report.xml
       - name: Upload sensorimotor report
         if: always()
