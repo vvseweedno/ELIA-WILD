@@ -44,7 +44,9 @@ class SkillRegistry:
         if not self.directory.exists():
             return {}
         skills: dict[str, SkillManifest] = {}
-        for path in sorted(self.directory.glob("*.yaml")):
+        for path in sorted(self.directory.rglob("*.yaml")):
+            if any(part.startswith(".") for part in path.relative_to(self.directory).parts):
+                continue
             item = yaml.safe_load(path.read_text(encoding="utf-8"))
             if not isinstance(item, dict):
                 raise ValueError(f"skill manifest must be an object: {path}")
