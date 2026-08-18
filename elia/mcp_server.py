@@ -11,6 +11,7 @@ from typing import Any
 from . import __version__
 from .chronicle import Chronicle
 from .config import Config, load_config
+from .epistemic_status import epistemic_status
 from .executive_status import executive_status_from_state
 from .homeostasis import HomeostasisEngine
 from .identity import IdentityBundle, IdentityStore
@@ -153,6 +154,7 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
         "metabolism": metabolism,
         "resource_ecology": ecology,
         "work_ports": work_port_status(config),
+        "epistemic_ecosystem": epistemic_status(config),
         "homeostasis": {
             "mode": homeostasis.get("mode"),
             "signals": list(homeostasis.get("signals") or [])[:12],
@@ -173,10 +175,10 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
 
 
 def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
-    """Build the Genesis 1.5 read-oriented MCP organism port without starting transport.
+    """Build the Genesis 1.6 read-oriented MCP organism port without starting transport.
 
-    This MCP port is introspective only: it exposes sanitized external-work readiness
-    and lifecycle metadata but does not itself publish submit/payment mutation tools.
+    This port exposes sanitized state only. It does not allow callers to invoke
+    cognitive organs, adjudicate packets, submit work, mutate identity or mint resources.
     """
 
     _require_mcp()
@@ -188,7 +190,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_status() -> dict[str, Any]:
-        """Return sanitized continuity, physiology, Executive, resource and work-port status."""
+        """Return sanitized continuity, physiology, Executive, resource, work and epistemic status."""
         return _status_snapshot(config)
 
     @server.tool()
@@ -216,6 +218,11 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
     def elia_executive() -> dict[str, Any]:
         """Return current deterministic Executive plan and measured energy feedback."""
         return executive_status_from_state(config)
+
+    @server.tool()
+    def elia_epistemic() -> dict[str, Any]:
+        """Return sanitized cognitive-organ registry and aggregate biography statistics."""
+        return epistemic_status(config)
 
     @server.tool()
     def elia_resource_ecology() -> dict[str, Any]:
@@ -260,7 +267,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_homeostasis() -> dict[str, Any]:
-        """Return deterministic Genesis 1.5 physiology including verified metabolism."""
+        """Return deterministic Genesis 1.6 physiology including verified metabolism."""
         tools = ToolRegistry(config.runtime.state_dir / "workspace", config.raw_tools)
         return _homeostasis(config, tools)
 
@@ -271,6 +278,10 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
     @server.resource("elia://status")
     def status_resource() -> str:
         return json.dumps(_status_snapshot(config), ensure_ascii=False, sort_keys=True)
+
+    @server.resource("elia://epistemic")
+    def epistemic_resource() -> str:
+        return json.dumps(epistemic_status(config), ensure_ascii=False, sort_keys=True)
 
     @server.resource("elia://resource-ecology")
     def resource_ecology_resource() -> str:
@@ -316,7 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=("stdio", "streamable-http"),
         default="stdio",
-        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.5",
+        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.6",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -332,7 +343,7 @@ def main() -> None:
 
     if not _is_loopback_host(args.host):
         raise SystemExit(
-            "Genesis 1.5 MCP HTTP transport is intentionally loopback-only because "
+            "Genesis 1.6 MCP HTTP transport is intentionally loopback-only because "
             "this server does not implement a remote authentication policy. Put an "
             "authenticated reverse proxy/tunnel in front of it instead of exposing it directly."
         )
