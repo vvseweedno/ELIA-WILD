@@ -31,6 +31,25 @@ runtime:
   weekly_gpu_budget_hours: 30
   memory_recall_limit: 12
 
+executive:
+  enabled: true
+  critical_need_threshold: 0.85
+  maintenance_need_threshold: 0.60
+  low_budget_ratio: 0.10
+  deep_budget_ratio: 0.35
+  deep_focus_threshold: 0.85
+  low_tokens: 256
+  normal_tokens: 640
+  deep_tokens: 1024
+  low_target_brain_seconds: 6
+  normal_target_brain_seconds: 20
+  deep_target_brain_seconds: 60
+  halt_sleep_seconds: 3600
+  exhausted_sleep_seconds: 3600
+  conserve_sleep_seconds: 900
+  idle_sleep_seconds: 300
+  adaptive_thinking: true
+
 brain:
   backend: transformers_4bit
   model_id: Qwen/Qwen3.5-9B
