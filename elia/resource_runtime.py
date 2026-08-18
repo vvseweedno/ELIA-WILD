@@ -188,6 +188,7 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
                 f"ResourceEcologyStageError: {type(exc).__name__}: {str(exc)[:1000]}",
             )
         data["resource_ecology_transition"] = {
+            "ok": True,
             "event": "deliverable_staged",
             "work_item": work.as_dict(),
         }
