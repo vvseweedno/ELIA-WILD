@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .brain import Decision
+from .cognitive_energy import CognitiveEnergyController, CognitiveEnergySummary
 from .executive import ExecutiveController, ExecutivePlan, ExecutivePolicy, ExecutiveStore
 from .metabolic_runtime import MetabolicOrganismRuntime
 
@@ -14,9 +15,12 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
     constrain the configured model's token/thinking envelope for one cycle. It never
     grants capabilities and never fabricates verified resources. Concrete actions are
     still proposed by the replaceable cognitive substrate and reviewed by assurance.
+
+    Measured inference cost is fed back into later planning. That feedback can only
+    reduce future cognition budgets; it cannot increase authority or upgrade a plan.
     """
 
-    EXECUTIVE_HISTORY_LIMIT = 8
+    EXECUTIVE_HISTORY_LIMIT = 12
 
     def __init__(
         self,
@@ -25,17 +29,27 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.executive = ExecutiveController(executive_policy)
+        policy = executive_policy or ExecutivePolicy()
+        self.executive = ExecutiveController(policy)
+        self.cognitive_energy = CognitiveEnergyController(policy)
         self.executive_store = ExecutiveStore(self.config.runtime.state_dir / "memory.sqlite3")
         self._current_executive_plan: ExecutivePlan | None = None
+        self._current_executive_energy: CognitiveEnergySummary | None = None
         self._current_executive_row_id: int | None = None
 
     def _context(self) -> dict[str, Any]:
         context = super()._context()
-        plan = self.executive.plan(context)
+        history = self.executive_store.recent(self.EXECUTIVE_HISTORY_LIMIT)
+        energy = self.cognitive_energy.summarize(history)
+        plan = self.cognitive_energy.constrain(self.executive.plan(context), energy)
         self._current_executive_plan = plan
-        self._current_executive_row_id = self.executive_store.record(plan, context)
+        self._current_executive_energy = energy
+        context["executive_energy"] = energy.as_dict()
         context["executive"] = plan.as_dict()
+        # Persist only after the final constrained plan is known. The context digest
+        # therefore commits the verified state that existed before inference plus the
+        # measured energy feedback used to select the cognitive envelope.
+        self._current_executive_row_id = self.executive_store.record(plan, context)
         context["executive_history"] = self.executive_store.recent(self.EXECUTIVE_HISTORY_LIMIT)
         context["_system_prompt"] = self.prompt_template.render(context)
         return context
@@ -82,6 +96,7 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
 
     def cycle(self) -> dict[str, Any]:
         self._current_executive_plan = None
+        self._current_executive_energy = None
         self._current_executive_row_id = None
         brain_seconds_before = self.memory.brain_seconds_this_week()
         try:
@@ -100,6 +115,7 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
             raise
 
         plan = self._current_executive_plan
+        energy = self._current_executive_energy
         row_id = self._current_executive_row_id
         brain_seconds_after = self.memory.brain_seconds_this_week()
         brain_seconds_used = max(0.0, brain_seconds_after - brain_seconds_before)
@@ -122,6 +138,7 @@ class ExecutiveOrganismRuntime(MetabolicOrganismRuntime):
                 **plan.as_dict(),
                 "record_id": row_id,
                 "brain_seconds_used": brain_seconds_used,
+                "energy_feedback": energy.as_dict() if energy is not None else None,
             }
         return report
 
