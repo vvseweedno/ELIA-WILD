@@ -15,8 +15,8 @@ from .economy import EconomyStore
 from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
+from .organism_runtime import OrganismRuntime
 from .prompting import PromptTemplate
-from .runtime import EliaRuntime
 from .skills import SkillRegistry
 from .tools import ToolRegistry
 from .vitals import VitalSigns
@@ -221,6 +221,7 @@ def main() -> None:
         if args.identity_report:
             print(json.dumps({**identity_report, "vitals": vital_report.as_dict()}, ensure_ascii=False, indent=2))
             return
+        incomplete = tools.state_bus.incomplete(32)
         print(
             json.dumps(
                 {
@@ -236,6 +237,14 @@ def main() -> None:
                     "chronicle": {"valid": chronicle_valid, "error": chronicle_error},
                     "resources": resources,
                     "economy": economy,
+                    "world_model": tools.world_model.snapshot(24),
+                    "sensorium": tools.observations.snapshot(8),
+                    "causal_memory": tools.causal.snapshot(8),
+                    "digital_body": tools.body.diagnostics(),
+                    "organism_state_bus": {
+                        "incomplete_count": len(incomplete),
+                        "incomplete": incomplete[:8],
+                    },
                     "memory_records": len(memory.recent(1000000)),
                     "active_goals": [asdict(goal) for goal in active_goals],
                     "needs": needs,
@@ -301,7 +310,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = EliaRuntime(config)
+    runtime = OrganismRuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
     output: dict[str, Any] = {
