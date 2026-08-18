@@ -12,13 +12,13 @@ import yaml
 class BrainConfig:
     backend: str
     model_id: str
-    model_revision: str | None
     base_url: str
     timeout_seconds: float
     max_tokens: int
     temperature: float
     top_p: float
     thinking: bool
+    model_revision: str | None = None
 
 
 @dataclass(slots=True)
@@ -135,13 +135,13 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         brain=BrainConfig(
             backend=os.getenv("ELIA_BRAIN", brain["backend"]),
             model_id=os.getenv("ELIA_MODEL_ID", brain["model_id"]),
-            model_revision=model_revision_raw or None,
             base_url=os.getenv("ELIA_MODEL_BASE_URL", brain["base_url"]).rstrip("/"),
             timeout_seconds=float(os.getenv("ELIA_MODEL_TIMEOUT", brain["timeout_seconds"])),
             max_tokens=int(os.getenv("ELIA_MAX_TOKENS", brain["max_tokens"])),
             temperature=float(os.getenv("ELIA_TEMPERATURE", brain["temperature"])),
             top_p=float(os.getenv("ELIA_TOP_P", brain["top_p"])),
             thinking=_env_bool("ELIA_THINKING", bool(brain.get("thinking", False))),
+            model_revision=model_revision_raw or None,
         ),
         runtime=RuntimeConfig(
             state_dir=state_dir,
