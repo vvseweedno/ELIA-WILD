@@ -9,6 +9,8 @@ import json
 import os
 from typing import Any, Iterator
 
+from .redaction import redact_action_record
+
 try:  # Linux is the production/runtime target; keep import optional for tooling portability.
     import fcntl  # type: ignore
 except ImportError:  # pragma: no cover - non-POSIX fallback has no cross-process guarantee.
@@ -29,7 +31,12 @@ class ChronicleEntry:
 
 
 class Chronicle:
-    """Append-only JSONL history with SHA-256 chaining and POSIX single-writer locking."""
+    """Append-only JSONL history with SHA-256 chaining and POSIX single-writer locking.
+
+    Cycle records are redacted again at this final persistence boundary so an older or
+    alternate runtime implementation cannot accidentally write raw action arguments or
+    tool payloads into the durable identity history.
+    """
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -87,12 +94,15 @@ class Chronicle:
                 raise RuntimeError(f"Chronicle head is unreadable: {exc}") from exc
 
     def append(self, kind: str, payload: dict[str, Any]) -> ChronicleEntry:
+        persisted_payload = (
+            redact_action_record(payload) if str(kind).upper() == "CYCLE" else payload
+        )
         with self._locked(exclusive=True):
             last_seq, previous_hash = self._last_unlocked()
             seq = last_seq + 1
             timestamp = datetime.now(timezone.utc).isoformat()
-            digest = self._digest(seq, timestamp, kind, payload, previous_hash)
-            entry = ChronicleEntry(seq, timestamp, kind, payload, previous_hash, digest)
+            digest = self._digest(seq, timestamp, kind, persisted_payload, previous_hash)
+            entry = ChronicleEntry(seq, timestamp, kind, persisted_payload, previous_hash, digest)
             serialized = json.dumps(asdict(entry), ensure_ascii=False, sort_keys=True) + "\n"
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(serialized)
