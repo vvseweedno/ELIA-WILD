@@ -5,6 +5,8 @@ from hashlib import sha256
 import json
 from typing import Any
 
+from . import __version__
+from .homeostasis import HomeostasisEngine
 from .runtime import EliaRuntime as GenesisRuntime
 
 
@@ -29,7 +31,7 @@ def _safe_action_descriptor(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 class OrganismRuntime(GenesisRuntime):
-    """Genesis 1.1 runtime with automatic world/sensorimotor state integration.
+    """Genesis 1.1 runtime with sensorimotor, world and homeostatic integration.
 
     The proven Genesis runtime remains the stable base. This layer makes lived
     external experience part of every future cognitive context without depending on
@@ -62,6 +64,17 @@ class OrganismRuntime(GenesisRuntime):
                 {"reconciled_transactions": recovered},
             )
 
+    def _homeostasis_snapshot(self) -> dict[str, Any]:
+        active_tx = getattr(self, "_active_cycle_transaction_id", None)
+        ignored = {active_tx} if active_tx else set()
+        return HomeostasisEngine(
+            self.config.runtime.state_dir,
+            self.tools.observations,
+            self.tools.world_model,
+            self.tools.state_bus,
+            self.tools.body.diagnostics(),
+        ).evaluate(ignore_transaction_ids=ignored).as_dict()
+
     def _state_components(self) -> dict[str, Any]:
         components = super()._state_components()
         components["world_model"] = self.tools.world_model.snapshot(self.WORLD_CONTEXT_LIMIT)
@@ -73,6 +86,34 @@ class OrganismRuntime(GenesisRuntime):
             "incomplete_count": len(incomplete),
             "incomplete": incomplete[:8],
         }
+
+        homeostasis = self._homeostasis_snapshot()
+        components["homeostasis"] = homeostasis
+        needs = list(components.get("needs") or [])
+        names = {str(item.get("name", "")) for item in needs if isinstance(item, dict)}
+        for signal in homeostasis.get("signals", []):
+            if not isinstance(signal, dict):
+                continue
+            name = str(signal.get("name", ""))
+            if not name or name in names:
+                continue
+            needs.append(
+                {
+                    "name": name,
+                    "severity": float(signal.get("severity", 0.0)),
+                    "reason": str(signal.get("reason", "")),
+                    "response_hint": str(signal.get("response_hint", "")),
+                    "source": "homeostasis",
+                    "evidence": signal.get("evidence") or {},
+                }
+            )
+            names.add(name)
+        needs.sort(key=lambda item: (-float(item.get("severity", 0.0)), str(item.get("name", ""))))
+        components["needs"] = needs[:16]
+        self_model = components.get("self_model")
+        if isinstance(self_model, dict):
+            self_model["needs"] = [str(item.get("name", "")) for item in components["needs"]]
+            self_model["homeostasis_mode"] = homeostasis.get("mode")
         return components
 
     def _memory_queries(self, components: dict[str, Any]) -> list[str]:
@@ -92,6 +133,10 @@ class OrganismRuntime(GenesisRuntime):
                     str(observation.get("source_ref", "")),
                     str(observation.get("summary", "")),
                 ]
+            )
+        for signal in components.get("homeostasis", {}).get("signals", [])[:8]:
+            queries.extend(
+                [str(signal.get("name", "")), str(signal.get("reason", ""))]
             )
         unique: list[str] = []
         seen: set[str] = set()
@@ -113,6 +158,7 @@ class OrganismRuntime(GenesisRuntime):
         context["sensorium"] = self.tools.observations.snapshot(self.SENSORIUM_CONTEXT_LIMIT)
         context["causal_memory"] = self.tools.causal.snapshot(self.CAUSAL_CONTEXT_LIMIT)
         context["digital_body"] = self.tools.body.diagnostics()
+        context["homeostasis"] = self._homeostasis_snapshot()
         incomplete = self.tools.state_bus.incomplete(16)
         context["organism_state_bus"] = {
             "incomplete_count": len(incomplete),
@@ -140,6 +186,8 @@ class OrganismRuntime(GenesisRuntime):
             "cognitive_cycle",
             identity_fingerprint=self.identity.fingerprint,
         )
+        self._active_cycle_transaction_id = cycle_tx
+        homeostasis_at_wake = self._homeostasis_snapshot()
         self.tools.state_bus.append(
             cycle_tx,
             phase="perception",
@@ -147,6 +195,7 @@ class OrganismRuntime(GenesisRuntime):
             payload={
                 "world_belief_count": len(self.tools.world_model.snapshot(256)["beliefs"]),
                 "recent_observation_count": len(self.tools.observations.snapshot(64)),
+                "homeostasis_mode": homeostasis_at_wake.get("mode"),
                 "brain_loaded": self.brain_loaded,
             },
         )
@@ -213,7 +262,7 @@ class OrganismRuntime(GenesisRuntime):
             action_record = {
                 "identity_fingerprint": self.identity.fingerprint,
                 "prompt_fingerprint": self.prompt_template.fingerprint,
-                "body_version": __import__("elia").__version__,
+                "body_version": __version__,
                 "objective": decision.objective,
                 "summary": decision.summary,
                 "skill": decision.skill_name,
@@ -244,6 +293,16 @@ class OrganismRuntime(GenesisRuntime):
                 "goal_changes": goal_changes,
                 "opportunity_changes": opportunity_changes,
                 "capability_health": self.memory.capability_health(decision.action_name),
+                "homeostasis": {
+                    "mode": post_components.get("homeostasis", {}).get("mode"),
+                    "signals": [
+                        {
+                            "name": item.get("name"),
+                            "severity": item.get("severity"),
+                        }
+                        for item in post_components.get("homeostasis", {}).get("signals", [])[:8]
+                    ],
+                },
                 "self_model": {
                     "row_id": self_model_id,
                     "fingerprint": self_model_fingerprint,
@@ -308,6 +367,7 @@ class OrganismRuntime(GenesisRuntime):
                 "economy": self.economy.snapshot(16),
                 "capability_health": self.memory.capability_health(decision.action_name),
                 "identity_drift": post_components["drift"],
+                "homeostasis": post_components.get("homeostasis", {}),
                 "resources": self.budget(),
                 "sleep_seconds": sleep_seconds,
                 "next_wake_at": next_wake_at,
@@ -330,6 +390,7 @@ class OrganismRuntime(GenesisRuntime):
                         if observation_ref is not None
                         else None
                     ),
+                    "homeostasis_mode": post_components.get("homeostasis", {}).get("mode"),
                     "self_model_fingerprint": self_model_fingerprint,
                     "next_wake_at": next_wake_at,
                 },
@@ -357,6 +418,8 @@ class OrganismRuntime(GenesisRuntime):
             except Exception:
                 pass
             raise
+        finally:
+            self._active_cycle_transaction_id = None
 
 
 # Explicit alias for callers that want the latest organism runtime while the older
