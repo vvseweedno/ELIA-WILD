@@ -53,7 +53,10 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             assert status_result.is_error is False
             status = _structured(status_result)
             assert status["identity"]["identity_id"] == "elia-wild"
+            assert "metabolism" in status
+            assert "compute_energy" in status["metabolism"]
             assert "homeostasis" in status
+            assert status["homeostasis"]["metabolism"] == status["metabolism"]
             assert "digital_body" in status
             assert "sensorium" in status
 
@@ -73,12 +76,17 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
                 assert "payload" not in item
                 assert "payload_sha256" in item
 
+            homeostasis_result = await client.call_tool("elia_homeostasis", {})
+            homeostasis = _structured(homeostasis_result)
+            assert "metabolism" in homeostasis
+            assert "compute_energy" in homeostasis["metabolism"]
+
             resource = await client.read_resource("elia://identity")
             assert resource.contents
             text = getattr(resource.contents[0], "text", "")
             identity = json.loads(text)
             assert identity["identity_id"] == "elia-wild"
-            assert identity["body_version"].startswith("1.1.")
+            assert identity["body_version"].startswith("1.2.")
 
     asyncio.run(exercise())
 
