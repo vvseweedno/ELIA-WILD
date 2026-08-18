@@ -64,6 +64,7 @@ class Config:
     subject_core_path: Path = Path("config/subject_core.yaml")
     continuity_constitution_path: Path = Path("config/continuity_constitution.yaml")
     system_prompt_path: Path = Path("config/system_prompt.md")
+    epistemic_path: Path = Path("config/epistemic.yaml")
     skills_dir: Path = Path("skills")
     branch_id: str = "main"
     executive: ExecutiveConfig = field(default_factory=ExecutiveConfig)
@@ -146,6 +147,10 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         "ELIA_SYSTEM_PROMPT",
         str(identity.get("system_prompt", "system_prompt.md")),
     )
+    epistemic_raw = os.getenv(
+        "ELIA_EPISTEMIC_CONFIG",
+        str(data.get("epistemic_registry", "epistemic.yaml")),
+    )
     skills_raw = os.getenv("ELIA_SKILLS_DIR", str(data.get("skills_dir", "skills")))
     model_revision_raw = os.getenv(
         "ELIA_MODEL_REVISION", str(brain.get("model_revision", "")).strip()
@@ -210,6 +215,7 @@ def load_config(path: str | Path = "config/genesis.yaml") -> Config:
         subject_core_path=_resolve_config_path(path, subject_core_raw),
         continuity_constitution_path=_resolve_config_path(path, constitution_raw),
         system_prompt_path=_resolve_config_path(path, system_prompt_raw),
+        epistemic_path=_resolve_config_path(path, epistemic_raw),
         skills_dir=_resolve_project_path(path, skills_raw),
         branch_id=branch_id,
         executive=executive_config,
