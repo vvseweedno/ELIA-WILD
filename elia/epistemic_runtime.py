@@ -4,7 +4,8 @@ import json
 import time
 from typing import Any
 
-from .epistemic import CognitiveBiographyStore, EpistemicCortex, EpistemicRegistry
+from .epistemic import CognitiveBiographyStore, EpistemicRegistry
+from .epistemic_views import EpistemicViewStore, ResilientEpistemicCortex
 from .executive import ExecutivePlan
 from .external_work_runtime import ExternalWorkOrganismRuntime
 
@@ -13,18 +14,29 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
     """Genesis 1.6 runtime: one Self with differentiated temporary cognitive organs.
 
     ACDS runs only inside an Executive-approved brain wake. Its organs are not agents
-    with independent authority or identity. They produce bounded evidence packets;
-    an identity-neutral adjudicator preserves disagreement; the single ELIA Self then
+    with independent authority or identity. They receive deliberately different,
+    privacy-bounded evidence views and produce compact evidence packets. An
+    identity-neutral adjudicator preserves disagreement; the single ELIA Self then
     makes the ordinary one-action decision through the existing assurance boundary.
+
+    Epistemic deliberation is a cognitive enhancement, not a single point of failure:
+    individual organs and the adjudicator may degrade without granting authority or
+    crashing the organism merely because one perspective failed to answer.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         config = args[0] if args else kwargs.get("config")
         if config is None:
             raise TypeError("EpistemicOrganismRuntime requires Config as the first argument")
+        database = config.runtime.state_dir / "memory.sqlite3"
         self.epistemic_registry = EpistemicRegistry.load(config.epistemic_path)
-        self.epistemic_store = CognitiveBiographyStore(config.runtime.state_dir / "memory.sqlite3")
-        self.epistemic_cortex = EpistemicCortex(self.epistemic_registry, self.epistemic_store)
+        self.epistemic_store = CognitiveBiographyStore(database)
+        self.epistemic_view_store = EpistemicViewStore(database)
+        self.epistemic_cortex = ResilientEpistemicCortex(
+            self.epistemic_registry,
+            self.epistemic_store,
+            self.epistemic_view_store,
+        )
         self._current_epistemic_session_id: str | None = None
         self._current_epistemic_result: dict[str, Any] | None = None
         super().__init__(*args, **kwargs)
@@ -42,8 +54,6 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
 
     def _before_brain(self, context: dict[str, Any], plan: ExecutivePlan) -> dict[str, Any]:
         context = super()._before_brain(context, plan)
-        # No cognitive organ may bypass the Executive's no-brain decision. This hook is
-        # reached only after wake_brain=True, but keep the invariant explicit.
         if not plan.cognitive_budget.wake_brain:
             return context
 
@@ -65,8 +75,8 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
             result = self.epistemic_cortex.deliberate(brain, context)
         finally:
             elapsed = max(0.0, time.monotonic() - started)
-            # Epistemic organ calls are real cognition and must be charged to the same
-            # weekly brain-energy ledger as the final Self decision.
+            # Every organ and adjudicator call consumes the same scarce cognitive
+            # resource ledger as the final Self decision.
             self.memory.add_brain_seconds(elapsed)
             self._account_runtime()
 
@@ -84,7 +94,7 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
             report = super().cycle()
         except BaseException:
             # An interrupted session remains unresolved evidence rather than being
-            # silently labelled a failed hypothesis. Recovery/diagnosis can inspect it.
+            # silently relabelled as a failed hypothesis.
             raise
 
         session_id = self._current_epistemic_session_id
