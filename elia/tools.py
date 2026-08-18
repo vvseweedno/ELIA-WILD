@@ -4,19 +4,15 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-import ipaddress
 import json
 import re
-import socket
 import time
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
-
-import httpx
 
 from . import __version__
 from .body import SensorimotorFabric
+from .body.net import pinned_http_get
 from .causal import CausalMemoryStore
 from .observations import ObservationStore
 from .state_bus import OrganismStateBus
@@ -120,11 +116,11 @@ class ToolRegistry:
             ),
             Capability(
                 "http_get",
-                "Read one public HTTP/HTTPS resource. Private and reserved destinations are rejected.",
+                "Read one public HTTP/HTTPS resource using DNS-pinned transport. Private and reserved destinations are rejected.",
                 "{url: str}",
                 "public_network_read",
-                "remote read request only",
-                "public_http_https",
+                "remote read request only; redirects are returned but never followed automatically",
+                "dns_pinned_public_http_https",
                 "network",
                 enabled=http_enabled,
             ),
@@ -518,57 +514,33 @@ class ToolRegistry:
             },
         )
 
-    @staticmethod
-    def _validate_public_url(url: str) -> None:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            raise ValueError("Only http/https URLs are supported")
-        if not parsed.hostname:
-            raise ValueError("URL hostname is required")
-        if parsed.username or parsed.password:
-            raise ValueError("Credentials in URLs are not supported")
-
-        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-        for info in addresses:
-            ip = ipaddress.ip_address(info[4][0])
-            if (
-                ip.is_private
-                or ip.is_loopback
-                or ip.is_link_local
-                or ip.is_multicast
-                or ip.is_reserved
-                or ip.is_unspecified
-            ):
-                raise ValueError(f"Non-public destination rejected: {ip}")
-
     def _http_get(self, url: str) -> ToolResult:
         http_cfg = self.config.get("http_get", {})
         if not http_cfg.get("enabled", True):
             return ToolResult(False, "http_get", error="http_get is disabled")
 
-        self._validate_public_url(url)
         timeout = float(http_cfg.get("timeout_seconds", 20))
         max_bytes = int(http_cfg.get("max_bytes", 1_000_000))
-
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            response = client.get(
-                url,
-                headers={"User-Agent": f"ELIA-WILD/{__version__} (+research-agent)"},
-            )
-
-        raw = response.content[:max_bytes]
-        content_type = response.headers.get("content-type", "")
-        text = raw.decode(response.encoding or "utf-8", errors="replace")
+        response = pinned_http_get(
+            url,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            headers={"User-Agent": f"ELIA-WILD/{__version__} (+research-agent)"},
+            allow_private=False,
+        )
+        content_type = response.headers.get("Content-Type", response.headers.get("content-type", ""))
+        text = response.content.decode(response.encoding or "utf-8", errors="replace")
         data = {
-            "url": str(response.url),
+            "url": response.url,
             "status_code": response.status_code,
             "content_type": content_type,
+            "peer_ip": response.peer_ip,
             "headers": {
                 key: value
                 for key, value in response.headers.items()
                 if key.lower() in {"content-type", "content-length", "location", "last-modified"}
             },
             "text": text,
-            "truncated": len(response.content) > max_bytes,
+            "truncated": response.truncated,
         }
         return ToolResult(200 <= response.status_code < 400, "http_get", data)
