@@ -52,6 +52,26 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
         context["_system_prompt"] = self.prompt_template.render(context)
         return context
 
+    @staticmethod
+    def _public_epistemic_health(result: dict[str, Any]) -> dict[str, Any]:
+        selected = [str(item)[:64] for item in list(result.get("selected_organs") or [])[:12]]
+        successful = [str(item)[:64] for item in list(result.get("successful_organs") or [])[:12]]
+        failed = []
+        for item in list(result.get("failures") or [])[:12]:
+            if isinstance(item, dict) and item.get("organ_id"):
+                failed.append(str(item["organ_id"])[:64])
+        return {
+            "triggered": bool(result.get("triggered", False)),
+            "degraded": bool(result.get("degraded", False)),
+            "selected_count": len(selected),
+            "successful_count": len(successful),
+            "failed_count": len(failed),
+            "selected_organs": selected,
+            "successful_organs": successful,
+            "failed_organs": failed,
+            "rule": "Epistemic health reports council availability only; failure never expands authority.",
+        }
+
     def _before_brain(self, context: dict[str, Any], plan: ExecutivePlan) -> dict[str, Any]:
         context = super()._before_brain(context, plan)
         if not plan.cognitive_budget.wake_brain:
@@ -66,6 +86,7 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
             }
             self._current_epistemic_result = result
             context["epistemic"] = result
+            context["epistemic_health"] = self._public_epistemic_health(result)
             context["_system_prompt"] = self.prompt_template.render(context)
             return context
 
@@ -75,8 +96,6 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
             result = self.epistemic_cortex.deliberate(brain, context)
         finally:
             elapsed = max(0.0, time.monotonic() - started)
-            # Every organ and adjudicator call consumes the same scarce cognitive
-            # resource ledger as the final Self decision.
             self.memory.add_brain_seconds(elapsed)
             self._account_runtime()
 
@@ -84,6 +103,7 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
         session_id = result.get("session_id") if isinstance(result, dict) else None
         self._current_epistemic_session_id = str(session_id) if session_id else None
         context["epistemic"] = result
+        context["epistemic_health"] = self._public_epistemic_health(result)
         context["_system_prompt"] = self.prompt_template.render(context)
         return context
 
@@ -93,8 +113,6 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
         try:
             report = super().cycle()
         except BaseException:
-            # An interrupted session remains unresolved evidence rather than being
-            # silently relabelled as a failed hypothesis.
             raise
 
         session_id = self._current_epistemic_session_id
@@ -115,10 +133,12 @@ class EpistemicOrganismRuntime(ExternalWorkOrganismRuntime):
                 outcome_evidence=json.dumps(evidence, ensure_ascii=False, sort_keys=True, default=str),
             )
 
-        report["epistemic"] = self._current_epistemic_result or {
+        epistemic_result = self._current_epistemic_result or {
             "enabled": self.epistemic_registry.policy.enabled,
             "triggered": False,
         }
+        report["epistemic"] = epistemic_result
+        report["epistemic_health"] = self._public_epistemic_health(epistemic_result)
         report["epistemic_biographies"] = self.epistemic_cortex.biography_snapshot()
         return report
 
