@@ -22,6 +22,11 @@ jobs:
           cache: pip
       - name: Install
         run: python -m pip install -e '.[test]'
+      - name: Static correctness gates
+        run: |
+          python -m pip check
+          python -m compileall -q elia tests
+          ruff check elia tests
       - name: Test
         run: pytest -q --junitxml=pytest-report.xml
       - name: Upload pytest report
@@ -59,6 +64,8 @@ jobs:
           cache: pip
       - name: Install sensorimotor dependencies
         run: python -m pip install -e '.[test,sensorimotor]'
+      - name: Dependency consistency
+        run: python -m pip check
       - name: Install Chromium runtime
         run: python -m playwright install --with-deps chromium
       - name: Sensorimotor integration tests
