@@ -17,6 +17,7 @@ from .identity import IdentityBundle, IdentityStore
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
 from .metabolism import MetabolismEngine
+from .resource_status import public_resource_ecology, resource_ecology_status
 from .tools import ToolRegistry
 from .vitals import VitalSigns
 
@@ -124,6 +125,9 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
         metabolism_snapshot=metabolism,
     ).evaluate().as_dict()
     executive = executive_status_from_state(config, memory=memory, tools=tools)
+    ecology = public_resource_ecology(
+        resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
+    )
     return {
         "identity": _identity_snapshot(config),
         "lifecycle": {
@@ -149,6 +153,7 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
             ),
         },
         "metabolism": metabolism,
+        "resource_ecology": ecology,
         "homeostasis": {
             "mode": homeostasis.get("mode"),
             "signals": list(homeostasis.get("signals") or [])[:12],
@@ -171,11 +176,11 @@ def _status_snapshot(config: Config) -> dict[str, Any]:
 
 
 def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
-    """Build the Genesis 1.3 read-oriented MCP organism port without starting transport.
+    """Build the Genesis 1.4 read-oriented MCP organism port without starting transport.
 
-    The exported port exposes sanitized organism state and world-query functions,
-    never arbitrary shell execution, credentials, raw sensor payloads, mutation/
-    deployment authority, or new external permissions.
+    The exported port exposes sanitized organism state and world/resource query
+    functions, never arbitrary shell execution, credentials, raw sensor payloads,
+    private opportunity evidence, mutation/deployment authority, or new permissions.
     """
 
     _require_mcp()
@@ -187,7 +192,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_status() -> dict[str, Any]:
-        """Return sanitized continuity, physiology, Executive and body status."""
+        """Return sanitized continuity, physiology, Executive, resource and body status."""
         return _status_snapshot(config)
 
     @server.tool()
@@ -215,6 +220,14 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
     def elia_executive() -> dict[str, Any]:
         """Return current deterministic Executive plan and measured energy feedback."""
         return executive_status_from_state(config)
+
+    @server.tool()
+    def elia_resource_ecology() -> dict[str, Any]:
+        """Return exact resource targets, candidate scores and work lifecycle without raw evidence."""
+        metabolism = _metabolism(config)
+        return public_resource_ecology(
+            resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
+        )
 
     @server.tool()
     def elia_world_query(
@@ -259,7 +272,7 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.tool()
     def elia_homeostasis() -> dict[str, Any]:
-        """Return deterministic Genesis 1.3 physiology including verified metabolism."""
+        """Return deterministic Genesis 1.4 physiology including verified metabolism."""
         tools = ToolRegistry(
             config.runtime.state_dir / "workspace",
             config.raw_tools,
@@ -273,8 +286,20 @@ def build_mcp_server(config_path: str | Path = "config/genesis.yaml") -> Any:
 
     @server.resource("elia://status")
     def status_resource() -> str:
-        """Sanitized organism status snapshot including Executive state."""
+        """Sanitized organism status snapshot including Executive/resource state."""
         return json.dumps(_status_snapshot(config), ensure_ascii=False, sort_keys=True)
+
+    @server.resource("elia://resource-ecology")
+    def resource_ecology_resource() -> str:
+        """Sanitized typed resource-opportunity and work-lifecycle projection."""
+        metabolism = _metabolism(config)
+        return json.dumps(
+            public_resource_ecology(
+                resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     @server.resource("elia://sensorium/recent")
     def sensorium_resource() -> str:
@@ -309,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=("stdio", "streamable-http"),
         default="stdio",
-        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.3",
+        help="stdio is the safe local default; HTTP is loopback-only in Genesis 1.4",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -325,7 +350,7 @@ def main() -> None:
 
     if not _is_loopback_host(args.host):
         raise SystemExit(
-            "Genesis 1.3 MCP HTTP transport is intentionally loopback-only because "
+            "Genesis 1.4 MCP HTTP transport is intentionally loopback-only because "
             "this server does not implement a remote authentication policy. Put an "
             "authenticated reverse proxy/tunnel in front of it instead of exposing it directly."
         )
