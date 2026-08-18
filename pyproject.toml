@@ -7,6 +7,7 @@ name = "elia-wild"
 version = "1.7.0a1"
 description = "Persistent autonomous-identity organism and continuity research runtime"
 requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
   "httpx==0.28.1",
   "PyYAML==6.0.3",
@@ -18,6 +19,7 @@ test = [
   "setuptools==83.0.0",
   "ruff==0.16.3",
   "pip-audit==2.10.1",
+  "build==1.5.0",
 ]
 browser = ["playwright==1.62.0"]
 mcp = ["mcp==2.0.0"]
@@ -47,6 +49,18 @@ elia-mcp = "elia.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["elia*"]
+
+[tool.setuptools.data-files]
+"share/elia-wild/config" = [
+  "config/genesis.yaml",
+  "config/subject_core.yaml",
+  "config/continuity_constitution.yaml",
+  "config/epistemic.yaml",
+  "config/organism.yaml",
+  "config/system_prompt.md",
+]
+"share/elia-wild/config/organism.d" = ["config/organism.d/*.yaml"]
+"share/elia-wild/skills" = ["skills/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
