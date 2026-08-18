@@ -101,6 +101,30 @@ def _bounded_sensorium(items: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _bounded_homeostasis(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    signals = []
+    for item in list(value.get("signals") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        signals.append(
+            {
+                key: item.get(key)
+                for key in ("name", "severity", "reason", "response_hint")
+                if key in item
+            }
+        )
+    return {
+        "mode": value.get("mode"),
+        "signals": signals,
+        "storage": value.get("storage") or {},
+        "state_bus": value.get("state_bus") or {},
+        "sensorium": value.get("sensorium") or {},
+        "epistemics": value.get("epistemics") or {},
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     path: Path
@@ -147,6 +171,7 @@ class PromptTemplate:
                     "lifecycle_state",
                     "degraded_capabilities",
                     "needs",
+                    "homeostasis_mode",
                     "commitments",
                     "uncertainties",
                     "narrative",
@@ -161,6 +186,7 @@ class PromptTemplate:
             },
             "recent_sensorium": _bounded_sensorium(context.get("sensorium")),
             "causal_strategy_statistics": list(causal.get("strategy_statistics") or [])[:16],
+            "homeostasis": _bounded_homeostasis(context.get("homeostasis")),
             "digital_body": context.get("digital_body") or {},
             "organism_state_bus": context.get("organism_state_bus") or {},
             "metacognitive_calibration": context.get("metacognition") or {},
