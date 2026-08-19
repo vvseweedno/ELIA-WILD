@@ -4,8 +4,8 @@ import atexit
 from hashlib import sha256
 import importlib.util
 from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import urlparse
-from typing import Any
 from uuid import uuid4
 
 from .net import assert_http_url, is_safe_browser_subresource
@@ -22,9 +22,11 @@ class BrowserBody:
     permitted). Interactive actions additionally require an origin allow-list.
 
     Genesis 1.7 treats the *destination* of an interaction as a separate authority
-    boundary. During a click/fill operation, top-level document requests are allowed
-    only to configured trusted interaction origins; a trusted page cannot use a button,
-    form or redirect to smuggle an interaction to another origin.
+    boundary. While a click/fill operation is active, every request initiated by that
+    action must remain inside the configured trusted interaction origins. Denied
+    top-level navigations are answered locally with HTTP 204 rather than aborted so
+    Chromium keeps the last trusted document instead of replacing it with an error
+    document. No request is sent to the denied destination.
     """
 
     def __init__(self, workspace: Path, config: dict[str, Any] | None = None):
@@ -36,6 +38,7 @@ class BrowserBody:
         self._context = None
         self._page = None
         self._interaction_active = False
+        self._interaction_denied_url: str | None = None
         atexit.register(self.close)
 
     @property
@@ -111,8 +114,8 @@ class BrowserBody:
                 "Click one locator only on a configured trusted interaction origin.",
                 "{locator: {kind: role|text|css, role?: str, name?: str, text?: str, selector?: str}}",
                 "configured_browser_interaction",
-                "may cause remote state changes only through an allow-listed interaction origin",
-                "current_and_resulting_trusted_origin",
+                "may cause remote state changes only through allow-listed interaction origins",
+                "current_and_interaction_request_origins_trusted",
                 "network",
                 self.interaction_enabled,
                 interaction_readiness,
@@ -122,8 +125,8 @@ class BrowserBody:
                 "Fill one form control only on a configured trusted interaction origin without submitting it.",
                 "{locator: {...}, value: str}",
                 "configured_browser_interaction",
-                "changes current browser form state; navigation caused by page scripts remains origin-gated",
-                "current_and_resulting_trusted_origin",
+                "changes current browser form state; script requests remain origin-gated",
+                "current_and_interaction_request_origins_trusted",
                 "network",
                 self.interaction_enabled,
                 interaction_readiness,
@@ -189,12 +192,15 @@ class BrowserBody:
 
         def guard(route: Any) -> None:
             request = route.request
-            if (
-                self._interaction_active
-                and request.resource_type == "document"
-                and not self._interaction_destination_allowed(request.url)
-            ):
-                route.abort("blockedbyclient")
+            if self._interaction_active and not self._interaction_destination_allowed(request.url):
+                self._interaction_denied_url = request.url
+                if request.resource_type == "document":
+                    # A local 204 does not contact the destination and keeps Chromium on
+                    # the previous document. route.abort() would replace it with
+                    # chrome-error://chromewebdata/, destroying trusted interaction state.
+                    route.fulfill(status=204, content_type="text/plain", body="")
+                else:
+                    route.abort("blockedbyclient")
                 return
             if is_safe_browser_subresource(request.url, allow_private=allow_private):
                 route.continue_()
@@ -213,6 +219,7 @@ class BrowserBody:
         )
         self._page = self._context = self._browser = self._playwright = None
         self._interaction_active = False
+        self._interaction_denied_url = None
         for item in (page, context, browser):
             if item is not None:
                 try:
@@ -232,6 +239,35 @@ class BrowserBody:
             raise PermissionError(
                 f"browser interaction origin is not allow-listed: {origin or self._page.url!r}"
             )
+
+    def _consume_interaction_denial(self) -> str | None:
+        denied_url = self._interaction_denied_url
+        self._interaction_denied_url = None
+        return denied_url
+
+    def _run_interaction(self, action: Callable[[], None]) -> None:
+        """Run one interaction as a fail-closed authority transaction."""
+        self._interaction_denied_url = None
+        self._interaction_active = True
+        try:
+            try:
+                action()
+            except Exception as exc:
+                denied_url = self._consume_interaction_denial()
+                if denied_url is not None:
+                    raise PermissionError(
+                        f"browser interaction destination is not allow-listed: {denied_url!r}"
+                    ) from exc
+                raise
+        finally:
+            self._interaction_active = False
+
+        denied_url = self._consume_interaction_denial()
+        if denied_url is not None:
+            raise PermissionError(
+                f"browser interaction destination is not allow-listed: {denied_url!r}"
+            )
+        self._assert_interaction_origin()
 
     def _locator(self, spec: dict[str, Any]) -> Any:
         self._ensure_started()
@@ -258,9 +294,7 @@ class BrowserBody:
 
     def _snapshot(self) -> dict[str, Any]:
         self._ensure_started()
-        max_text = max(
-            1000, min(int(self.config.get("max_text_chars", 50_000)), 200_000)
-        )
+        max_text = max(1000, min(int(self.config.get("max_text_chars", 50_000)), 200_000))
         body = self._page.locator("body")
         text = (
             body.inner_text(timeout=int(self.config.get("timeout_ms", 20_000)))
@@ -284,15 +318,8 @@ class BrowserBody:
 
     def navigate(self, url: str) -> BodyResult:
         if not self.enabled:
-            return BodyResult(
-                False,
-                "browser_navigate",
-                error="browser body is disabled/unavailable",
-            )
-        assert_http_url(
-            url,
-            allow_private=bool(self.config.get("allow_private", False)),
-        )
+            return BodyResult(False, "browser_navigate", error="browser body is disabled/unavailable")
+        assert_http_url(url, allow_private=bool(self.config.get("allow_private", False)))
         self._ensure_started()
         response = self._page.goto(
             url,
@@ -300,10 +327,7 @@ class BrowserBody:
             timeout=int(self.config.get("timeout_ms", 20_000)),
         )
         final_url = self._page.url
-        assert_http_url(
-            final_url,
-            allow_private=bool(self.config.get("allow_private", False)),
-        )
+        assert_http_url(final_url, allow_private=bool(self.config.get("allow_private", False)))
         data = self._snapshot()
         data["status_code"] = response.status if response is not None else None
         return BodyResult(True, "browser_navigate", data)
@@ -312,68 +336,38 @@ class BrowserBody:
         try:
             return BodyResult(True, "browser_snapshot", self._snapshot())
         except Exception as exc:
-            return BodyResult(
-                False,
-                "browser_snapshot",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            return BodyResult(False, "browser_snapshot", error=f"{type(exc).__name__}: {exc}")
 
     def click(self, locator: dict[str, Any]) -> BodyResult:
         if not self.interaction_enabled:
-            return BodyResult(
-                False,
-                "browser_click",
-                error="browser interaction is disabled/unavailable",
-            )
+            return BodyResult(False, "browser_click", error="browser interaction is disabled/unavailable")
         try:
             self._assert_interaction_origin()
             target = self._locator(locator)
-            self._interaction_active = True
-            try:
-                target.click(timeout=int(self.config.get("timeout_ms", 20_000)))
-            finally:
-                self._interaction_active = False
-            self._assert_interaction_origin()
+            self._run_interaction(
+                lambda: target.click(timeout=int(self.config.get("timeout_ms", 20_000)))
+            )
             return BodyResult(True, "browser_click", self._snapshot())
         except Exception as exc:
-            return BodyResult(
-                False,
-                "browser_click",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            return BodyResult(False, "browser_click", error=f"{type(exc).__name__}: {exc}")
 
     def fill(self, locator: dict[str, Any], value: str) -> BodyResult:
         if not self.interaction_enabled:
-            return BodyResult(
-                False,
-                "browser_fill",
-                error="browser interaction is disabled/unavailable",
-            )
+            return BodyResult(False, "browser_fill", error="browser interaction is disabled/unavailable")
         if len(str(value)) > 32_000:
-            return BodyResult(
-                False,
-                "browser_fill",
-                error="fill value exceeds 32k characters",
-            )
+            return BodyResult(False, "browser_fill", error="fill value exceeds 32k characters")
         try:
             self._assert_interaction_origin()
             target = self._locator(locator)
-            self._interaction_active = True
-            try:
-                target.fill(
+            self._run_interaction(
+                lambda: target.fill(
                     str(value),
                     timeout=int(self.config.get("timeout_ms", 20_000)),
                 )
-            finally:
-                self._interaction_active = False
-            self._assert_interaction_origin()
+            )
             return BodyResult(True, "browser_fill", self._snapshot())
         except Exception as exc:
-            return BodyResult(
-                False,
-                "browser_fill",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            return BodyResult(False, "browser_fill", error=f"{type(exc).__name__}: {exc}")
 
     def screenshot(self, full_page: bool = False) -> BodyResult:
         self._ensure_started()
