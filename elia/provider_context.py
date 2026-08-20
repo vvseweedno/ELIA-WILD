@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
+
+from .redaction import scrub_secrets
 
 _PUBLIC_CONTEXT_KEYS = frozenset(
     {
@@ -354,4 +356,4 @@ def provider_context(context: dict[str, Any]) -> dict[str, Any]:
             public[name] = _epistemic_metadata(value)
             continue
         public[name] = deepcopy(value)
-    return public
+    return cast(dict[str, Any], scrub_secrets(public))
