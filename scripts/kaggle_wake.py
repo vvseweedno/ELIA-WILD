@@ -14,6 +14,7 @@ from typing import Any
 from elia.checkpoint import CheckpointManager
 from elia.config import load_config
 from elia.lifecycle import evaluate_preflight
+from elia.wake_anchor import WakeTrustAnchorStore, default_anchor_path
 from elia.wake_transport import (
     CHECKPOINT_NAME,
     DIGEST_NAME,
@@ -271,6 +272,7 @@ def accept_completed_output(
     identity_name: str,
     dataset: str,
     root: Path,
+    trust_anchor: WakeTrustAnchorStore,
 ) -> tuple[Path, str, TransportState]:
     output_root = download_kernel_output(kernel, root / "kernel-output")
     output_checkpoint, output_digest_file, _ = locate_state_bundle(output_root)
@@ -319,6 +321,8 @@ def accept_completed_output(
         message=f"ELIA relay accepted encrypted checkpoint {output_info.counter}",
         root=root,
     )
+    # Advance the independent anchor only after the new Dataset version is durable.
+    trust_anchor.accept(counter=output_info.counter, digest=output_info.digest)
     print_event(
         "relay_accepted",
         digest=output_info.digest,
@@ -385,6 +389,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repo-ref", default=os.getenv("ELIA_REPO_REF", "main"))
     parser.add_argument(
+        "--trust-anchor",
+        default=str(default_anchor_path()),
+        help="Durable rollback anchor initialized by bootstrap and stored outside Kaggle",
+    )
+    parser.add_argument(
         "--max-cycles",
         type=int,
         default=int(os.getenv("ELIA_WAKE_MAX_CYCLES", "8")),
@@ -416,6 +425,12 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     config = load_config(repo_root / args.config)
+    trust_anchor = WakeTrustAnchorStore(
+        Path(args.trust_anchor),
+        key=key.encode("utf-8"),
+        identity_name=config.identity_name,
+        state_dataset=args.state_dataset,
+    )
 
     with tempfile.TemporaryDirectory(prefix="elia-wake-") as temp_raw:
         root = Path(temp_raw)
@@ -433,10 +448,15 @@ def main() -> int:
             identity_name=config.identity_name,
             state_dir=root / "restored-state",
         )
+        anchor = trust_anchor.accept(
+            counter=source_info.counter,
+            digest=source_digest,
+        )
         print_event(
             "state_loaded",
             digest=source_digest,
             counter=source_info.counter,
+            trusted_anchor_counter=anchor.counter,
             pending=bool(transport.pending_launch_nonce),
             consecutive_kernel_failures=transport.consecutive_kernel_failures,
             encrypted_checkpoint=True,
@@ -460,6 +480,7 @@ def main() -> int:
                         identity_name=config.identity_name,
                         dataset=args.state_dataset,
                         root=root,
+                        trust_anchor=trust_anchor,
                     )
                 except Exception as exc:
                     failed = mark_failure(
@@ -616,6 +637,7 @@ def main() -> int:
             nonce=pending.pending_launch_nonce,
             output=(pushed.stdout or "")[-1000:],
             encrypted_checkpoint_required=True,
+            trust_anchor=str(trust_anchor.path),
         )
         return 0
 
