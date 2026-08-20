@@ -17,6 +17,7 @@ from elia.identity import IdentityBundle, IdentityStore, build_self_model_snapsh
 from elia.memory import MemoryStore
 from elia.prompting import PromptTemplate
 from elia.tools import ToolRegistry
+from elia.wake_anchor import WakeTrustAnchorStore, default_anchor_path
 from elia.wake_transport import (
     CHECKPOINT_NAME,
     DIGEST_NAME,
@@ -62,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="config/genesis.yaml")
     parser.add_argument("--dataset", required=True, help="Kaggle dataset id owner/dataset-slug")
     parser.add_argument("--output", default=".bootstrap/elia-wild-state")
+    parser.add_argument(
+        "--trust-anchor",
+        default=str(default_anchor_path()),
+        help="Durable relay-host rollback anchor kept outside the Kaggle Dataset",
+    )
     parser.add_argument(
         "--create-dataset",
         action="store_true",
@@ -191,6 +197,14 @@ def main() -> None:
     write_digest(output / DIGEST_NAME, info.digest)
     transport = mark_success(TransportState(), info.digest, info.counter)
     write_transport_state(output / TRANSPORT_NAME, transport)
+    anchor_path = Path(args.trust_anchor).expanduser().resolve()
+    anchor = WakeTrustAnchorStore(
+        anchor_path,
+        key=key.encode("utf-8"),
+        identity_name=config.identity_name,
+        state_dataset=args.dataset,
+    ).initialize(counter=info.counter, digest=info.digest)
+
     metadata = {
         "title": "ELIA WILD Private Encrypted State",
         "id": args.dataset,
@@ -218,6 +232,8 @@ def main() -> None:
                 "self_model_fingerprint": self_model_fp,
                 "private_by_default": True,
                 "encrypted_at_rest": True,
+                "external_trust_anchor": str(anchor_path),
+                "trust_anchor_counter": anchor.counter,
             },
             ensure_ascii=False,
             indent=2,
