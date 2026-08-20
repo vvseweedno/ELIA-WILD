@@ -11,7 +11,7 @@ from typing import Any
 from .brain import MockBrain
 from .chronicle import Chronicle
 from .config import Config
-from .continuity_runtime import ContinuityKernelRuntime
+from .continuity_runtime import ELIARuntime
 from .crc import build_crc
 from .lifecycle import evaluate_preflight
 from .memory import MemoryStore
@@ -64,7 +64,7 @@ RUNTIME_ANCESTRY = {
     "resource_runtime": "ResourceOrganismRuntime",
     "external_work_runtime": "ExternalWorkOrganismRuntime",
     "epistemic_runtime": "EpistemicOrganismRuntime",
-    "continuity_kernel_runtime": "ContinuityKernelRuntime",
+    "continuity_kernel_runtime": "ELIARuntime",
 }
 
 
@@ -124,7 +124,7 @@ class ViabilityReport:
 def _contract(organ: OrganSpec) -> ViabilityContract:
     runtime_path = RUNTIME_WIRING.get(organ.id)
     if runtime_path is None and organ.id in RUNTIME_ANCESTRY:
-        runtime_path = f"ContinuityKernelRuntime.mro:{RUNTIME_ANCESTRY[organ.id]}"
+        runtime_path = f"ELIARuntime.mro:{RUNTIME_ANCESTRY[organ.id]}"
     if runtime_path is None:
         runtime_path = (
             organ.path
@@ -145,7 +145,7 @@ def _contract(organ: OrganSpec) -> ViabilityContract:
         else f"{organ.module}.{organ.symbol or '<module>'}"
     )
     consumer = (
-        "ContinuityKernelRuntime production graph"
+        "ELIARuntime production graph"
         if organ.id in RUNTIME_WIRING or organ.id in RUNTIME_ANCESTRY
         else "configured runtime / deterministic lifecycle"
     )
@@ -218,7 +218,7 @@ def _scratch_config(config: Config, state_dir: Path) -> Config:
     )
 
 
-def _persistence_probe(runtime: ContinuityKernelRuntime) -> dict[str, Any]:
+def _persistence_probe(runtime: ELIARuntime) -> dict[str, Any]:
     runtime.memory.set_meta("deep_viability_sentinel", "accepted")
     database = runtime.config.runtime.state_dir / "memory.sqlite3"
     reloaded = MemoryStore(database)
@@ -311,7 +311,7 @@ def _verification_probe(database: Path) -> dict[str, Any]:
     return {"ok": replay_blocked, "single_use_replay_blocked": replay_blocked}
 
 
-def _recovery_probe(runtime: ContinuityKernelRuntime) -> dict[str, Any]:
+def _recovery_probe(runtime: ELIARuntime) -> dict[str, Any]:
     state_dir = runtime.config.runtime.state_dir
     chronicle = Chronicle(state_dir / "chronicle.jsonl")
     before_seq, before_hash = chronicle.head()
@@ -356,7 +356,7 @@ def run_deep_viability(config: Config, manifest: OrganismManifest) -> ViabilityR
 
     with tempfile.TemporaryDirectory(prefix="elia-deep-vitals-") as temp:
         scratch_state = Path(temp) / ".elia"
-        runtime = ContinuityKernelRuntime(
+        runtime = ELIARuntime(
             _scratch_config(config, scratch_state),
             brain=MockBrain(),
         )
@@ -447,7 +447,7 @@ def run_deep_viability(config: Config, manifest: OrganismManifest) -> ViabilityR
     )
     return ViabilityReport(
         healthy=healthy,
-        runtime_class=ContinuityKernelRuntime.__name__,
+        runtime_class=ELIARuntime.__name__,
         required_organ_count=len(required),
         contract_count=len(contracts),
         probes=tuple(probes),
