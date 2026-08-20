@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
   "httpx==0.28.1",
+  "PyNaCl==1.6.2",
   "PyYAML==6.0.3",
 ]
 
