@@ -1,177 +1,156 @@
-# Kaggle runtime
+# ELIA WILD on Kaggle
 
-ELIA WILD treats Kaggle GPU time as a scarce energy budget. The runtime tracks both:
+Kaggle is a bounded compute organ for ELIA, not the identity store. Identity, lineage,
+memory, resource state and authority survive outside any one GPU session through the
+continuity checkpoint path.
 
-- active runtime/session wall time (`gpu_runtime_seconds`)
-- actual model-call wall time (`brain_seconds`)
-
-The configured weekly ceiling is 30 hours. Kaggle's own quota remains authoritative; the local ledger is an internal planning signal, not a replacement for platform accounting.
-
-## 1. Prove the body without GPU
-
-Before loading Qwen:
-
-```bash
-pip install -e '.[test]'
-ELIA_BRAIN=mock pytest
-ELIA_BRAIN=mock python -m elia --cycles 3
-python -m elia --verify
-python -m elia --status
-```
-
-Do not spend GPU quota until this path is green.
-
-## 2. CPU-only autonomic preflight
-
-Every normal launch now evaluates persistent state **before constructing the model backend**. You can inspect the decision explicitly:
-
-```bash
-python -m elia --preflight
-```
-
-The result is one of:
-
-- `wake` — continuity is valid, local GPU budget remains and the intended wake time is due;
-- `hibernate` — the intended wake time is still in the future or local weekly GPU budget is exhausted;
-- `halt` — Chronicle integrity failed and normal cognition must not start.
-
-`--force-wake` may bypass a future scheduler timestamp, but it cannot bypass Chronicle integrity or exhausted-budget guards.
-
-This means a launcher can call ELIA frequently without paying the cost of loading Qwen every time.
-
-## 3. Install the constrained-GPU brain
-
-The default Genesis path loads Qwen directly with Transformers and bitsandbytes 4-bit quantization:
-
-```bash
-pip install -e '.[gpu]'
-```
-
-Default model configuration:
+## Production path
 
 ```text
-backend        transformers_4bit
-model          Qwen/Qwen3.5-9B
-quantization   NF4 4-bit + double quant
-compute dtype  float16
-thinking       false
-max output     1024 tokens
+private encrypted state Dataset
+        ↓
+CPU restore + digest/identity/Chronicle verification
+        ↓
+preflight: halt | hibernate | wake
+        ↓ wake only
+private T4 kernel + pinned ELIA ref
+        ↓
+bounded Qwen cognition
+        ↓
+accepted transition + hibernate
+        ↓
+XChaCha20-Poly1305 encrypted checkpoint
+        ↓
+relay verifies digest/counter/nonce
+        ↓
+new private Dataset version
 ```
 
-Run one real cognitive cycle first:
+The local Executive budget is a planning constraint; Kaggle's actual quota remains
+authoritative.
+
+## Required secrets
+
+Create two independent secrets and keep them outside Git, checkpoints and Dataset
+metadata:
+
+- `ELIA_CHECKPOINT_KEY` — HMAC/authentication key, at least 16 bytes; use a long random
+  value.
+- `ELIA_CHECKPOINT_ENCRYPTION_KEY` — **base64 encoding of exactly 32 random bytes** for
+  the XChaCha20-Poly1305 envelope.
+
+Example local generation:
 
 ```bash
-python -m elia --cycles 1
-python -m elia --verify
-python -m elia --status
+python - <<'PY'
+import base64, secrets
+print('ELIA_CHECKPOINT_KEY=' + secrets.token_urlsafe(48))
+print('ELIA_CHECKPOINT_ENCRYPTION_KEY=' + base64.b64encode(secrets.token_bytes(32)).decode())
+PY
 ```
 
-The brain is lazy-loaded: reaching `EliaRuntime` or running preflight/status does not itself instantiate Qwen. The first actual `_think()` loads the configured model.
+For the manual/controlled notebook, attach both labels in Kaggle **Add-ons → Secrets**.
+For the unattended relay, attach both labels once to the persistent private kernel ID
+configured as `ELIA_KAGGLE_KERNEL`. Kaggle's current kernel metadata supports datasets,
+GPU and internet settings but does not attach user secrets; secret attachment is a
+one-time deployment property of that kernel.
 
-## 4. Hibernation instead of GPU sleep
+## First launch notebook
 
-`runtime.max_in_session_sleep_seconds` defaults to 5 seconds. If the cognitive cycle requests a longer delay, ELIA records a `HIBERNATE` Chronicle transition and exits instead of holding a Kaggle GPU while sleeping.
+Use `runtime/kaggle/ELIA_WILD_Genesis.ipynb` with a T4 GPU and Internet enabled. It is
+fail-closed and performs:
 
-For Kaggle, configure an automatic authenticated checkpoint destination:
+1. clone the pinned consolidation ref;
+2. require and validate both continuity secrets;
+3. restore one attached encrypted ELIA state bundle, or create fresh Genesis state;
+4. run `elia-doctor`, `elia-vitals`, Chronicle verification, status and supervisor
+   dry-run before loading a model;
+5. prove a real CUDA operation works;
+6. install the pinned 4-bit Qwen backend;
+7. run one bounded real cognition cycle;
+8. verify accepted state;
+9. export an encrypted checkpoint and trusted digest;
+10. restore that checkpoint into an independent state directory and verify it again.
+
+A failed gate stops the notebook. There is no plaintext fallback.
+
+## Bootstrap the private state Dataset
+
+On an authorized machine with Kaggle CLI configured:
 
 ```bash
-export ELIA_AUTO_CHECKPOINT_PATH=/kaggle/working/elia-genesis.eliacp
+export ELIA_CHECKPOINT_KEY='...'
+export ELIA_CHECKPOINT_ENCRYPTION_KEY='...base64...'
+export KAGGLE_API_TOKEN='...'
+
+python scripts/bootstrap_kaggle_state.py \
+  --dataset <owner>/elia-wild-state \
+  --output .bootstrap/elia-wild-state \
+  --create-dataset
 ```
 
-The checkpoint still requires the secret `ELIA_CHECKPOINT_KEY`. After a clean finite run or hibernation, the CLI exports the authenticated checkpoint automatically when both are configured.
+The bootstrap script requires encryption and strips both ELIA keys from the environment
+passed to the external `kaggle` CLI process.
 
-This changes the intended lifecycle from:
+## Unattended wake relay
 
-```text
-load Qwen -> think -> sleep on GPU -> think -> sleep on GPU
-```
-
-to:
-
-```text
-CPU preflight
-    ↓ only if due
-load Qwen -> think -> persist next wake -> HIBERNATE -> authenticated checkpoint -> release session
-```
-
-**Current boundary:** hibernation and the wake contract are implemented, but this repository does not yet independently relaunch a stopped Kaggle session. A separate wake transport/launcher is the next systems layer.
-
-## 5. Alternate local API path
-
-If a compatible vLLM/SGLang/Transformers server is already running:
+Configure the same authorized relay host:
 
 ```bash
-export ELIA_BRAIN=openai_compatible
-export ELIA_MODEL_BASE_URL=http://127.0.0.1:8000/v1
-export ELIA_MODEL_ID=Qwen/Qwen3.5-9B
-python -m elia --cycles 1
+export KAGGLE_API_TOKEN='...'
+export ELIA_CHECKPOINT_KEY='...'
+export ELIA_CHECKPOINT_ENCRYPTION_KEY='...base64...'
+export ELIA_KAGGLE_STATE_DATASET='<owner>/elia-wild-state'
+export ELIA_KAGGLE_KERNEL='<owner>/elia-wild-runtime'
+export ELIA_REPO_REF='elia/genesis-1.7.1-consolidation'
+
+python scripts/kaggle_wake.py
 ```
 
-The model server is deliberately external to ELIA's identity state. Replacing the server or checkpoint must not erase continuity.
+The relay is idempotent around a persisted pending launch nonce. It:
 
-## 6. Durable state and authenticated handoff
+- rejects plaintext checkpoints;
+- verifies the trusted digest before restore;
+- does not launch GPU cognition when preflight says hibernate/halt;
+- records a pending launch before pushing a kernel;
+- accepts output only when nonce, source digest, checkpoint digest/counter and encrypted
+  envelope agree;
+- suppresses additional launches after repeated failures;
+- versions the private state Dataset only after successful verification.
 
-`.elia/` contains the durable identity state:
+The Kaggle CLI child receives its own API credential but not ELIA continuity keys. The
+remote kernel reads the two continuity secrets from its attached Kaggle Secrets.
 
-```text
-.elia/memory.sqlite3
-.elia/chronicle.jsonl
-.elia/workspace/
-.elia/checkpoint.anchor.json
-```
+## Hibernation
 
-The public GitHub repository contains code only. Do **not** commit `.elia/`, checkpoint archives, private memory, or checkpoint secrets.
+ELIA does not intentionally hold paid/scarce GPU time while sleeping. Long waits become
+persistent hibernation: next-wake state is recorded, an encrypted checkpoint is emitted,
+and the session may terminate. A later authorized heartbeat invokes the relay again.
 
-Create a long random secret once and store it in Kaggle Secrets as `ELIA_CHECKPOINT_KEY`. The same secret must be available in every session that exports, inspects, or restores ELIA state.
+## Fresh-machine restore contract
 
-Before ending a healthy session manually:
+A fresh machine has no local rollback anchor, so restore requires the trusted digest:
 
 ```bash
-python -m elia --verify
-python -m elia --checkpoint-export /kaggle/working/elia-genesis.eliacp
-```
-
-The command prints a `digest`. Preserve two separate things:
-
-1. `elia-genesis.eliacp` — private checkpoint payload; store it in a private persistence channel such as a private Kaggle Dataset or another private user-controlled store.
-2. the printed checkpoint `digest` — trusted rollback anchor; keep it separately from the checkpoint itself.
-
-The HMAC key is never placed in the archive. The checkpoint contains authenticated hashes of SQLite state, Chronicle, and workspace files.
-
-### Fresh Kaggle session
-
-Clone/install the repository, restore the same Kaggle secret, obtain the latest private checkpoint, then run **before loading Qwen**:
-
-```bash
+export ELIA_CHECKPOINT_REQUIRE_ENCRYPTION=1
 python -m elia \
   --checkpoint-restore /path/to/elia-genesis.eliacp \
   --expected-checkpoint-digest <TRUSTED_DIGEST>
 python -m elia --verify
 python -m elia --preflight
-python -m elia --status
 ```
 
-If preflight returns `wake`, start normal cognition:
+The checkpoint manager validates AEAD authentication, HMAC/manifest hashes, member and
+size limits, SQLite integrity, Chronicle head, identity fingerprint and rollback/fork
+rules before promoting restored state.
 
-```bash
-python -m elia
-```
+## What this proves — and what it does not
 
-On an existing machine, `.elia/checkpoint.anchor.json` rejects checkpoints older than the locally trusted counter. On a completely fresh machine there is no local history, so `--expected-checkpoint-digest` is the external fact that prevents a valid-but-old checkpoint from masquerading as the latest state.
+A successful end-to-end run proves that this implementation can install, restore a
+verified identity state, execute a real model cycle on Kaggle, persist the accepted
+transition in encrypted form and restore it again. Repeated successful relayed runs can
+then measure continuity and autonomous operation over time.
 
-If restore fails authentication, integrity, Chronicle, SQLite, identity-name, rollback, or expected-digest checks, **do not boot the model from that state**.
-
-## 7. What a successful first GPU run proves
-
-It proves only that:
-
-1. Qwen loads in the available Kaggle accelerator memory.
-2. One model decision can be parsed into ELIA's structured action schema.
-3. The action executes through the bounded capability layer.
-4. The result returns to persistent memory and capability health.
-5. The Chronicle remains valid afterward.
-6. The next intended wake time is persisted.
-7. A long idle interval becomes hibernation rather than GPU sleep.
-8. The resulting identity state can be checkpointed and authenticated for the next session.
-
-It does **not** yet prove long-term autonomy, economic self-maintenance, identity continuity over long horizons, independent wake-up transport, or unattended survival.
+It does not by itself prove consciousness, AGI, economic self-sufficiency or indefinite
+survival. Those are empirical claims requiring longitudinal evidence, not deployment
+labels.
