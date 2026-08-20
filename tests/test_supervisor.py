@@ -44,6 +44,20 @@ def seed_identity_meta(supervisor: ResidentSupervisor) -> MemoryStore:
     return memory
 
 
+def test_supervisor_resolves_default_config_outside_checkout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = repo_root()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ELIA_STATE_DIR", str(tmp_path / ".elia"))
+
+    supervisor = ResidentSupervisor(Path("config/genesis.yaml"))
+
+    assert supervisor.config_path == (root / "config" / "genesis.yaml").resolve()
+    assert supervisor.config.runtime.state_dir == (tmp_path / ".elia").resolve()
+
+
 def test_supervisor_sleeps_when_next_wake_is_in_future(tmp_path: Path) -> None:
     supervisor = ResidentSupervisor(make_config_copy(tmp_path), heartbeat_seconds=10, max_cycles=3)
     memory = seed_identity_meta(supervisor)
