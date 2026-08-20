@@ -6,14 +6,14 @@ from .epistemic_runtime import EpistemicOrganismRuntime
 from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 
 
-class ContinuityKernelRuntime(EpistemicOrganismRuntime):
-    """Genesis 1.7 production runtime with crash-recoverable accepted transitions.
+class ELIARuntime(EpistemicOrganismRuntime):
+    """Canonical ELIA production runtime with crash-recoverable transitions.
 
-    Historical 1.0–1.6 runtime layers remain inspectable rollback ancestors. This top
-    layer changes the production commit semantics without rewriting those generations:
-    a complete cognitive cycle is either accepted as one durable state transition or
-    its speculative local state/Chronicle suffix is restored. Safety-critical external
-    work outbox evidence survives rollback and repairs its local projection afterwards.
+    Historical Genesis runtime layers remain compatibility ancestors while the public
+    runtime surface converges on this single class. A complete cognitive cycle is
+    either accepted as one durable state transition or its speculative local state and
+    Chronicle suffix are restored. Safety-critical external-work outbox evidence
+    survives rollback and repairs its local projection afterwards.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -71,4 +71,6 @@ class ContinuityKernelRuntime(EpistemicOrganismRuntime):
             raise
 
 
-EliaContinuityRuntime = ContinuityKernelRuntime
+# Compatibility names for code written against Genesis 1.7 before runtime consolidation.
+ContinuityKernelRuntime = ELIARuntime
+EliaContinuityRuntime = ELIARuntime
