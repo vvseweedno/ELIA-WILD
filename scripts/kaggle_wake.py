@@ -42,20 +42,17 @@ PENDING_TIMEOUT_SECONDS = 8 * 3600
 DATASET_READY_TIMEOUT_SECONDS = 180
 DATASET_POLL_SECONDS = 5
 
+_CONTINUITY_ENV = (
+    "ELIA_CHECKPOINT_KEY",
+    "ELIA_CHECKPOINT_ENCRYPTION_KEY",
+    "ELIA_CHECKPOINT_REQUIRE_ENCRYPTION",
+)
+
 
 def _kaggle_child_env() -> dict[str, str]:
-    """Least-privilege environment for the external Kaggle CLI.
-
-    The relay needs continuity secrets locally, but the Kaggle CLI only needs its own
-    API credential. Identity-state authentication/encryption keys must never be
-    delegated to that subprocess.
-    """
+    """Give Kaggle CLI its credential without delegating ELIA continuity keys."""
     env = os.environ.copy()
-    for name in (
-        "ELIA_CHECKPOINT_KEY",
-        "ELIA_CHECKPOINT_ENCRYPTION_KEY",
-        "ELIA_CHECKPOINT_REQUIRE_ENCRYPTION",
-    ):
+    for name in _CONTINUITY_ENV:
         env.pop(name, None)
     return env
 
@@ -117,9 +114,11 @@ def dataset_status(dataset: str) -> tuple[str, str]:
         check=False,
     )
     output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        return "unknown", output
-    return parse_dataset_status(output), output
+    return (
+        (parse_dataset_status(output), output)
+        if result.returncode == 0
+        else ("unknown", output)
+    )
 
 
 def wait_dataset_ready(
@@ -160,8 +159,7 @@ def dataset_upload_dir(
     command(
         ["kaggle", "datasets", "metadata", dataset, "--path", str(destination)]
     )
-    metadata = destination / "dataset-metadata.json"
-    if not metadata.is_file():
+    if not (destination / "dataset-metadata.json").is_file():
         raise RuntimeError("Kaggle did not return dataset-metadata.json")
     return destination
 
@@ -176,8 +174,7 @@ def version_state_dataset(
     root: Path,
 ) -> None:
     upload = root / "dataset-upload"
-    if upload.exists():
-        shutil.rmtree(upload)
+    shutil.rmtree(upload, ignore_errors=True)
     dataset_upload_dir(dataset, checkpoint, digest, transport, upload)
     command(
         [
@@ -212,6 +209,15 @@ def pending_age_seconds(state: TransportState) -> float | None:
     )
 
 
+def _strict_manager(state_dir: Path, identity_name: str, key: str) -> CheckpointManager:
+    return CheckpointManager(
+        state_dir,
+        identity_name,
+        key.encode("utf-8"),
+        require_encryption=True,
+    )
+
+
 def inspect_restore(
     *,
     checkpoint: Path,
@@ -220,14 +226,8 @@ def inspect_restore(
     identity_name: str,
     state_dir: Path,
 ) -> tuple[CheckpointManager, Any]:
-    if state_dir.exists():
-        shutil.rmtree(state_dir)
-    manager = CheckpointManager(
-        state_dir,
-        identity_name,
-        key.encode("utf-8"),
-        require_encryption=True,
-    )
+    shutil.rmtree(state_dir, ignore_errors=True)
+    manager = _strict_manager(state_dir, identity_name, key)
     info = manager.inspect(checkpoint, expected_digest=digest)
     manager.restore(checkpoint, expected_digest=digest)
     return manager, info
@@ -236,14 +236,15 @@ def inspect_restore(
 def kernel_status(kernel: str) -> tuple[str, str]:
     result = command(["kaggle", "kernels", "status", kernel], check=False)
     output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        return "unknown", output
-    return parse_kernel_status(output), output
+    return (
+        (parse_kernel_status(output), output)
+        if result.returncode == 0
+        else ("unknown", output)
+    )
 
 
 def download_kernel_output(kernel: str, destination: Path) -> Path:
-    if destination.exists():
-        shutil.rmtree(destination)
+    shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True)
     command(
         [
@@ -273,10 +274,10 @@ def accept_completed_output(
 ) -> tuple[Path, str, TransportState]:
     output_root = download_kernel_output(kernel, root / "kernel-output")
     output_checkpoint, output_digest_file, _ = locate_state_bundle(output_root)
-    matches = [path for path in output_root.rglob(RELAY_REPORT_NAME) if path.is_file()]
-    if len(matches) != 1:
+    reports = [path for path in output_root.rglob(RELAY_REPORT_NAME) if path.is_file()]
+    if len(reports) != 1:
         raise RuntimeError("completed kernel output has no unique relay-report.json")
-    report = json.loads(matches[0].read_text(encoding="utf-8"))
+    report = json.loads(reports[0].read_text(encoding="utf-8"))
     if not isinstance(report, dict):
         raise RuntimeError("relay-report.json must contain a JSON object")
     if not state.pending_launch_nonce:
@@ -295,13 +296,9 @@ def accept_completed_output(
     if report_digest != file_digest:
         raise RuntimeError("relay report digest and trusted-digest.txt disagree")
 
-    inspector = CheckpointManager(
-        root / "inspect-only",
-        identity_name,
-        key.encode("utf-8"),
-        require_encryption=True,
-    )
-    output_info = inspector.inspect(output_checkpoint, expected_digest=file_digest)
+    output_info = _strict_manager(
+        root / "inspect-only", identity_name, key
+    ).inspect(output_checkpoint, expected_digest=file_digest)
     if output_info.digest != report_digest or output_info.counter != report_counter:
         raise RuntimeError("output checkpoint metadata disagrees with relay report")
 
@@ -344,8 +341,7 @@ def prepare_kernel(
     repo_ref: str,
     max_cycles: int,
 ) -> Path:
-    if destination.exists():
-        shutil.rmtree(destination)
+    shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True)
     template = (repo_root / "runtime" / "kaggle" / "runner_template.py").read_text(
         encoding="utf-8"
@@ -375,7 +371,9 @@ def prepare_kernel(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ELIA WILD encrypted external wake heartbeat")
+    parser = argparse.ArgumentParser(
+        description="ELIA WILD encrypted external wake heartbeat"
+    )
     parser.add_argument("--config", default="config/genesis.yaml")
     parser.add_argument(
         "--state-dataset", default=os.getenv("ELIA_KAGGLE_STATE_DATASET", "")
@@ -585,7 +583,7 @@ def main() -> int:
                     "push",
                     "--path",
                     str(kernel_dir),
-                    "--accelerator",
+                    "--acc",
                     args.accelerator,
                     "--timeout",
                     str(kernel_timeout),
