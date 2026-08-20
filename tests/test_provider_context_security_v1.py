@@ -35,6 +35,14 @@ def test_provider_context_never_forwards_raw_sensor_payload() -> None:
     assert "secret" not in public["sensorium"][0]["provenance"]
 
 
-def test_provider_context_drops_all_private_runtime_keys() -> None:
-    public = provider_context({"visible": {"x": 1}, "_private": "never-forward"})
-    assert public == {"visible": {"x": 1}}
+def test_provider_context_is_default_deny_for_unknown_top_level_state() -> None:
+    public = provider_context(
+        {
+            "mission": "preserve continuity",
+            "visible": {"x": 1},
+            "future_sensitive_state": {"credential": "never-forward"},
+            "_private": "never-forward",
+        }
+    )
+
+    assert public == {"mission": "preserve continuity"}
