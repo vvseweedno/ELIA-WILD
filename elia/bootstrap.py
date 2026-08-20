@@ -9,7 +9,7 @@ from typing import Any
 from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
-from .continuity_runtime import ContinuityKernelRuntime
+from .continuity_runtime import ELIARuntime
 from .epistemic_status import epistemic_status
 from .identity import IdentityBundle
 from .vitals import VitalSigns
@@ -21,7 +21,7 @@ def bootstrap(
     cycles: int = 2,
     checkpoint_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Initialize/continue zero-GPU ELIA state through the Genesis 1.7 production path.
+    """Initialize/continue zero-GPU ELIA state through the canonical ELIA production runtime.
 
     Deterministic MockBrain exercises the accepted-transition/continuity kernel plus
     the full 1.6 ancestry without loading Qwen. Expensive epistemic deliberation stays
@@ -38,7 +38,7 @@ def bootstrap(
             "brain_backend_used": "none",
         }
 
-    runtime = ContinuityKernelRuntime(config, brain=MockBrain())
+    runtime = ELIARuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
