@@ -120,8 +120,6 @@ class ObservationStore:
                     ON observations(source_kind, source_ref, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_observations_transaction
                     ON observations(transaction_id, id ASC);
-                CREATE INDEX IF NOT EXISTS idx_observations_compaction
-                    ON observations(is_compacted, id ASC);
                 """
             )
             columns = {
@@ -136,8 +134,6 @@ class ObservationStore:
                 conn.execute(
                     "ALTER TABLE observations ADD COLUMN is_compacted INTEGER NOT NULL DEFAULT 0"
                 )
-                # One-time legacy migration only. After this point all structural
-                # compaction decisions use the dedicated column, never JSON matching.
                 legacy_rows = conn.execute(
                     "SELECT id, payload_json FROM observations"
                 ).fetchall()
@@ -151,6 +147,12 @@ class ObservationStore:
                             "UPDATE observations SET is_compacted=1 WHERE id=?",
                             (int(row["id"]),),
                         )
+            # Create the compaction index only after legacy schemas have gained the
+            # structural column; otherwise opening an old database fails before migration.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_observations_compaction "
+                "ON observations(is_compacted, id ASC)"
+            )
             rows = conn.execute(
                 "SELECT id, payload_json FROM observations WHERE stored_payload_sha256=''"
             ).fetchall()
