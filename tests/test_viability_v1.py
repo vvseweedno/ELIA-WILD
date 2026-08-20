@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from elia.config import load_config
+from elia.continuity_runtime import ContinuityKernelRuntime, ELIARuntime
 from elia.organism import OrganismManifest
 from elia.viability import run_deep_viability
 
@@ -21,7 +22,8 @@ def test_deep_viability_proves_required_contracts_wiring_and_recovery(
 
     report = run_deep_viability(config, manifest)
     assert report.healthy is True
-    assert report.runtime_class == "ContinuityKernelRuntime"
+    assert report.runtime_class == "ELIARuntime"
+    assert ContinuityKernelRuntime is ELIARuntime
     assert report.contract_count == report.required_organ_count
     assert report.required_organ_count > 30
     assert report.persistence["ok"] is True
