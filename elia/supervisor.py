@@ -14,6 +14,7 @@ from typing import Any
 from .config import Config, load_config
 from .identity import IdentityBundle
 from .lifecycle import LifecycleDecision, evaluate_preflight
+from .paths import resolve_entry_config
 from .vitals import VitalSigns
 
 
@@ -45,7 +46,7 @@ class ResidentSupervisor:
         heartbeat_seconds: float = 60.0,
         max_cycles: int = 8,
     ):
-        self.config_path = Path(config_path).resolve()
+        self.config_path = resolve_entry_config(config_path)
         self.config: Config = load_config(self.config_path)
         self.identity = IdentityBundle.load(
             self.config.subject_core_path,
