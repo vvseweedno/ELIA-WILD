@@ -3,6 +3,45 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+_PUBLIC_CONTEXT_KEYS = frozenset(
+    {
+        "time_utc",
+        "identity",
+        "identity_contract",
+        "self_model",
+        "self_hypotheses",
+        "identity_drift",
+        "mission",
+        "resources",
+        "economy",
+        "metacognition",
+        "needs",
+        "scheduler",
+        "chronicle_integrity",
+        "active_goals",
+        "recent_memory",
+        "chronological_recent_memory",
+        "last_action",
+        "capabilities",
+        "skills",
+        "lineage_head",
+        "world_model",
+        "sensorium",
+        "causal_memory",
+        "digital_body",
+        "homeostasis",
+        "organism_state_bus",
+        "executive",
+        "executive_energy",
+        "executive_history",
+        "metabolism",
+        "resource_ecology",
+        "work_ports",
+        "epistemic_ecosystem",
+        "epistemic",
+        "epistemic_health",
+    }
+)
 
 _SENSOR_FIELDS = (
     "id",
@@ -300,7 +339,7 @@ def provider_context(context: dict[str, Any]) -> dict[str, Any]:
     public: dict[str, Any] = {}
     for key, value in context.items():
         name = str(key)
-        if name.startswith("_"):
+        if name.startswith("_") or name not in _PUBLIC_CONTEXT_KEYS:
             continue
         if name == "sensorium":
             public[name] = _sensor_metadata(value)
