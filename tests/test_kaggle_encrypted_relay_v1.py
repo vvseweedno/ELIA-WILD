@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import runpy
 
@@ -81,6 +80,5 @@ def test_prepared_kernel_is_private_t4_and_uses_current_kaggle_cli_flag(
     assert metadata["dataset_sources"] == ["owner/elia-wild-state"]
 
     source = (repo_root() / "scripts" / "kaggle_wake.py").read_text(encoding="utf-8")
-    push_block = source[source.index('"kaggle",\n                    "kernels",\n                    "push"'):]
-    assert '"--acc"' in push_block[:600]
-    assert '"--timeout"' in push_block[:600]
+    assert source.count('"--acc"') == 1
+    assert source.count('"--timeout"') == 1
