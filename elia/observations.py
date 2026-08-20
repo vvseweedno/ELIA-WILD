@@ -74,9 +74,10 @@ class ObservationStore:
 
     `payload_sha256` identifies the original canonical observation. A second
     `stored_payload_sha256` authenticates the representation currently retained in the
-    SQLite row, including truncated previews and compacted markers. Every authoritative
-    read verifies the stored form; full retained payloads additionally rederive their
-    original digest. Compacted/truncated rows must carry the exact original digest.
+    SQLite row, including truncated previews and compacted markers. Compaction state is
+    structural SQLite metadata (`is_compacted`), never inferred from JSON serialization
+    during normal operation. Every authoritative read verifies the stored form; full
+    retained payloads additionally rederive their original digest.
     """
 
     def __init__(self, path: Path):
@@ -110,6 +111,7 @@ class ObservationStore:
                     payload_json TEXT NOT NULL,
                     payload_sha256 TEXT NOT NULL,
                     stored_payload_sha256 TEXT NOT NULL DEFAULT '',
+                    is_compacted INTEGER NOT NULL DEFAULT 0,
                     provenance_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_observations_time
@@ -118,6 +120,8 @@ class ObservationStore:
                     ON observations(source_kind, source_ref, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_observations_transaction
                     ON observations(transaction_id, id ASC);
+                CREATE INDEX IF NOT EXISTS idx_observations_compaction
+                    ON observations(is_compacted, id ASC);
                 """
             )
             columns = {
@@ -128,6 +132,25 @@ class ObservationStore:
                 conn.execute(
                     "ALTER TABLE observations ADD COLUMN stored_payload_sha256 TEXT NOT NULL DEFAULT ''"
                 )
+            if "is_compacted" not in columns:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN is_compacted INTEGER NOT NULL DEFAULT 0"
+                )
+                # One-time legacy migration only. After this point all structural
+                # compaction decisions use the dedicated column, never JSON matching.
+                legacy_rows = conn.execute(
+                    "SELECT id, payload_json FROM observations"
+                ).fetchall()
+                for row in legacy_rows:
+                    try:
+                        payload = json.loads(str(row["payload_json"]))
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict) and payload.get("_compacted") is True:
+                        conn.execute(
+                            "UPDATE observations SET is_compacted=1 WHERE id=?",
+                            (int(row["id"]),),
+                        )
             rows = conn.execute(
                 "SELECT id, payload_json FROM observations WHERE stored_payload_sha256=''"
             ).fetchall()
@@ -173,7 +196,7 @@ class ObservationStore:
                 """
                 SELECT id, payload_json, payload_sha256, stored_payload_sha256
                 FROM observations
-                WHERE id < ? AND payload_json NOT LIKE '%\"_compacted\":true%'
+                WHERE id < ? AND is_compacted=0
                 ORDER BY id ASC LIMIT ?
                 """,
                 (cutoff, batch),
@@ -194,8 +217,8 @@ class ObservationStore:
                 conn.execute(
                     """
                     UPDATE observations
-                    SET payload_json=?, stored_payload_sha256=?
-                    WHERE id=?
+                    SET payload_json=?, stored_payload_sha256=?, is_compacted=1
+                    WHERE id=? AND is_compacted=0
                     """,
                     (compacted, _text_digest(compacted), int(row["id"])),
                 )
@@ -232,8 +255,8 @@ class ObservationStore:
                 INSERT INTO observations(
                     observed_at, transaction_id, source_kind, source_ref, modality,
                     content_type, trust, success, summary, payload_json,
-                    payload_sha256, stored_payload_sha256, provenance_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_sha256, stored_payload_sha256, is_compacted, provenance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
                 """,
                 (
                     timestamp,
@@ -275,9 +298,17 @@ class ObservationStore:
                 f"observation {int(row['id'])} payload JSON is malformed"
             ) from exc
         original_digest = str(row["payload_sha256"])
-        if isinstance(payload, dict) and (
-            payload.get("_truncated") is True or payload.get("_compacted") is True
-        ):
+        is_compacted = bool(row["is_compacted"])
+        if is_compacted:
+            if not isinstance(payload, dict) or payload.get("_compacted") is not True:
+                raise RuntimeError(
+                    f"observation {int(row['id'])} structural compaction marker mismatch"
+                )
+            if str(payload.get("original_sha256", "")) != original_digest:
+                raise RuntimeError(
+                    f"observation {int(row['id'])} original digest marker mismatch"
+                )
+        elif isinstance(payload, dict) and payload.get("_truncated") is True:
             if str(payload.get("original_sha256", "")) != original_digest:
                 raise RuntimeError(
                     f"observation {int(row['id'])} original digest marker mismatch"
