@@ -46,3 +46,28 @@ def test_provider_context_is_default_deny_for_unknown_top_level_state() -> None:
     )
 
     assert public == {"mission": "preserve continuity"}
+
+
+def test_provider_context_scrubs_credentials_inside_allowed_fields() -> None:
+    secret = "abcDEF1234567890"
+    digest = "a" * 64
+    public = provider_context(
+        {
+            "mission": f"diagnostic header Authorization: Bearer {secret}",
+            "world_model": {
+                "source": f"https://user:pass@example.org/report?access_token={secret}&view=1",
+                "nested": {
+                    "password": secret,
+                    "note": f"api_key={secret}",
+                    "payload_sha256": digest,
+                },
+            },
+        }
+    )
+    serialized = json.dumps(public, ensure_ascii=False, sort_keys=True)
+
+    assert secret not in serialized
+    assert "user:pass@" not in serialized
+    assert public["world_model"]["nested"]["password"] == "[REDACTED]"
+    assert public["world_model"]["nested"]["payload_sha256"] == digest
+    assert "[REDACTED]" in serialized
