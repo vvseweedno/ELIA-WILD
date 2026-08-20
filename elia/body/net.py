@@ -24,20 +24,27 @@ class PinnedHTTPResponse:
 
 
 def _reject_nonpublic_ip(value: str, *, allow_private: bool = False) -> str:
+    """Return a normalized usable destination or reject it.
+
+    Public networking is default-deny: only globally routable addresses are accepted.
+    `allow_private` is a narrow explicit escape for private/loopback deployments; it
+    never permits link-local metadata ranges, multicast, reserved or unspecified space.
+    """
+
     ip = ipaddress.ip_address(value)
-    if not allow_private and (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
-        raise ValueError(f"Non-public destination rejected: {ip}")
+    always_forbidden = (
+        ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+    )
+    if always_forbidden:
+        raise ValueError(f"Unsafe destination rejected: {ip}")
+    if not allow_private and not ip.is_global:
+        raise ValueError(f"Non-global destination rejected: {ip}")
     return str(ip)
 
 
-def resolve_http_target(url: str, *, allow_private: bool = False) -> tuple[str, int, list[str]]:
+def resolve_http_target(
+    url: str, *, allow_private: bool = False
+) -> tuple[str, int, list[str]]:
     parsed = urlparse(str(url))
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http/https URLs are permitted")
@@ -118,7 +125,11 @@ def pinned_http_request(
         path += "?" + parsed.query
     default_port = 443 if parsed.scheme == "https" else 80
     host_name_for_header = f"[{hostname}]" if ":" in hostname else hostname
-    host_header = host_name_for_header if port == default_port else f"{host_name_for_header}:{port}"
+    host_header = (
+        host_name_for_header
+        if port == default_port
+        else f"{host_name_for_header}:{port}"
+    )
     request_headers: dict[str, str] = {
         "Host": host_header,
         "Connection": "close",
@@ -126,8 +137,15 @@ def pinned_http_request(
     }
     for raw_name, raw_value in (headers or {}).items():
         name, value = _header_pair(str(raw_name), str(raw_value))
-        if name.lower() in {"host", "connection", "content-length", "transfer-encoding"}:
-            raise ValueError(f"caller may not override transport-owned HTTP header: {name}")
+        if name.lower() in {
+            "host",
+            "connection",
+            "content-length",
+            "transfer-encoding",
+        }:
+            raise ValueError(
+                f"caller may not override transport-owned HTTP header: {name}"
+            )
         request_headers[name] = value
     if body:
         request_headers["Content-Length"] = str(len(body))
@@ -139,7 +157,9 @@ def pinned_http_request(
         try:
             raw_socket = socket.create_connection((address, port), timeout=timeout)
             raw_socket.settimeout(timeout)
-            peer_ip = _reject_nonpublic_ip(raw_socket.getpeername()[0], allow_private=allow_private)
+            peer_ip = _reject_nonpublic_ip(
+                raw_socket.getpeername()[0], allow_private=allow_private
+            )
             if parsed.scheme == "https":
                 context = ssl.create_default_context()
                 stream = context.wrap_socket(raw_socket, server_hostname=hostname)
@@ -149,7 +169,9 @@ def pinned_http_request(
                 raw_socket = None
 
             request = [f"{method} {path} HTTP/1.1"]
-            request.extend(f"{key}: {value}" for key, value in request_headers.items())
+            request.extend(
+                f"{key}: {value}" for key, value in request_headers.items()
+            )
             wire = ("\r\n".join(request) + "\r\n\r\n").encode("iso-8859-1") + body
             stream.sendall(wire)
 
