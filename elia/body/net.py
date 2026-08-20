@@ -38,7 +38,9 @@ def _reject_nonpublic_ip(value: str, *, allow_private: bool = False) -> str:
     if always_forbidden:
         raise ValueError(f"Unsafe destination rejected: {ip}")
     if not allow_private and not ip.is_global:
-        raise ValueError(f"Non-global destination rejected: {ip}")
+        # Keep the established API/error contract while enforcing the stronger
+        # globally-routable policy (including CGNAT/documentation/ULA space).
+        raise ValueError(f"Non-public destination rejected: {ip}")
     return str(ip)
 
 
