@@ -10,7 +10,7 @@ from typing import Any
 from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
-from .continuity_runtime import ContinuityKernelRuntime
+from .continuity_runtime import ELIARuntime
 from .economy import EconomyStore
 from .epistemic_status import epistemic_status
 from .executive_status import executive_status_from_state
@@ -380,7 +380,7 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = ContinuityKernelRuntime(config)
+    runtime = ELIARuntime(config)
     outcome = runtime.run(cycles=args.cycles)
     auto_checkpoint = _maybe_auto_checkpoint(
         config, args.checkpoint_key_env, outcome
