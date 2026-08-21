@@ -68,6 +68,20 @@ class ELIARuntime(EpistemicOrganismRuntime):
         if callable(parent):
             parent()
 
+    @staticmethod
+    def _active_work_from_components(components: dict[str, Any]) -> list[Any]:
+        resource_ecology = components.get("resource_ecology")
+        if not isinstance(resource_ecology, dict):
+            return []
+        active = resource_ecology.get("active_work")
+        return active if isinstance(active, list) else []
+
+    def _reconcile_agency_from_components(self, components: dict[str, Any]):
+        return self.agency.reconcile(
+            components.get("needs") or [],
+            active_work=self._active_work_from_components(components),
+        )
+
     def _context(self) -> dict[str, Any]:
         context = super()._context()
         # Reconciliation is performed once at the beginning of the accepted transition.
@@ -78,6 +92,12 @@ class ELIARuntime(EpistemicOrganismRuntime):
         return context
 
     def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
+        # Scheduling occurs after the action. Reconcile from fresh persisted state here,
+        # not from the pre-inference cursor: a staged item that was just submitted, or a
+        # maintenance need that was just resolved, must change the wake deadline now.
+        post_action_components = self._state_components()
+        post_action_agency = self._reconcile_agency_from_components(post_action_components)
+
         # The substrate may propose how long to sleep, but verified commitments own the
         # upper bound. This prevents one hallucinated/over-conservative decision from
         # indefinitely abandoning an accepted external outcome or repair obligation.
@@ -87,7 +107,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
             else float(requested)
         )
         model_requested = max(0.0, min(model_requested, 86400.0))
-        policy = self.agency.wake_policy()
+        policy = self.agency.wake_policy(post_action_agency.as_dict())
         cap = policy.get("max_sleep_seconds")
         effective = model_requested
         if cap is not None:
@@ -115,18 +135,10 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 # resolved commitments and the continuation cursor roll back with the
                 # speculative state.
                 components = self._state_components()
-                resource_ecology = components.get("resource_ecology")
-                active_work = (
-                    resource_ecology.get("active_work") or []
-                    if isinstance(resource_ecology, dict)
-                    else []
-                )
-                agency = self.agency.reconcile(
-                    components.get("needs") or [],
-                    active_work=active_work,
-                )
+                agency_before = self._reconcile_agency_from_components(components)
                 report = super().cycle()
-                report["agency"] = agency.as_dict()
+                report["agency_before"] = agency_before.as_dict()
+                report["agency"] = self.agency.snapshot()
                 report["agency_wake_policy"] = dict(self._last_agency_wake_policy or {})
                 transition.accept()
             return report
