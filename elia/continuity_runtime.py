@@ -33,6 +33,12 @@ class ELIARuntime(EpistemicOrganismRuntime):
     cognitive and aesthetic preference field inside the feasible action set. It cannot
     authorize a capability, override CriticAssurance, mint evidence/resources, or turn a
     forbidden decision into a permitted one.
+
+    ELIARuntime is also the final owner of the cognitive context. Historical runtime
+    layers may add evidence during `_context()` or `_before_brain()`, but only the
+    canonical finalizer below may bind the complete production system prompt that is
+    delivered to the replaceable cognitive substrate. This prevents an older layer from
+    accidentally erasing newer policy such as durable Agency or the Autonomy Attractor.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -188,8 +194,14 @@ class ELIARuntime(EpistemicOrganismRuntime):
             active_work=self._active_work_from_components(components),
         )
 
-    def _context(self) -> dict[str, Any]:
-        context = super()._context()
+    def _finalize_cognitive_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Bind the final canonical cognitive policy after every historical enrichment.
+
+        Ancestor layers may render provisional prompts while adding Executive or
+        epistemic evidence. The production boundary deliberately overwrites that
+        provisional prompt only here, after all such enrichment, so exactly one final
+        policy reaches `Brain.decide()`.
+        """
         context["agency"] = self.agency.snapshot()
         context["_system_prompt"] = (
             self.prompt_template.render(context)
@@ -199,6 +211,16 @@ class ELIARuntime(EpistemicOrganismRuntime):
             + self.attractor.fingerprint
         )
         return context
+
+    def _context(self) -> dict[str, Any]:
+        return self._finalize_cognitive_context(super()._context())
+
+    def _before_brain(self, context: dict[str, Any], plan: Any) -> dict[str, Any]:
+        # `_before_brain` is the final enrichment hook used by Executive/Epistemic
+        # ancestors. Finalize *after* their super-chain so they cannot silently erase
+        # canonical Agency/Attractor policy before the model call.
+        enriched = super()._before_brain(context, plan)
+        return self._finalize_cognitive_context(enriched)
 
     def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
         post_action_components = self._state_components()
