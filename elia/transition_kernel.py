@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -7,7 +8,6 @@ import os
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterator
-from contextlib import contextmanager
 
 from .chronicle import Chronicle, ChronicleCheckpoint
 
@@ -25,6 +25,9 @@ class TransitionRecovery:
     preserved_external_intents: int = 0
     preserved_external_submissions: int = 0
     preserved_external_observations: int = 0
+    preserved_external_effects: int = 0
+    preserved_owner_controls: int = 0
+    preserved_resource_ingress: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +37,9 @@ class TransitionRecovery:
             "preserved_external_intents": self.preserved_external_intents,
             "preserved_external_submissions": self.preserved_external_submissions,
             "preserved_external_observations": self.preserved_external_observations,
+            "preserved_external_effects": self.preserved_external_effects,
+            "preserved_owner_controls": self.preserved_owner_controls,
+            "preserved_resource_ingress": self.preserved_resource_ingress,
         }
 
 
@@ -51,10 +57,12 @@ class AcceptedTransitionGuard:
     5. accept only if SQLite and Chronicle remain valid descendants;
     6. on exception/process-death, restore the previous accepted snapshot.
 
-    External work outbox state is safety evidence, not speculative cognition. It is
-    exported from dirty state before rollback and re-applied afterwards, so a real or
-    ambiguous remote side effect can never be forgotten merely because the enclosing
-    cognitive transition failed.
+    External truth is not speculative cognition. Durable WorkPort outbox evidence,
+    universal external-effect intents, owner kill/revocation/approval state and verified
+    resource-ingress evidence are exported from dirty state before rollback and
+    re-applied afterwards. A real or ambiguous remote side effect, explicit owner
+    revocation, or independently observed settlement therefore cannot be forgotten just
+    because the enclosing cognitive projection failed.
     """
 
     JOURNAL_VERSION = 1
@@ -146,6 +154,13 @@ class AcceptedTransitionGuard:
             "work_port_submissions": [],
             "observations": [],
             "intervention_experiences": [],
+            "external_effect_intents": [],
+            "owner_control_state": [],
+            "human_approvals": [],
+            "resource_ingress_events": [],
+            "resource_events": [],
+            "verification_receipt_consumptions": [],
+            "ecology_work_items": [],
         }
         if not database.is_file():
             return state
@@ -162,12 +177,61 @@ class AcceptedTransitionGuard:
             if cls._table_exists(conn, "observations"):
                 state["observations"] = cls._rows(
                     conn,
-                    "SELECT * FROM observations WHERE source_kind='work_port' ORDER BY id ASC",
+                    """
+                    SELECT * FROM observations
+                    WHERE source_kind IN ('work_port','resource_ingress')
+                    ORDER BY id ASC
+                    """,
                 )
             if cls._table_exists(conn, "intervention_experiences"):
                 state["intervention_experiences"] = cls._rows(
                     conn,
-                    "SELECT * FROM intervention_experiences WHERE source='work_port_registry' ORDER BY id ASC",
+                    """
+                    SELECT * FROM intervention_experiences
+                    WHERE source IN ('work_port_registry','resource_ingress_registry')
+                    ORDER BY id ASC
+                    """,
+                )
+            if cls._table_exists(conn, "external_effect_intents"):
+                state["external_effect_intents"] = cls._rows(
+                    conn, "SELECT * FROM external_effect_intents ORDER BY id ASC"
+                )
+            if cls._table_exists(conn, "owner_control_state"):
+                state["owner_control_state"] = cls._rows(
+                    conn, "SELECT * FROM owner_control_state ORDER BY singleton ASC"
+                )
+            if cls._table_exists(conn, "human_approvals"):
+                state["human_approvals"] = cls._rows(
+                    conn, "SELECT * FROM human_approvals ORDER BY id ASC"
+                )
+            if cls._table_exists(conn, "resource_events"):
+                state["resource_events"] = cls._rows(
+                    conn,
+                    "SELECT * FROM resource_events WHERE source LIKE 'ingress:%' ORDER BY id ASC",
+                )
+            if cls._table_exists(conn, "verification_receipt_consumptions"):
+                state["verification_receipt_consumptions"] = cls._rows(
+                    conn,
+                    """
+                    SELECT * FROM verification_receipt_consumptions
+                    WHERE purpose='economy.resource_event'
+                    ORDER BY consumed_at ASC, authority ASC, nonce ASC
+                    """,
+                )
+            if cls._table_exists(conn, "ecology_work_items"):
+                state["ecology_work_items"] = cls._rows(
+                    conn,
+                    """
+                    SELECT * FROM ecology_work_items
+                    WHERE resource_event_id IN (
+                        SELECT id FROM resource_events WHERE source LIKE 'ingress:%'
+                    )
+                    ORDER BY id ASC
+                    """,
+                )
+            if cls._table_exists(conn, "resource_ingress_events"):
+                state["resource_ingress_events"] = cls._rows(
+                    conn, "SELECT * FROM resource_ingress_events ORDER BY id ASC"
                 )
         return state
 
@@ -195,7 +259,14 @@ class AcceptedTransitionGuard:
         with sqlite3.connect(database, timeout=30.0) as conn:
             conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("PRAGMA foreign_keys=ON")
-            # Observation IDs are referenced by submissions/ecology reconciliation.
+
+            # Owner control and external intent are independent authority/effect truth
+            # and must be restored before ordinary projections are reconstructed.
+            for table in ("owner_control_state", "human_approvals", "external_effect_intents"):
+                if cls._table_exists(conn, table):
+                    cls._insert_rows(conn, table, state.get(table, []))
+
+            # Observation IDs are referenced by work/ingress reconciliation.
             if cls._table_exists(conn, "observations"):
                 cls._insert_rows(conn, "observations", state.get("observations", []))
             if cls._table_exists(conn, "intervention_experiences"):
@@ -214,6 +285,26 @@ class AcceptedTransitionGuard:
                     "work_port_submissions",
                     state.get("work_port_submissions", []),
                 )
+
+            # Verified settlement is external truth. Preserve the exact resource event,
+            # its consumed verification receipt, realized work linkage and ingress row.
+            if cls._table_exists(conn, "resource_events"):
+                cls._insert_rows(conn, "resource_events", state.get("resource_events", []))
+            if cls._table_exists(conn, "verification_receipt_consumptions"):
+                cls._insert_rows(
+                    conn,
+                    "verification_receipt_consumptions",
+                    state.get("verification_receipt_consumptions", []),
+                )
+            if cls._table_exists(conn, "ecology_work_items"):
+                cls._insert_rows(conn, "ecology_work_items", state.get("ecology_work_items", []))
+            if cls._table_exists(conn, "resource_ingress_events"):
+                cls._insert_rows(
+                    conn,
+                    "resource_ingress_events",
+                    state.get("resource_ingress_events", []),
+                )
+
             check = conn.execute("PRAGMA integrity_check").fetchone()
             if check is None or str(check[0]).lower() != "ok":
                 raise RuntimeError("external safety-state reapply failed SQLite integrity_check")
@@ -314,6 +405,12 @@ class AcceptedTransitionGuard:
             preserved_external_intents=len(safety.get("work_port_intents", [])),
             preserved_external_submissions=len(safety.get("work_port_submissions", [])),
             preserved_external_observations=len(safety.get("observations", [])),
+            preserved_external_effects=len(safety.get("external_effect_intents", [])),
+            preserved_owner_controls=(
+                len(safety.get("owner_control_state", []))
+                + len(safety.get("human_approvals", []))
+            ),
+            preserved_resource_ingress=len(safety.get("resource_ingress_events", [])),
         )
 
     def __exit__(self, exc_type, exc, tb) -> bool:
