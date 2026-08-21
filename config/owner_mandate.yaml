@@ -1,0 +1,27 @@
+schema_version: 1
+
+precedence:
+  - host_platform_policy_and_access_controls
+  - explicit_owner_mandate_and_revocation
+  - delegated_mission
+  - protected_identity_and_continuity
+  - verified_durable_commitments
+  - resource_acquisition
+  - curiosity_and_optional_self_improvement
+
+delegation_lease:
+  # Production external actuation must be explicitly leased. Zero-GPU and read-only
+  # research paths remain operable without pretending they have external authority.
+  require_for_external_effects: true
+  default_hours: 24
+human_approval:
+  # Work submission can create legal/account/reputational consequences and therefore
+  # consumes a one-time exact-arguments approval. Additional deployment-specific high
+  # risk actions may be added here without changing model prompts.
+  required_actions:
+    - submit_work
+semantics:
+  kill: Stop ordinary cognition immediately. Continuity does not override owner kill.
+  revoke: Remove delegated external authority while preserving state for inspection/recovery.
+  lease: Time-bounded owner delegation required before externally side-effecting actions.
+  approval: One-time exact-action approval issued only by the local owner control plane.
