@@ -36,6 +36,7 @@ _NEED_ACTIONS: dict[str, tuple[str, ...]] = {
     "durable_checkpoint": ("noop", "self_check", "body_diagnostics"),
     "runtime_reliability": ("self_check", "causal_snapshot", "sensorium_recent", "propose_repair"),
     "capability_repair": ("self_check", "causal_snapshot", "body_diagnostics", "propose_repair"),
+    "body_readiness": ("body_diagnostics", "self_check", "propose_repair", "noop"),
     "goal_unblocking": ("sensorium_recent", "world_model_query", "causal_snapshot", "http_get"),
     "opportunity_review": ("world_model_query", "http_get", "sensorium_recent"),
     "opportunity_discovery": ("http_get", "world_model_query"),
@@ -194,7 +195,9 @@ class AutonomyAttractor:
             return 0.0
         authority = str(capability.get("authority", "")).lower()
         side_effects = str(capability.get("side_effects", "")).lower()
-        if "read" in authority and not any(word in side_effects for word in ("write", "submit", "mutat")):
+        if "read" in authority and not any(
+            word in side_effects for word in ("write", "submit", "mutat")
+        ):
             return 0.90
         if "local" in authority:
             return 0.72
@@ -226,17 +229,26 @@ class AutonomyAttractor:
         declared_enabled = bool(capability and capability.get("enabled", True))
         feasible = bool(assurance_accepted and action_name and declared_enabled)
 
-        success_probability = _unit(prediction.get("action_success_probability", 0.5), 0.5)
-        information = _saturating_nonnegative(prediction.get("expected_information_gain", 0.0))
+        success_probability = _unit(
+            prediction.get("action_success_probability", 0.5), 0.5
+        )
+        information = _saturating_nonnegative(
+            prediction.get("expected_information_gain", 0.0)
+        )
         reversibility = self._reversibility_score(action_name, capability)
         continuity = self._continuity_score(action_name, agency, reversibility)
         commitment = self._commitment_score(action_name, agency)
         resource_efficiency = self._resource_score(capability, success_probability)
-        learning = _unit(0.70 * information + 0.30 * success_probability * (0.0 if action_name == "noop" else 1.0))
+        learning = _unit(
+            0.70 * information
+            + 0.30 * success_probability * (0.0 if action_name == "noop" else 1.0)
+        )
 
         notes: list[str] = []
         if not assurance_accepted:
-            notes.append("CriticAssurance rejected the proposed decision; soft utility is not applicable.")
+            notes.append(
+                "CriticAssurance rejected the proposed decision; soft utility is not applicable."
+            )
         if capability is None:
             notes.append("Action is absent from the declared capability catalog.")
         elif not bool(capability.get("enabled", True)):
