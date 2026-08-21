@@ -253,7 +253,6 @@ class EliaRuntime:
                 budget=resources,
                 active_goals=goals,
                 capability_health=capabilities["health"],
-                capability_catalog=capabilities["catalog"],
                 economy=economy,
             )
         ]
@@ -703,20 +702,253 @@ class EliaRuntime:
             )
 
         started = time.monotonic()
-        try:
-            result = self.tools.execute(name, args)
-            return result
-        finally:
-            duration_ms = (time.monotonic() - started) * 1000.0
-            result_obj = locals().get("result")
-            self.memory.record_capability_event(
-                name,
-                ok=(result_obj.ok if isinstance(result_obj, ToolResult) else False),
-                executed=True,
-                duration_ms=duration_ms,
-                error=(
-                    result_obj.error
-                    if isinstance(result_obj, ToolResult) and result_obj.error
-                    else ""
-                ),
-            )
+        result = self.tools.execute(name, args)
+        duration_ms = (time.monotonic() - started) * 1000.0
+        self.memory.record_capability_event(
+            name,
+            ok=result.ok,
+            executed=True,
+            duration_ms=duration_ms,
+            error=result.error or "",
+        )
+        return result
+
+    @staticmethod
+    def _safe_decision_after_rejection(original: Decision, assurance: dict[str, Any]) -> Decision:
+        rules = [
+            str(item.get("rule"))
+            for item in assurance.get("findings", [])
+            if item.get("severity") == "error"
+        ]
+        return Decision(
+            objective="Resolve assurance rejection before external action.",
+            summary="Critic rejected the proposed decision under rule(s): " + ", ".join(rules),
+            action_name="noop",
+            skill_name="critic_assurance",
+            prediction={
+                "action_success_probability": 0.99,
+                "expected_outcome": "No external side effect occurs while the rejected decision is preserved as evidence.",
+                "expected_information_gain": 0.1,
+                "expected_value": 0.0,
+                "unit": "VALUE_UNIT",
+            },
+            sleep_seconds=0,
+        )
+
+    def _record_forecast(self, decision: Decision) -> int:
+        prediction = dict(decision.prediction or {})
+        return self.metacognition.record(
+            objective=decision.objective,
+            action_name=decision.action_name,
+            success_probability=float(prediction.get("action_success_probability", 0.5)),
+            expected_outcome=str(prediction.get("expected_outcome", "")),
+            expected_information_gain=float(prediction.get("expected_information_gain", 0.0)),
+            expected_value=float(prediction.get("expected_value", 0.0)),
+            unit=str(prediction.get("unit", "VALUE_UNIT")),
+            context_fingerprint=self.memory.get_meta("self_model_fingerprint", "") or "",
+        )
+
+    def cycle(self) -> dict[str, Any]:
+        context = self._context()
+        proposed = self._think(context)
+        assurance_report = self.assurance.review(proposed, context).as_dict()
+        decision = (
+            proposed
+            if assurance_report["accepted"]
+            else self._safe_decision_after_rejection(proposed, assurance_report)
+        )
+
+        memory_ids = self._store_model_memories(decision) if assurance_report["accepted"] else []
+        self_changes = self._apply_self_updates(decision) if assurance_report["accepted"] else []
+        goal_changes = self._apply_goal_updates(decision) if assurance_report["accepted"] else []
+        opportunity_changes = (
+            self._apply_opportunity_updates(decision) if assurance_report["accepted"] else []
+        )
+
+        # Forecast is committed BEFORE action execution.
+        forecast_id = self._record_forecast(decision)
+        result = self._execute_action(decision.action_name, decision.action_args)
+        result_full = result.as_dict()
+        brier_score = self.metacognition.resolve(
+            forecast_id,
+            success=result.ok,
+            observation=result_full,
+        )
+        calibration = self.metacognition.calibration(100)
+
+        result_dict = result_full
+        max_chars = self.config.runtime.max_action_output_chars
+        serialized = json.dumps(result_dict, ensure_ascii=False, sort_keys=True)
+        if len(serialized) > max_chars:
+            result_dict = {
+                "ok": result.ok,
+                "tool": result.tool,
+                "data": {"truncated_result": serialized[:max_chars]},
+                "error": result.error,
+            }
+
+        sleep_seconds, next_wake_at = self._schedule_next_wake(decision.sleep_seconds)
+        self_model_id, self_model_fingerprint, post_components = self._record_self_model(
+            source="cycle"
+        )
+        action_record = {
+            "identity_fingerprint": self.identity.fingerprint,
+            "prompt_fingerprint": self.prompt_template.fingerprint,
+            "body_version": __version__,
+            "objective": decision.objective,
+            "summary": decision.summary,
+            "skill": decision.skill_name,
+            "proposed": {
+                "objective": proposed.objective,
+                "summary": proposed.summary,
+                "skill": proposed.skill_name,
+                "prediction": proposed.prediction,
+                "action": {"name": proposed.action_name, "args": proposed.action_args},
+            },
+            "assurance": assurance_report,
+            "forecast": {
+                "id": forecast_id,
+                "prediction": decision.prediction,
+                "brier_score": brier_score,
+                "calibration": calibration,
+            },
+            "action": {"name": decision.action_name, "args": decision.action_args},
+            "result": result_dict,
+            "memory_ids": memory_ids,
+            "self_changes": self_changes,
+            "goal_changes": goal_changes,
+            "opportunity_changes": opportunity_changes,
+            "capability_health": self.memory.capability_health(decision.action_name),
+            "self_model": {
+                "row_id": self_model_id,
+                "fingerprint": self_model_fingerprint,
+                "drift": post_components["drift"],
+            },
+            "scheduler": {
+                "sleep_seconds": sleep_seconds,
+                "next_wake_at": next_wake_at,
+            },
+        }
+        self.memory.set_meta("last_action", json.dumps(action_record, ensure_ascii=False, sort_keys=True))
+        self.memory.remember(
+            "action_result",
+            json.dumps(action_record, ensure_ascii=False, sort_keys=True)[:16000],
+            importance=0.6 if result.ok and assurance_report["accepted"] else 0.85,
+            source="runtime",
+            metadata={
+                "identity_fingerprint": self.identity.fingerprint,
+                "self_model_fingerprint": self_model_fingerprint,
+                "forecast_id": forecast_id,
+                "brier_score": brier_score,
+            },
+        )
+        entry = self.chronicle.append("CYCLE", action_record)
+        self._account_runtime()
+
+        return {
+            "chronicle_seq": entry.seq,
+            "identity_fingerprint": self.identity.fingerprint,
+            "self_model_fingerprint": self_model_fingerprint,
+            "decision": {
+                "objective": decision.objective,
+                "summary": decision.summary,
+                "skill": decision.skill_name,
+                "action_name": decision.action_name,
+            },
+            "assurance": assurance_report,
+            "forecast": {
+                "id": forecast_id,
+                "prediction": decision.prediction,
+                "brier_score": brier_score,
+                "calibration": calibration,
+            },
+            "result": result_dict,
+            "self_changes": self_changes,
+            "goal_changes": goal_changes,
+            "opportunity_changes": opportunity_changes,
+            "active_goals": [asdict(goal) for goal in self.memory.active_goals(16)],
+            "self_hypotheses": self.self_hypotheses.snapshot(24),
+            "economy": self.economy.snapshot(16),
+            "capability_health": self.memory.capability_health(decision.action_name),
+            "identity_drift": post_components["drift"],
+            "resources": self.budget(),
+            "sleep_seconds": sleep_seconds,
+            "next_wake_at": next_wake_at,
+        }
+
+    def _hibernate(self, report: dict[str, Any], reason: str) -> dict[str, Any]:
+        self._account_runtime()
+        payload = {
+            "reason": reason,
+            "next_wake_at": report.get("next_wake_at"),
+            "requested_sleep_seconds": report.get("sleep_seconds"),
+            "resources": self.budget(),
+            "identity_fingerprint": self.identity.fingerprint,
+            "self_model_fingerprint": self.memory.get_meta("self_model_fingerprint"),
+        }
+        self.memory.set_meta("lifecycle_state", "hibernating")
+        self.memory.set_meta("last_hibernated_at", datetime.now(timezone.utc).isoformat())
+        self._record_self_model(source="hibernate")
+        self.chronicle.append("HIBERNATE", payload)
+        return {"state": "hibernating", **payload}
+
+    def run(self, cycles: int | None = None) -> dict[str, Any]:
+        completed = 0
+        last_report: dict[str, Any] | None = None
+        while cycles is None or completed < cycles:
+            try:
+                report = self.cycle()
+                last_report = report
+            except BudgetExhausted:
+                synthetic = {
+                    "next_wake_at": self.memory.get_meta("next_wake_at"),
+                    "sleep_seconds": None,
+                }
+                return self._hibernate(synthetic, "weekly GPU budget exhausted")
+            except KeyboardInterrupt:
+                self.memory.set_meta("lifecycle_state", "stopped")
+                self._record_self_model(source="shutdown")
+                self.chronicle.append("SHUTDOWN", {"reason": "keyboard_interrupt"})
+                return {"state": "stopped", "reason": "keyboard_interrupt"}
+            except Exception as exc:
+                error = {"type": type(exc).__name__, "message": str(exc)[:4000]}
+                self.memory.remember(
+                    "runtime_error",
+                    json.dumps(error, ensure_ascii=False),
+                    importance=0.9,
+                    source="runtime",
+                )
+                self.chronicle.append("ERROR", error)
+                if cycles is not None:
+                    raise
+                sleep_for = min(max(self.config.runtime.cycle_sleep_seconds, 1.0), 300.0)
+                if sleep_for > self.config.runtime.max_in_session_sleep_seconds:
+                    synthetic = {
+                        "next_wake_at": self.memory.get_meta("next_wake_at"),
+                        "sleep_seconds": sleep_for,
+                    }
+                    return self._hibernate(
+                        synthetic,
+                        "runtime error backoff exceeds in-session sleep budget",
+                    )
+                time.sleep(sleep_for)
+                continue
+
+            completed += 1
+            if cycles is None or completed < cycles:
+                sleep_for = max(0.0, float(report["sleep_seconds"]))
+                if sleep_for > self.config.runtime.max_in_session_sleep_seconds:
+                    return self._hibernate(
+                        report,
+                        "requested sleep exceeds in-session threshold; release scarce GPU session",
+                    )
+                time.sleep(sleep_for)
+
+        self.memory.set_meta("lifecycle_state", "paused")
+        self._record_self_model(source="pause")
+        return {
+            "state": "paused",
+            "reason": "requested finite cycle count completed",
+            "cycles_completed": completed,
+            "last_report": last_report,
+        }
