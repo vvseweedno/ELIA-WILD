@@ -16,6 +16,7 @@ from .external_effects import (
 )
 from .memory_trust import MemoryTrustGate
 from .owner_control import OwnerControl, OwnerControlError, OwnerMandate
+from .pipeline import CanonicalRuntimePipeline, RuntimeStage
 from .tools import ToolResult
 from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 
@@ -23,21 +24,16 @@ from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 class ELIARuntime(EpistemicOrganismRuntime):
     """Canonical ELIA production runtime with crash-recoverable transitions.
 
-    Historical Genesis runtime layers remain compatibility ancestors while the public
-    runtime surface converges on this single class. A complete cognitive cycle is
-    either accepted as one durable state transition or its speculative local state and
-    Chronicle suffix are restored. Safety-critical external-effect evidence survives
-    rollback and repairs its local projection afterwards.
+    Historical Genesis runtime layers remain compatibility ancestry. Genesis 1.7.1 no
+    longer adds new production behavior by deepening that inheritance tree: owner
+    authority, external-effect semantics, resource ingress and final cognitive policy
+    are composed through `CanonicalRuntimePipeline` stages above the historical body.
 
-    The canonical runtime composes AgencyKernel, AutonomyAttractor, OwnerControl,
-    MemoryTrustGate, the Universal ExternalEffectLedger and (when configured) hardened
-    ResourceIngress. Verified organism needs become durable commitments before
-    inference, while authority and trust remain outside model control.
-
-    ELIARuntime is also the final owner of the cognitive context. Historical runtime
-    layers may add evidence during `_context()` or `_before_brain()`, but only the
-    canonical finalizer below may bind the complete production system prompt that is
-    delivered to the replaceable cognitive substrate.
+    A complete cognitive cycle is either accepted as one durable state transition or
+    its speculative local state/Chronicle suffix are restored. External truth and owner
+    control survive that rollback. Model-authored memory enters only through a trust
+    gate, while durable Agency and the Attractor remain non-authoritative preference and
+    commitment mechanisms.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -56,8 +52,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
             required=False,
         )
         # These stores must exist before dynamic `_boot()` dispatch during the historical
-        # super-chain so interrupted external sends and owner controls can be recovered
-        # before ordinary cognition mutates state.
+        # super-chain so interrupted sends and owner controls can be recovered first.
         self.external_effects = ExternalEffectLedger(database)
         self.owner_control = OwnerControl(database, self.owner_mandate)
         self.resource_ingress = None
@@ -78,6 +73,30 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 self.config.raw_tools,
             )
 
+        self.pipeline = CanonicalRuntimePipeline(
+            [
+                RuntimeStage(
+                    "owner_authority",
+                    before_cycle=self.owner_control.assert_runtime_allowed,
+                    enrich_context=self._owner_context_stage,
+                    execute_action=self._owner_action_stage,
+                ),
+                RuntimeStage(
+                    "resource_ingress",
+                    execute_action=self._resource_ingress_action_stage,
+                ),
+                RuntimeStage(
+                    "external_effect_ledger",
+                    enrich_context=self._effect_context_stage,
+                    execute_action=self._external_effect_action_stage,
+                ),
+                RuntimeStage(
+                    "cognitive_policy_finalizer",
+                    enrich_context=self._policy_finalizer_stage,
+                ),
+            ]
+        )
+
     def _cognitive_policy_fingerprint(self) -> str:
         material = (
             f"prompt:{self.prompt_template.fingerprint}\n"
@@ -87,9 +106,6 @@ class ELIARuntime(EpistemicOrganismRuntime):
         return sha256(material.encode("utf-8")).hexdigest()
 
     def _boot(self) -> None:
-        # EliaRuntime has already initialized the Chronicle and state stores when its
-        # dynamic `_boot` dispatch reaches this method. Recover *before* ordinary boot
-        # increments counters, appends lineage, or reconciles StateBus transactions.
         recovery = AcceptedTransitionGuard.recover_incomplete(
             self.config.runtime.state_dir,
             self.chronicle,
@@ -146,7 +162,6 @@ class ELIARuntime(EpistemicOrganismRuntime):
             self._after_transition_rollback()
 
     def _after_transition_rollback(self) -> None:
-        """Hook inherited/extended by external-work layers for projection repair."""
         parent = getattr(super(), "_after_transition_rollback", None)
         if callable(parent):
             parent()
@@ -172,7 +187,6 @@ class ELIARuntime(EpistemicOrganismRuntime):
         }
 
     def _state_components(self) -> dict[str, Any]:
-        """Compose canonical authority/effect/ingress state above historical organs."""
         components = super()._state_components()
         capabilities = components.get("capabilities")
         catalog = capabilities.get("catalog") if isinstance(capabilities, dict) else None
@@ -278,17 +292,28 @@ class ELIARuntime(EpistemicOrganismRuntime):
             active_work=self._active_work_from_components(components),
         )
 
-    def _finalize_cognitive_context(self, context: dict[str, Any]) -> dict[str, Any]:
-        """Bind final canonical policy after every historical context enrichment."""
-        context["agency"] = self.agency.snapshot()
+    # ---- composition stages -------------------------------------------------
+
+    def _owner_context_stage(self, context: dict[str, Any]) -> dict[str, Any]:
         identity_contract = context.get("identity_contract")
         if isinstance(identity_contract, dict):
             identity_contract["owner_mandate"] = self.owner_control.snapshot()
+        return context
+
+    def _effect_context_stage(self, context: dict[str, Any]) -> dict[str, Any]:
         capabilities = context.get("capabilities")
         if isinstance(capabilities, dict):
             capabilities["external_effects"] = self._public_effect_state(
                 self.external_effects.diagnostics()
             )
+        return context
+
+    def _policy_finalizer_stage(self, context: dict[str, Any]) -> dict[str, Any]:
+        context["agency"] = self.agency.snapshot()
+        if hasattr(self, "pipeline"):
+            identity_contract = context.get("identity_contract")
+            if isinstance(identity_contract, dict):
+                identity_contract["runtime_pipeline"] = self.pipeline.describe()
         context["_system_prompt"] = (
             self.prompt_template.render(context)
             + "\n\n"
@@ -300,34 +325,40 @@ class ELIARuntime(EpistemicOrganismRuntime):
         )
         return context
 
-    def _context(self) -> dict[str, Any]:
-        return self._finalize_cognitive_context(super()._context())
-
-    def _before_brain(self, context: dict[str, Any], plan: Any) -> dict[str, Any]:
-        enriched = super()._before_brain(context, plan)
-        return self._finalize_cognitive_context(enriched)
-
-    def _store_model_memories(self, decision: Any) -> list[int]:
-        ids: list[int] = []
-        for item in list(getattr(decision, "memories", []) or [])[:8]:
-            if not isinstance(item, dict):
-                continue
-            memory_id = self.memory_trust.remember_from_brain(
-                item,
-                identity_fingerprint=self.identity.fingerprint,
-                model_id=self.config.brain.model_id,
+    def _owner_action_stage(
+        self,
+        name: str,
+        args: dict[str, Any],
+        next_action,
+    ) -> ToolResult:
+        if name not in EXTERNAL_EFFECT_ACTIONS:
+            return next_action(name, args)
+        try:
+            self.owner_control.assert_external_authorized(name, args)
+        except OwnerControlError as exc:
+            self.memory.record_capability_event(
+                name,
+                ok=False,
+                executed=False,
+                error=str(exc),
             )
-            if memory_id is not None:
-                ids.append(memory_id)
-        return ids
+            return ToolResult(False, name, data={"owner_controlled": True}, error=str(exc))
+        return next_action(name, args)
 
-    def _execute_ingress(self, args: dict[str, Any]) -> ToolResult:
+    def _resource_ingress_action_stage(
+        self,
+        name: str,
+        args: dict[str, Any],
+        next_action,
+    ) -> ToolResult:
+        if name != "check_resource_ingress":
+            return next_action(name, args)
         if self.resource_ingress is None:
-            return ToolResult(False, "check_resource_ingress", error="resource ingress is not configured")
+            return ToolResult(False, name, error="resource ingress is not configured")
         started = time.monotonic()
-        result = self.resource_ingress.execute("check_resource_ingress", args)
+        result = self.resource_ingress.execute(name, args)
         self.memory.record_capability_event(
-            "check_resource_ingress",
+            name,
             ok=result.ok,
             executed=True,
             duration_ms=(time.monotonic() - started) * 1000.0,
@@ -335,11 +366,14 @@ class ELIARuntime(EpistemicOrganismRuntime):
         )
         return result
 
-    def _execute_action(self, name: str, args: dict[str, Any]) -> ToolResult:
-        if name == "check_resource_ingress":
-            return self._execute_ingress(args)
+    def _external_effect_action_stage(
+        self,
+        name: str,
+        args: dict[str, Any],
+        next_action,
+    ) -> ToolResult:
         if name not in EXTERNAL_EFFECT_ACTIONS:
-            return super()._execute_action(name, args)
+            return next_action(name, args)
 
         unresolved = self.external_effects.unresolved_for(name, args)
         if unresolved is not None and unresolved.status in {"sending", "indeterminate"}:
@@ -361,17 +395,6 @@ class ELIARuntime(EpistemicOrganismRuntime):
             )
 
         try:
-            self.owner_control.assert_external_authorized(name, args)
-        except OwnerControlError as exc:
-            self.memory.record_capability_event(
-                name,
-                ok=False,
-                executed=False,
-                error=str(exc),
-            )
-            return ToolResult(False, name, data={"owner_controlled": True}, error=str(exc))
-
-        try:
             intent = self.external_effects.prepare(name, args)
         except ExternalEffectIndeterminate as exc:
             self.memory.record_capability_event(
@@ -389,7 +412,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
 
         self.external_effects.mark_sending(intent.effect_id)
         try:
-            result = super()._execute_action(name, args)
+            result = next_action(name, args)
         except BaseException as exc:
             self.external_effects.mark_indeterminate(
                 intent.effect_id,
@@ -409,6 +432,37 @@ class ELIARuntime(EpistemicOrganismRuntime):
         self.memory.set_meta("last_external_effect_id", effect.effect_id)
         self.memory.set_meta("last_external_effect_status", effect.status)
         return result
+
+    # ---- canonical hooks ----------------------------------------------------
+
+    def _context(self) -> dict[str, Any]:
+        context = super()._context()
+        if not hasattr(self, "pipeline"):
+            # Dynamic dispatch during historical initialization may reach `_context`
+            # before canonical stage construction; bind minimum safe final policy.
+            return self._policy_finalizer_stage(self._effect_context_stage(self._owner_context_stage(context)))
+        return self.pipeline.enrich(context)
+
+    def _before_brain(self, context: dict[str, Any], plan: Any) -> dict[str, Any]:
+        enriched = super()._before_brain(context, plan)
+        return self.pipeline.enrich(enriched)
+
+    def _store_model_memories(self, decision: Any) -> list[int]:
+        ids: list[int] = []
+        for item in list(getattr(decision, "memories", []) or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            memory_id = self.memory_trust.remember_from_brain(
+                item,
+                identity_fingerprint=self.identity.fingerprint,
+                model_id=self.config.brain.model_id,
+            )
+            if memory_id is not None:
+                ids.append(memory_id)
+        return ids
+
+    def _execute_action(self, name: str, args: dict[str, Any]) -> ToolResult:
+        return self.pipeline.execute(name, args, super()._execute_action)
 
     def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
         post_action_components = self._state_components()
@@ -439,7 +493,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
         return delay, wake_at
 
     def cycle(self) -> dict[str, Any]:
-        self.owner_control.assert_runtime_allowed()
+        self.pipeline.run_before_cycle()
         guard = AcceptedTransitionGuard(self.config.runtime.state_dir, self.chronicle)
         try:
             with guard as transition:
@@ -499,6 +553,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 report["external_effects"] = self._public_effect_state(
                     self.external_effects.diagnostics()
                 )
+                report["runtime_pipeline"] = self.pipeline.describe()
                 if self.resource_ingress is not None:
                     ingress_diag = self.resource_ingress.diagnostics()
                     report["resource_ingress"] = {
