@@ -18,6 +18,7 @@ _PUBLIC_CONTEXT_KEYS = frozenset(
         "economy",
         "metacognition",
         "needs",
+        "agency",
         "scheduler",
         "chronicle_integrity",
         "active_goals",
@@ -77,6 +78,55 @@ def _sensor_metadata(value: Any) -> list[dict[str, Any]]:
                 if str(key).lower() not in {"payload", "content", "body", "raw", "secret", "token"}
             }
         result.append(item)
+    return result
+
+
+def _agency_metadata(value: Any) -> dict[str, Any]:
+    """Expose durable attention/continuation without leaking local effect evidence."""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {
+        "version": value.get("version"),
+        "authority_rule": str(value.get("authority_rule", ""))[:2000],
+    }
+    selected = value.get("selected_need")
+    if isinstance(selected, dict):
+        result["selected_need"] = {
+            key: deepcopy(selected.get(key))
+            for key in ("name", "severity", "reason", "response_hint", "source")
+            if key in selected
+        }
+    focus = value.get("focus_goal")
+    if isinstance(focus, dict):
+        result["focus_goal"] = {
+            key: deepcopy(focus.get(key))
+            for key in (
+                "id",
+                "title",
+                "description",
+                "priority",
+                "status",
+                "source",
+                "parent_id",
+            )
+            if key in focus
+        }
+    work = value.get("continuation_work_item")
+    if isinstance(work, dict):
+        # Deliberately omit local artifact paths and observation/resource row IDs. The
+        # model needs causal stage/objective, not private filesystem/provider references.
+        result["continuation_work_item"] = {
+            key: deepcopy(work.get(key))
+            for key in (
+                "id",
+                "opportunity_id",
+                "status",
+                "objective",
+                "estimated_gpu_hours",
+                "updated_at",
+            )
+            if key in work
+        }
     return result
 
 
@@ -331,7 +381,6 @@ def _epistemic_metadata(value: Any) -> dict[str, Any]:
             )
             if key in policy
         }
-    # Intentionally omit recent_sessions and session IDs from remote provider context.
     return result
 
 
@@ -345,6 +394,9 @@ def provider_context(context: dict[str, Any]) -> dict[str, Any]:
             continue
         if name == "sensorium":
             public[name] = _sensor_metadata(value)
+            continue
+        if name == "agency":
+            public[name] = _agency_metadata(value)
             continue
         if name == "resource_ecology":
             public[name] = _resource_ecology_metadata(value)
