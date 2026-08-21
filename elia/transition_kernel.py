@@ -60,12 +60,14 @@ class AcceptedTransitionGuard:
     External truth is not speculative cognition. Durable WorkPort outbox evidence,
     universal external-effect intents, owner kill/revocation/approval state and verified
     resource-ingress evidence are exported from dirty state before rollback and
-    re-applied afterwards. A real or ambiguous remote side effect, explicit owner
-    revocation, or independently observed settlement therefore cannot be forgotten just
-    because the enclosing cognitive projection failed.
+    re-applied afterwards. If an effect crossed the external boundary inside a transition
+    that later rolls back, that effect is deliberately reclassified as ``indeterminate``:
+    even a successful adapter response is not permission to repeat an effect whose local
+    causal consequences were not accepted.
     """
 
     JOURNAL_VERSION = 1
+    _CROSSED_EFFECT_STATUSES = frozenset({"sending", "succeeded", "reconciled_effect"})
 
     def __init__(self, state_dir: Path, chronicle: Chronicle):
         self.state_dir = Path(state_dir).resolve()
@@ -235,6 +237,42 @@ class AcceptedTransitionGuard:
                 )
         return state
 
+    @classmethod
+    def _quarantine_rolled_back_effects(
+        cls,
+        dirty: dict[str, list[dict[str, Any]]],
+        accepted_before: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        """Make effects advanced only in the failed transition non-repeatable.
+
+        Rows that already existed unchanged in the accepted snapshot keep their prior
+        status. A new/changed row that crossed the remote boundary becomes
+        ``indeterminate`` because local state is about to roll back behind that effect.
+        ``prepared`` is safe to preserve/reuse because the external boundary was not yet
+        crossed; ``reconciled_no_effect`` is also safe because evidence established that
+        no remote mutation occurred.
+        """
+        prior = {
+            str(row.get("effect_id", "")): row
+            for row in accepted_before.get("external_effect_intents", [])
+            if row.get("effect_id")
+        }
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for row in dirty.get("external_effect_intents", []):
+            effect_id = str(row.get("effect_id", ""))
+            before = prior.get(effect_id)
+            changed = before is None or any(
+                before.get(field) != row.get(field)
+                for field in ("status", "updated_at", "result_sha256", "evidence", "error")
+            )
+            if changed and str(row.get("status", "")) in cls._CROSSED_EFFECT_STATUSES:
+                row["status"] = "indeterminate"
+                row["updated_at"] = timestamp
+                row["error"] = (
+                    "external boundary was crossed inside a rolled-back accepted transition; "
+                    "reconcile remote state before any matching retry"
+                )
+
     @staticmethod
     def _insert_rows(
         conn: sqlite3.Connection, table: str, rows: list[dict[str, Any]]
@@ -260,13 +298,10 @@ class AcceptedTransitionGuard:
             conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("PRAGMA foreign_keys=ON")
 
-            # Owner control and external intent are independent authority/effect truth
-            # and must be restored before ordinary projections are reconstructed.
             for table in ("owner_control_state", "human_approvals", "external_effect_intents"):
                 if cls._table_exists(conn, table):
                     cls._insert_rows(conn, table, state.get(table, []))
 
-            # Observation IDs are referenced by work/ingress reconciliation.
             if cls._table_exists(conn, "observations"):
                 cls._insert_rows(conn, "observations", state.get("observations", []))
             if cls._table_exists(conn, "intervention_experiences"):
@@ -286,8 +321,6 @@ class AcceptedTransitionGuard:
                     state.get("work_port_submissions", []),
                 )
 
-            # Verified settlement is external truth. Preserve the exact resource event,
-            # its consumed verification receipt, realized work linkage and ingress row.
             if cls._table_exists(conn, "resource_events"):
                 cls._insert_rows(conn, "resource_events", state.get("resource_events", []))
             if cls._table_exists(conn, "verification_receipt_consumptions"):
@@ -393,6 +426,8 @@ class AcceptedTransitionGuard:
         if self._checkpoint is None:
             raise RuntimeError("transition rollback has no Chronicle checkpoint")
         safety = self._export_external_safety_state(self.database)
+        accepted_before = self._export_external_safety_state(self.backup_path)
+        self._quarantine_rolled_back_effects(safety, accepted_before)
         self._sqlite_restore(self.backup_path, self.database)
         self.chronicle.restore_checkpoint(self._checkpoint)
         self._restore_external_safety_state(self.database, safety)
@@ -430,8 +465,6 @@ class AcceptedTransitionGuard:
         guard = cls(state_dir, chronicle)
         with guard._exclusive_lock():
             if not guard.journal_path.is_file():
-                # A snapshot created before journal fsync cannot correspond to a cycle
-                # that was allowed to mutate state; remove that harmless orphan.
                 guard.backup_path.unlink(missing_ok=True)
                 return TransitionRecovery(False, "no interrupted accepted transition")
             payload = json.loads(guard.journal_path.read_text(encoding="utf-8"))
