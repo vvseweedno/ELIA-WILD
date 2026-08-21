@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 from typing import Any
 
 from .agency import AgencyKernel
+from .attractor import AutonomyAttractor
 from .epistemic_runtime import EpistemicOrganismRuntime
 from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 
@@ -17,24 +19,42 @@ class ELIARuntime(EpistemicOrganismRuntime):
     Chronicle suffix are restored. Safety-critical external-work outbox evidence
     survives rollback and repairs its local projection afterwards.
 
-    The canonical runtime also owns a composed AgencyKernel. Verified organism needs
-    become durable commitments before inference, so intention survives model calls,
-    process exits, hibernation, and substrate replacement without gaining any new
-    execution authority. Unfinished resource work is reconciled into the same durable
-    agency cursor so a later wake continues the most causally advanced open work item
-    instead of inventing a fresh approximation of the prior objective. Agency also
+    The canonical runtime owns a composed AgencyKernel and AutonomyAttractor. Verified
+    organism needs become durable commitments before inference, so intention survives
+    model calls, process exits, hibernation, and substrate replacement without gaining
+    any new execution authority. Unfinished resource work is reconciled into the same
+    durable agency cursor so a later wake continues the most causally advanced open work
+    item instead of inventing a fresh approximation of the prior objective. Agency also
     provides a one-way wake deadline: cognition may request an earlier wake, never a
     later one than verified commitments permit.
+
+    The attractor is explicitly advisory: it supplies a project-owned mathematical,
+    cognitive and aesthetic preference field inside the feasible action set. It cannot
+    authorize a capability, override CriticAssurance, mint evidence/resources, or turn a
+    forbidden decision into a permitted one.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._transition_recovery: TransitionRecovery | None = None
         self._last_agency_wake_policy: dict[str, Any] | None = None
+        config = args[0] if args else kwargs.get("config")
+        if config is None:
+            raise TypeError("ELIARuntime requires Config as the first argument")
+        self.attractor = AutonomyAttractor.load(
+            config.system_prompt_path.with_name("autonomy_attractor.md")
+        )
         super().__init__(*args, **kwargs)
         self.agency = AgencyKernel(
             self.memory,
             max_active_goals=int(getattr(self, "MAX_ACTIVE_GOALS", 8)),
         )
+
+    def _cognitive_policy_fingerprint(self) -> str:
+        material = (
+            f"prompt:{self.prompt_template.fingerprint}\n"
+            f"attractor:{self.attractor.fingerprint}\n"
+        )
+        return sha256(material.encode("utf-8")).hexdigest()
 
     def _boot(self) -> None:
         # EliaRuntime has already initialized the Chronicle and state stores when its
@@ -46,6 +66,26 @@ class ELIARuntime(EpistemicOrganismRuntime):
         )
         self._transition_recovery = recovery
         super()._boot()
+
+        prior_attractor = self.memory.get_meta("autonomy_attractor_fingerprint", "") or ""
+        self.memory.set_meta("autonomy_attractor_fingerprint", self.attractor.fingerprint)
+        self.memory.set_meta(
+            "cognitive_policy_fingerprint",
+            self._cognitive_policy_fingerprint(),
+        )
+        if prior_attractor != self.attractor.fingerprint:
+            self.memory.remember(
+                "cognitive_policy",
+                "Bound project-owned autonomy attractor to the canonical cognitive substrate.",
+                importance=0.95,
+                source="continuity_kernel",
+                metadata={
+                    "attractor_fingerprint": self.attractor.fingerprint,
+                    "prompt_fingerprint": self.prompt_template.fingerprint,
+                    "cognitive_policy_fingerprint": self._cognitive_policy_fingerprint(),
+                },
+            )
+
         if recovery.recovered:
             self.memory.remember(
                 "accepted_transition_recovery",
@@ -88,7 +128,13 @@ class ELIARuntime(EpistemicOrganismRuntime):
         # Here the brain receives only the already-durable agency state. Re-render after
         # adding it so PromptTemplate can expose the commitment without raw private data.
         context["agency"] = self.agency.snapshot()
-        context["_system_prompt"] = self.prompt_template.render(context)
+        context["_system_prompt"] = (
+            self.prompt_template.render(context)
+            + "\n\n"
+            + self.attractor.text
+            + "\n\nAttractor fingerprint: "
+            + self.attractor.fingerprint
+        )
         return context
 
     def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
@@ -137,9 +183,55 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 components = self._state_components()
                 agency_before = self._reconcile_agency_from_components(components)
                 report = super().cycle()
+
+                decision = report.get("decision") if isinstance(report, dict) else {}
+                forecast = report.get("forecast") if isinstance(report, dict) else {}
+                prediction = forecast.get("prediction") if isinstance(forecast, dict) else {}
+                assurance = report.get("assurance") if isinstance(report, dict) else {}
+                capabilities = components.get("capabilities")
+                catalog = (
+                    capabilities.get("catalog")
+                    if isinstance(capabilities, dict)
+                    else {}
+                )
+                evaluation = self.attractor.evaluate(
+                    action_name=(
+                        str(decision.get("action_name", ""))
+                        if isinstance(decision, dict)
+                        else ""
+                    ),
+                    prediction=(prediction if isinstance(prediction, dict) else {}),
+                    agency=agency_before.as_dict(),
+                    capability_catalog=(catalog if isinstance(catalog, dict) else {}),
+                    assurance_accepted=(
+                        bool(assurance.get("accepted"))
+                        if isinstance(assurance, dict)
+                        else False
+                    ),
+                )
+                evaluation_dict = evaluation.as_dict()
+                self.memory.set_meta(
+                    "autonomy_attractor_last_v1",
+                    json.dumps(evaluation_dict, ensure_ascii=False, sort_keys=True),
+                )
+                self.memory.remember(
+                    "attractor_evaluation",
+                    json.dumps(evaluation_dict, ensure_ascii=False, sort_keys=True),
+                    importance=0.55,
+                    source="autonomy_attractor",
+                    metadata={
+                        "score": evaluation.score,
+                        "hard_constraints_satisfied": evaluation.hard_constraints_satisfied,
+                        "action_name": evaluation.action_name,
+                        "attractor_fingerprint": evaluation.attractor_fingerprint,
+                    },
+                )
+
                 report["agency_before"] = agency_before.as_dict()
                 report["agency"] = self.agency.snapshot()
                 report["agency_wake_policy"] = dict(self._last_agency_wake_policy or {})
+                report["autonomy_attractor"] = evaluation_dict
+                report["cognitive_policy_fingerprint"] = self._cognitive_policy_fingerprint()
                 transition.accept()
             return report
         except BaseException:
