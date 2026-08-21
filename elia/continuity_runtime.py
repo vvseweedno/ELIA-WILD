@@ -19,7 +19,9 @@ class ELIARuntime(EpistemicOrganismRuntime):
     The canonical runtime also owns a composed AgencyKernel. Verified organism needs
     become durable commitments before inference, so intention survives model calls,
     process exits, hibernation, and substrate replacement without gaining any new
-    execution authority.
+    execution authority. Unfinished resource work is reconciled into the same durable
+    agency cursor so a later wake continues the most causally advanced open work item
+    instead of inventing a fresh approximation of the prior objective.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -77,9 +79,19 @@ class ELIARuntime(EpistemicOrganismRuntime):
             with guard as transition:
                 # Agency reconciliation is part of the same atomic transition as the
                 # cognitive cycle. If later cognition/action fails, newly formed or
-                # resolved commitments roll back with the speculative state.
+                # resolved commitments and the continuation cursor roll back with the
+                # speculative state.
                 components = self._state_components()
-                agency = self.agency.reconcile(components.get("needs") or [])
+                resource_ecology = components.get("resource_ecology")
+                active_work = (
+                    resource_ecology.get("active_work") or []
+                    if isinstance(resource_ecology, dict)
+                    else []
+                )
+                agency = self.agency.reconcile(
+                    components.get("needs") or [],
+                    active_work=active_work,
+                )
                 report = super().cycle()
                 report["agency"] = agency.as_dict()
                 transition.accept()
