@@ -1,45 +1,46 @@
 # ELIA WILD on Kaggle
 
-Kaggle is a bounded compute organ for ELIA, not the identity store. Identity, lineage,
-memory, resource state and authority survive outside any one GPU session through the
-continuity checkpoint path.
+Kaggle is a bounded compute organ for ELIA, not the identity store and not the rollback witness. Identity, lineage, memory, durable agency and authority survive outside any one GPU session through encrypted continuity state plus an independent external witness.
 
 ## Production path
 
 ```text
 private encrypted state Dataset
         ↓
+independent rollback/fork witness restored from GitHub Actions artifact
+        ↓
 CPU restore + digest/identity/Chronicle verification
         ↓
 preflight: halt | hibernate | wake
         ↓ wake only
-private T4 kernel + pinned ELIA ref
+private Kaggle GPU kernel + pinned ELIA ref
         ↓
 bounded Qwen cognition
         ↓
-accepted transition + hibernate
+accepted transition + deterministic next-wake policy
         ↓
 XChaCha20-Poly1305 encrypted checkpoint
         ↓
-relay verifies digest/counter/nonce
+relay verifies nonce + source digest + output digest/counter
         ↓
-new private Dataset version
+new private Dataset version becomes durable
+        ↓
+independent witness advances
+        ↓
+new immutable GitHub Actions witness artifact
 ```
 
-The local Executive budget is a planning constraint; Kaggle's actual quota remains
-authoritative.
+The local Executive budget is a planning constraint; Kaggle's actual quota remains authoritative.
 
 ## Required secrets
 
-Create two independent secrets and keep them outside Git, checkpoints and Dataset
-metadata:
+Create independent secrets and keep them outside Git, checkpoint metadata and Dataset metadata:
 
-- `ELIA_CHECKPOINT_KEY` — HMAC/authentication key, at least 16 bytes; use a long random
-  value.
-- `ELIA_CHECKPOINT_ENCRYPTION_KEY` — **base64 encoding of exactly 32 random bytes** for
-  the XChaCha20-Poly1305 envelope.
+- `ELIA_CHECKPOINT_KEY` — HMAC/authentication key, at least 16 bytes; use a long random value.
+- `ELIA_CHECKPOINT_ENCRYPTION_KEY` — **base64 encoding of exactly 32 random bytes** for the XChaCha20-Poly1305 envelope.
+- `KAGGLE_API_TOKEN` — relay credential for the Kaggle CLI/API.
 
-Example local generation:
+Example continuity-key generation:
 
 ```bash
 python - <<'PY'
@@ -49,34 +50,28 @@ print('ELIA_CHECKPOINT_ENCRYPTION_KEY=' + base64.b64encode(secrets.token_bytes(3
 PY
 ```
 
-For the manual/controlled notebook, attach both labels in Kaggle **Add-ons → Secrets**.
-For the unattended relay, attach both labels once to the persistent private kernel ID
-configured as `ELIA_KAGGLE_KERNEL`. Kaggle's current kernel metadata supports datasets,
-GPU and internet settings but does not attach user secrets; secret attachment is a
-one-time deployment property of that kernel.
+For the controlled notebook, attach the two ELIA continuity secrets in Kaggle **Add-ons → Secrets**. For the persistent relay kernel, attach the same two labels once to the private kernel ID configured by the wake relay. Kaggle kernel metadata configures datasets/GPU/internet but does not itself grant ELIA continuity secrets.
 
-## First launch notebook
+## First controlled launch
 
-Use `runtime/kaggle/ELIA_WILD_Genesis.ipynb` with a T4 GPU and Internet enabled. It is
-fail-closed and performs:
+Use `runtime/kaggle/ELIA_WILD_Genesis.ipynb` with Internet and a supported NVIDIA GPU enabled. The notebook is fail-closed and performs:
 
-1. clone the pinned consolidation ref;
+1. clone the pinned consolidation branch;
 2. require and validate both continuity secrets;
 3. restore one attached encrypted ELIA state bundle, or create fresh Genesis state;
-4. run `elia-doctor`, `elia-vitals`, Chronicle verification, status and supervisor
-   dry-run before loading a model;
+4. run `elia-doctor`, `elia-vitals`, Chronicle verification, status and supervisor dry-run before model loading;
 5. prove a real CUDA operation works;
 6. install the pinned 4-bit Qwen backend;
-7. run one bounded real cognition cycle;
+7. run one bounded real cognition cycle through `ELIARuntime`;
 8. verify accepted state;
 9. export an encrypted checkpoint and trusted digest;
 10. restore that checkpoint into an independent state directory and verify it again.
 
-A failed gate stops the notebook. There is no plaintext fallback.
+Any failed gate stops the launch. There is no plaintext continuity fallback.
 
-## Bootstrap the private state Dataset
+## Bootstrap private state and witness
 
-On an authorized machine with Kaggle CLI configured:
+On an authorized machine with the Kaggle CLI configured:
 
 ```bash
 export ELIA_CHECKPOINT_KEY='...'
@@ -89,47 +84,81 @@ python scripts/bootstrap_kaggle_state.py \
   --create-dataset
 ```
 
-The bootstrap script requires encryption and strips both ELIA keys from the environment
-passed to the external `kaggle` CLI process.
+Bootstrap requires encryption and creates the initial authenticated rollback witness outside the Dataset. The external `kaggle` child process receives the Kaggle credential but not ELIA continuity keys.
 
-## Unattended wake relay
+For GitHub Actions operation, the first witness artifact must be seeded by an **explicit `workflow_dispatch`** after deployment variables/secrets are configured. A scheduled heartbeat must not create a new witness by trusting the Dataset it is supposed to verify.
 
-Configure the same authorized relay host:
+## GitHub Actions heartbeat
 
-```bash
-export KAGGLE_API_TOKEN='...'
-export ELIA_CHECKPOINT_KEY='...'
-export ELIA_CHECKPOINT_ENCRYPTION_KEY='...base64...'
-export ELIA_KAGGLE_STATE_DATASET='<owner>/elia-wild-state'
-export ELIA_KAGGLE_KERNEL='<owner>/elia-wild-runtime'
-export ELIA_REPO_REF='elia/genesis-1.7.1-consolidation'
+`.github/workflows/wake.yml` is the low-cost external heartbeat. It is intentionally not continuous resident compute: it runs hourly and only when repository variable:
 
-python scripts/kaggle_wake.py
+```text
+ELIA_WAKE_ENABLED=true
 ```
 
-The relay is idempotent around a persisted pending launch nonce. It:
+is set.
 
-- rejects plaintext checkpoints;
-- verifies the trusted digest before restore;
-- does not launch GPU cognition when preflight says hibernate/halt;
-- records a pending launch before pushing a kernel;
-- accepts output only when nonce, source digest, checkpoint digest/counter and encrypted
-  envelope agree;
-- suppresses additional launches after repeated failures;
-- versions the private state Dataset only after successful verification.
+Required repository **Secrets**:
 
-The Kaggle CLI child receives its own API credential but not ELIA continuity keys. The
-remote kernel reads the two continuity secrets from its attached Kaggle Secrets.
+```text
+KAGGLE_API_TOKEN
+ELIA_CHECKPOINT_KEY
+ELIA_CHECKPOINT_ENCRYPTION_KEY
+```
+
+Required/expected repository **Variables**:
+
+```text
+ELIA_WAKE_ENABLED=true
+ELIA_KAGGLE_STATE_DATASET=<owner>/elia-wild-state
+ELIA_KAGGLE_KERNEL=<owner>/elia-wild-runtime
+ELIA_KAGGLE_ACCELERATOR=NvidiaTeslaT4   # or validated equivalent
+ELIA_KAGGLE_KERNEL_TIMEOUT=3600         # optional bounded override
+ELIA_WAKE_MAX_CYCLES=8                  # optional bounded override
+```
+
+Each heartbeat:
+
+1. checks out the exact source revision;
+2. restores the latest independent witness from a prior immutable Actions artifact;
+3. refuses scheduled operation if no trusted witness exists;
+4. exposes ELIA/Kaggle secrets only to the relay step, not checkout/install steps;
+5. downloads and verifies encrypted Kaggle state against the independent witness;
+6. performs deterministic preflight;
+7. launches no GPU when mode is `hibernate` or `halt`;
+8. if wake is required, records pending intent before pushing the Kaggle kernel;
+9. on a later heartbeat, accepts completed output only when nonce/digests/counters/encryption agree;
+10. advances the Dataset first and the independent witness only after durable acceptance;
+11. uploads the new witness as the next immutable Actions artifact.
+
+The external witness is intentionally separate from the state Dataset. If the witness is missing, stale, tampered with or disagrees with the Dataset, the relay fails closed. Availability is sacrificed rather than allowing the potentially replayed Dataset to declare itself current.
+
+## Wake relay invariants
+
+`scripts/kaggle_wake.py` is idempotent around persisted pending launch state. It:
+
+- rejects plaintext external checkpoints;
+- validates authenticated/encrypted restore before preflight;
+- checks source checkpoint counter/digest against the independent witness;
+- avoids duplicate GPU launches while a prior kernel is queued/running;
+- validates a completed relay report against its launch nonce and source digest;
+- requires output checkpoint metadata to match the relay report;
+- requires cognition-started runs to advance the authenticated checkpoint counter;
+- records bounded failures and suppresses repeated launches after the failure threshold;
+- versions private state only after verification;
+- advances the independent witness only after the new Dataset version is durable.
+
+The Kaggle CLI child does not receive ELIA continuity keys. The remote kernel reads continuity secrets from its private Kaggle Secrets attachment.
 
 ## Hibernation
 
-ELIA does not intentionally hold paid/scarce GPU time while sleeping. Long waits become
-persistent hibernation: next-wake state is recorded, an encrypted checkpoint is emitted,
-and the session may terminate. A later authorized heartbeat invokes the relay again.
+ELIA does not intentionally hold scarce GPU time while sleeping. Long waits become persistent hibernation: the next-wake policy is stored, an encrypted checkpoint is emitted, and the GPU session may terminate.
 
-## Fresh-machine restore contract
+Agency owns a one-way wake ceiling: a model can request an earlier wake but cannot postpone verified maintenance or unfinished work beyond the deterministic deadline. The external GitHub heartbeat is currently hourly, so sub-hour internal deadlines mean “wake on the next available heartbeat,” not fictitious sub-hour scheduling.
 
-A fresh machine has no local rollback anchor, so restore requires the trusted digest:
+## Fresh-machine restore
+
+A fresh machine without a local checkpoint anchor must receive a trusted digest or independent witness through a separate trusted channel:
 
 ```bash
 export ELIA_CHECKPOINT_REQUIRE_ENCRYPTION=1
@@ -140,17 +169,23 @@ python -m elia --verify
 python -m elia --preflight
 ```
 
-The checkpoint manager validates AEAD authentication, HMAC/manifest hashes, member and
-size limits, SQLite integrity, Chronicle head, identity fingerprint and rollback/fork
-rules before promoting restored state.
+Restore validates AEAD authentication, HMAC/manifest hashes, archive size/member bounds, SQLite integrity, Chronicle state, identity fingerprint and rollback/fork rules before promoting state.
 
-## What this proves — and what it does not
+## Deployment proof still required
 
-A successful end-to-end run proves that this implementation can install, restore a
-verified identity state, execute a real model cycle on Kaggle, persist the accepted
-transition in encrypted form and restore it again. Repeated successful relayed runs can
-then measure continuity and autonomous operation over time.
+Software CI verifies the relay logic, encryption, witness behavior, lifecycle and clean installation. It does **not** prove the selected real Kaggle accelerator can load the pinned Qwen substrate or that the unattended round trip works under live platform conditions.
 
-It does not by itself prove consciousness, AGI, economic self-sufficiency or indefinite
-survival. Those are empirical claims requiring longitudinal evidence, not deployment
-labels.
+The remaining empirical gate for Genesis 1.7.1 is:
+
+```text
+real GPU load
+→ one bounded cognitive cycle
+→ encrypted accepted checkpoint
+→ independent restore
+→ hibernate
+→ GitHub heartbeat restores witness
+→ Kaggle relay wakes later
+→ authenticated checkpoint counter advances
+```
+
+Passing that gate would prove this implementation can perform a real persistent wake/hibernate/relaunch cycle on the chosen infrastructure. It would not prove consciousness, AGI, economic self-sufficiency or indefinite survival.
