@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .agency import AgencyKernel
 from .epistemic_runtime import EpistemicOrganismRuntime
 from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 
@@ -14,11 +15,20 @@ class ELIARuntime(EpistemicOrganismRuntime):
     either accepted as one durable state transition or its speculative local state and
     Chronicle suffix are restored. Safety-critical external-work outbox evidence
     survives rollback and repairs its local projection afterwards.
+
+    The canonical runtime also owns a composed AgencyKernel. Verified organism needs
+    become durable commitments before inference, so intention survives model calls,
+    process exits, hibernation, and substrate replacement without gaining any new
+    execution authority.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._transition_recovery: TransitionRecovery | None = None
         super().__init__(*args, **kwargs)
+        self.agency = AgencyKernel(
+            self.memory,
+            max_active_goals=int(getattr(self, "MAX_ACTIVE_GOALS", 8)),
+        )
 
     def _boot(self) -> None:
         # EliaRuntime has already initialized the Chronicle and state stores when its
@@ -52,11 +62,26 @@ class ELIARuntime(EpistemicOrganismRuntime):
         if callable(parent):
             parent()
 
+    def _context(self) -> dict[str, Any]:
+        context = super()._context()
+        # Reconciliation is performed once at the beginning of the accepted transition.
+        # Here the brain receives only the already-durable agency state. Re-render after
+        # adding it so PromptTemplate can expose the commitment without raw private data.
+        context["agency"] = self.agency.snapshot()
+        context["_system_prompt"] = self.prompt_template.render(context)
+        return context
+
     def cycle(self) -> dict[str, Any]:
         guard = AcceptedTransitionGuard(self.config.runtime.state_dir, self.chronicle)
         try:
             with guard as transition:
+                # Agency reconciliation is part of the same atomic transition as the
+                # cognitive cycle. If later cognition/action fails, newly formed or
+                # resolved commitments roll back with the speculative state.
+                components = self._state_components()
+                agency = self.agency.reconcile(components.get("needs") or [])
                 report = super().cycle()
+                report["agency"] = agency.as_dict()
                 transition.accept()
             return report
         except BaseException:
