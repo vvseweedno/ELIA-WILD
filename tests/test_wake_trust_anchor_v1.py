@@ -28,11 +28,12 @@ def store(path: Path) -> WakeTrustAnchorStore:
 def test_anchor_requires_explicit_trusted_initialization(tmp_path: Path) -> None:
     anchor = store(tmp_path / "anchor.json")
     with pytest.raises(WakeTrustAnchorError, match="missing"):
-        anchor.accept(counter=1, digest="a" * 64)
+        anchor.verify(counter=1, digest="a" * 64)
 
     initialized = anchor.initialize(counter=1, digest="a" * 64)
     assert initialized.counter == 1
     assert initialized.digest == "a" * 64
+    assert anchor.verify(counter=1, digest="a" * 64) == initialized
 
 
 def test_anchor_rejects_rollback_and_same_counter_fork(tmp_path: Path) -> None:
@@ -40,9 +41,9 @@ def test_anchor_rejects_rollback_and_same_counter_fork(tmp_path: Path) -> None:
     anchor.initialize(counter=3, digest="c" * 64)
 
     with pytest.raises(WakeTrustAnchorRollbackError, match="rollback"):
-        anchor.accept(counter=2, digest="b" * 64)
+        anchor.verify(counter=2, digest="b" * 64)
     with pytest.raises(WakeTrustAnchorRollbackError, match="fork/replay"):
-        anchor.accept(counter=3, digest="d" * 64)
+        anchor.verify(counter=3, digest="d" * 64)
 
     current = anchor.read()
     assert current is not None
@@ -50,11 +51,27 @@ def test_anchor_rejects_rollback_and_same_counter_fork(tmp_path: Path) -> None:
     assert current.digest == "c" * 64
 
 
-def test_anchor_advances_only_to_authenticated_forward_state(tmp_path: Path) -> None:
+def test_source_verification_never_learns_a_newer_state_from_dataset(tmp_path: Path) -> None:
+    anchor = store(tmp_path / "anchor.json")
+    anchor.initialize(counter=2, digest="b" * 64)
+
+    with pytest.raises(WakeTrustAnchorError, match="ahead of the durable"):
+        anchor.verify(counter=3, digest="c" * 64)
+
+    current = anchor.read()
+    assert current is not None
+    assert current.counter == 2
+    assert current.digest == "b" * 64
+
+
+def test_anchor_advances_only_through_explicit_trusted_forward_acceptance(
+    tmp_path: Path,
+) -> None:
     anchor = store(tmp_path / "anchor.json")
     anchor.initialize(counter=1, digest="a" * 64)
-    advanced = anchor.accept(counter=2, digest="b" * 64)
+    advanced = anchor.advance(counter=2, digest="b" * 64)
     assert advanced.counter == 2
+    assert anchor.verify(counter=2, digest="b" * 64) == advanced
     assert anchor.accept(counter=2, digest="b" * 64) == advanced
 
 
