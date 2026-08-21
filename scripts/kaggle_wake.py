@@ -321,8 +321,10 @@ def accept_completed_output(
         message=f"ELIA relay accepted encrypted checkpoint {output_info.counter}",
         root=root,
     )
-    # Advance the independent anchor only after the new Dataset version is durable.
-    trust_anchor.accept(counter=output_info.counter, digest=output_info.digest)
+    # The Dataset is now durable. Advance the separately persisted witness only after
+    # all output validation has succeeded. If witness persistence later fails, the next
+    # heartbeat will fail closed because source verification requires exact equality.
+    trust_anchor.advance(counter=output_info.counter, digest=output_info.digest)
     print_event(
         "relay_accepted",
         digest=output_info.digest,
@@ -448,7 +450,9 @@ def main() -> int:
             identity_name=config.identity_name,
             state_dir=root / "restored-state",
         )
-        anchor = trust_anchor.accept(
+        # The Dataset being inspected may not teach the external witness a newer state.
+        # Exact equality is required before any scheduler/kernel decision is trusted.
+        anchor = trust_anchor.verify(
             counter=source_info.counter,
             digest=source_digest,
         )
