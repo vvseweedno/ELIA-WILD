@@ -6,6 +6,8 @@ import sqlite3
 import pytest
 
 from elia.chronicle import Chronicle
+from elia.external_effects import ExternalEffectLedger
+from elia.owner_control import OwnerControl, OwnerMandate
 from elia.transition_kernel import AcceptedTransitionGuard
 
 
@@ -134,3 +136,38 @@ def test_external_outbox_evidence_survives_cognitive_rollback(tmp_path: Path) ->
         ).fetchone()
     assert intent == ("indeterminate", "idem-7")
     assert observation == ("work_port", "ambiguous remote result")
+
+
+def test_universal_effect_and_owner_revocation_survive_rollback(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".elia"
+    state_dir.mkdir()
+    database = _database(state_dir)
+    ledger = ExternalEffectLedger(database)
+    mandate = OwnerMandate(
+        schema_version=1,
+        precedence=("owner", "continuity"),
+        require_external_lease=False,
+        approval_required_actions=(),
+        default_lease_hours=1.0,
+        fingerprint="a" * 64,
+    )
+    owner = OwnerControl(database, mandate)
+    chronicle = Chronicle(state_dir / "chronicle.jsonl")
+    chronicle.append("BOOT", {"accepted": True})
+
+    effect_id = ""
+    with pytest.raises(RuntimeError):
+        with AcceptedTransitionGuard(state_dir, chronicle):
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE kv SET value='speculative' WHERE key='state'")
+            intent = ledger.prepare("browser_click", {"selector": "button[type=submit]"})
+            effect_id = intent.effect_id
+            ledger.mark_sending(effect_id)
+            owner.revoke(reason="operator revoked while cognition was active")
+            raise RuntimeError("crash after possible remote effect")
+
+    assert _value(database) == "accepted"
+    restored = ExternalEffectLedger(database).get(effect_id)
+    assert restored is not None
+    assert restored.status == "sending"
+    assert OwnerControl(database, mandate).snapshot()["delegation_revoked"] is True
