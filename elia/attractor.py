@@ -25,9 +25,6 @@ _CONTINUATION_ACTIONS: dict[str, tuple[str, ...]] = {
     "planned": ("stage_deliverable", "read_workspace", "write_workspace"),
     "staged": ("submit_work", "read_workspace"),
     "submitted": ("check_work_outcome",),
-    # Acceptance is deliberately not mapped to resource realization. Realization is a
-    # separate trusted verification boundary, so model-facing autonomy must not invent
-    # an action that mints payment/resources.
     "accepted": ("sensorium_recent", "noop"),
 }
 
@@ -117,9 +114,10 @@ class AttractorEvaluation:
 class AutonomyAttractor:
     """Advisory preference field over already-authorized decisions.
 
-    This evaluator cannot execute anything and cannot turn a forbidden decision into a
-    permitted one. Hard authority/continuity constraints remain feasibility conditions;
-    the weighted score exists only inside the feasible set.
+    Hard constraints are conjunctions, never negative utility weights. CriticAssurance,
+    declared capability state and the external owner/delegation gate must all accept the
+    decision before the weighted score exists. The evaluator cannot execute anything or
+    convert soft utility into permission.
     """
 
     path: Path | None
@@ -221,13 +219,16 @@ class AutonomyAttractor:
         agency: dict[str, Any] | None,
         capability_catalog: dict[str, Any] | None,
         assurance_accepted: bool,
+        authority_accepted: bool = True,
     ) -> AttractorEvaluation:
         action_name = str(action_name).strip()[:128]
         prediction = prediction if isinstance(prediction, dict) else {}
         agency = agency if isinstance(agency, dict) else {}
         capability = self._capability(capability_catalog, action_name)
         declared_enabled = bool(capability and capability.get("enabled", True))
-        feasible = bool(assurance_accepted and action_name and declared_enabled)
+        feasible = bool(
+            assurance_accepted and authority_accepted and action_name and declared_enabled
+        )
 
         success_probability = _unit(
             prediction.get("action_success_probability", 0.5), 0.5
@@ -248,6 +249,10 @@ class AutonomyAttractor:
         if not assurance_accepted:
             notes.append(
                 "CriticAssurance rejected the proposed decision; soft utility is not applicable."
+            )
+        if not authority_accepted:
+            notes.append(
+                "Owner/delegation authority rejected the proposed decision; soft utility is not applicable."
             )
         if capability is None:
             notes.append("Action is absent from the declared capability catalog.")
