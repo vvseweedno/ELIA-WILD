@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from elia.chronicle import Chronicle
-from elia.external_effects import ExternalEffectLedger
+from elia.external_effects import ExternalEffectIndeterminate, ExternalEffectLedger
 from elia.owner_control import OwnerControl, OwnerMandate
 from elia.transition_kernel import AcceptedTransitionGuard
 
@@ -16,7 +16,6 @@ def _database(path: Path) -> Path:
     with sqlite3.connect(database) as conn:
         conn.execute("CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute("INSERT INTO kv(key,value) VALUES ('state','accepted')")
-        # Minimal safety tables exercise generic preservation without importing MCP.
         conn.execute(
             """
             CREATE TABLE work_port_intents(
@@ -81,8 +80,6 @@ def test_process_death_journal_is_recovered_before_next_boot(tmp_path: Path) -> 
     chronicle.append("BOOT", {"accepted": True})
     accepted_head = chronicle.head()
 
-    # Simulate SIGKILL/power loss: enter the barrier, commit dirty state, then release
-    # the OS lock without running __exit__ or cleanup.
     guard = AcceptedTransitionGuard(state_dir, chronicle)
     guard.__enter__()
     with sqlite3.connect(database) as conn:
@@ -138,11 +135,7 @@ def test_external_outbox_evidence_survives_cognitive_rollback(tmp_path: Path) ->
     assert observation == ("work_port", "ambiguous remote result")
 
 
-def test_universal_effect_and_owner_revocation_survive_rollback(tmp_path: Path) -> None:
-    state_dir = tmp_path / ".elia"
-    state_dir.mkdir()
-    database = _database(state_dir)
-    ledger = ExternalEffectLedger(database)
+def _owner(database: Path) -> OwnerControl:
     mandate = OwnerMandate(
         schema_version=1,
         precedence=("owner", "continuity"),
@@ -151,7 +144,15 @@ def test_universal_effect_and_owner_revocation_survive_rollback(tmp_path: Path) 
         default_lease_hours=1.0,
         fingerprint="a" * 64,
     )
-    owner = OwnerControl(database, mandate)
+    return OwnerControl(database, mandate)
+
+
+def test_universal_effect_and_owner_revocation_survive_rollback(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".elia"
+    state_dir.mkdir()
+    database = _database(state_dir)
+    ledger = ExternalEffectLedger(database)
+    owner = _owner(database)
     chronicle = Chronicle(state_dir / "chronicle.jsonl")
     chronicle.append("BOOT", {"accepted": True})
 
@@ -169,5 +170,38 @@ def test_universal_effect_and_owner_revocation_survive_rollback(tmp_path: Path) 
     assert _value(database) == "accepted"
     restored = ExternalEffectLedger(database).get(effect_id)
     assert restored is not None
-    assert restored.status == "sending"
-    assert OwnerControl(database, mandate).snapshot()["delegation_revoked"] is True
+    assert restored.status == "indeterminate"
+    assert _owner(database).snapshot()["delegation_revoked"] is True
+
+
+def test_successful_effect_in_rolled_back_cycle_requires_reconciliation(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".elia"
+    state_dir.mkdir()
+    database = _database(state_dir)
+    ledger = ExternalEffectLedger(database)
+    chronicle = Chronicle(state_dir / "chronicle.jsonl")
+    chronicle.append("BOOT", {"accepted": True})
+    args = {"server": "configured", "tool": "create_remote_object"}
+
+    effect_id = ""
+    with pytest.raises(RuntimeError):
+        with AcceptedTransitionGuard(state_dir, chronicle):
+            intent = ledger.prepare("mcp_call", args)
+            effect_id = intent.effect_id
+            ledger.mark_sending(effect_id)
+            ledger.record_result(
+                effect_id,
+                ok=True,
+                result={"remote_id": "created-123"},
+            )
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE kv SET value='speculative-after-success' WHERE key='state'")
+            raise RuntimeError("later local projection failed")
+
+    restored_ledger = ExternalEffectLedger(database)
+    restored = restored_ledger.get(effect_id)
+    assert restored is not None
+    assert restored.status == "indeterminate"
+    assert "rolled-back accepted transition" in restored.error
+    with pytest.raises(ExternalEffectIndeterminate):
+        restored_ledger.prepare("mcp_call", args)
