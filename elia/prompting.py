@@ -355,6 +355,35 @@ def _bounded_work_ports(value: Any) -> dict[str, Any]:
     }
 
 
+def _bounded_agency(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    selected = value.get("selected_need") if isinstance(value.get("selected_need"), dict) else None
+    focus = value.get("focus_goal") if isinstance(value.get("focus_goal"), dict) else None
+    return {
+        "version": value.get("version", 1),
+        "selected_need": (
+            {
+                key: selected.get(key)
+                for key in ("name", "severity", "reason", "response_hint", "source")
+                if key in selected
+            }
+            if selected is not None
+            else None
+        ),
+        "focus_goal": (
+            {
+                key: focus.get(key)
+                for key in ("id", "title", "description", "priority", "status", "source", "parent_id")
+                if key in focus
+            }
+            if focus is not None
+            else None
+        ),
+        "authority_rule": value.get("authority_rule"),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     path: Path
@@ -410,6 +439,7 @@ class PromptTemplate:
                 )
                 if key in self_model
             },
+            "agency": _bounded_agency(context.get("agency")),
             "adaptive_self_hypotheses": context.get("self_hypotheses") or [],
             "world_model": {
                 "beliefs": list(world.get("beliefs") or [])[:16],
