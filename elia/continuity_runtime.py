@@ -6,6 +6,7 @@ from typing import Any
 
 from .agency import AgencyKernel
 from .attractor import AutonomyAttractor
+from .autonomy import derive_needs
 from .epistemic_runtime import EpistemicOrganismRuntime
 from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
 
@@ -102,11 +103,76 @@ class ELIARuntime(EpistemicOrganismRuntime):
 
     def _after_transition_rollback(self) -> None:
         """Hook inherited/extended by external-work layers for projection repair."""
-        # ExternalWorkOrganismRuntime defines the meaningful implementation. Keeping a
-        # fallback here makes this class robust if the ancestry is later refactored.
         parent = getattr(super(), "_after_transition_rollback", None)
         if callable(parent):
             parent()
+
+    def _state_components(self) -> dict[str, Any]:
+        """Add deployment-effective body readiness without mutating historical runtimes."""
+        components = super()._state_components()
+        capabilities = components.get("capabilities")
+        catalog = capabilities.get("catalog") if isinstance(capabilities, dict) else None
+        if not isinstance(catalog, dict):
+            return components
+
+        needs = list(components.get("needs") or [])
+        names = {
+            str(item.get("name", ""))
+            for item in needs
+            if isinstance(item, dict)
+        }
+        if "body_readiness" not in names:
+            chronicle = components.get("chronicle") or {}
+            additional = derive_needs(
+                self.memory,
+                chronicle_valid=bool(
+                    chronicle.get("valid", False)
+                    if isinstance(chronicle, dict)
+                    else False
+                ),
+                budget=(
+                    components.get("resources")
+                    if isinstance(components.get("resources"), dict)
+                    else self.budget()
+                ),
+                active_goals=(
+                    components.get("goals")
+                    if isinstance(components.get("goals"), list)
+                    else self.memory.active_goals(16)
+                ),
+                capability_health=(
+                    capabilities.get("health")
+                    if isinstance(capabilities.get("health"), dict)
+                    else {}
+                ),
+                capability_catalog=catalog,
+                economy=(
+                    components.get("economy")
+                    if isinstance(components.get("economy"), dict)
+                    else self.economy.snapshot(16)
+                ),
+            )
+            body_need = next(
+                (need.as_dict() for need in additional if need.name == "body_readiness"),
+                None,
+            )
+            if body_need is not None:
+                needs.append(body_need)
+                needs.sort(
+                    key=lambda item: (
+                        -float(item.get("severity", 0.0)),
+                        str(item.get("name", "")),
+                    )
+                )
+                components["needs"] = needs[:24]
+                self_model = components.get("self_model")
+                if isinstance(self_model, dict):
+                    self_model["needs"] = [
+                        str(item.get("name", ""))
+                        for item in components["needs"]
+                        if isinstance(item, dict)
+                    ]
+        return components
 
     @staticmethod
     def _active_work_from_components(components: dict[str, Any]) -> list[Any]:
@@ -124,9 +190,6 @@ class ELIARuntime(EpistemicOrganismRuntime):
 
     def _context(self) -> dict[str, Any]:
         context = super()._context()
-        # Reconciliation is performed once at the beginning of the accepted transition.
-        # Here the brain receives only the already-durable agency state. Re-render after
-        # adding it so PromptTemplate can expose the commitment without raw private data.
         context["agency"] = self.agency.snapshot()
         context["_system_prompt"] = (
             self.prompt_template.render(context)
@@ -138,15 +201,8 @@ class ELIARuntime(EpistemicOrganismRuntime):
         return context
 
     def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
-        # Scheduling occurs after the action. Reconcile from fresh persisted state here,
-        # not from the pre-inference cursor: a staged item that was just submitted, or a
-        # maintenance need that was just resolved, must change the wake deadline now.
         post_action_components = self._state_components()
         post_action_agency = self._reconcile_agency_from_components(post_action_components)
-
-        # The substrate may propose how long to sleep, but verified commitments own the
-        # upper bound. This prevents one hallucinated/over-conservative decision from
-        # indefinitely abandoning an accepted external outcome or repair obligation.
         model_requested = (
             float(self.config.runtime.cycle_sleep_seconds)
             if requested is None
@@ -176,10 +232,6 @@ class ELIARuntime(EpistemicOrganismRuntime):
         guard = AcceptedTransitionGuard(self.config.runtime.state_dir, self.chronicle)
         try:
             with guard as transition:
-                # Agency reconciliation is part of the same atomic transition as the
-                # cognitive cycle. If later cognition/action fails, newly formed or
-                # resolved commitments and the continuation cursor roll back with the
-                # speculative state.
                 components = self._state_components()
                 agency_before = self._reconcile_agency_from_components(components)
                 report = super().cycle()
@@ -235,17 +287,12 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 transition.accept()
             return report
         except BaseException:
-            # Context-manager exit has restored the accepted state before this hook.
-            # Repair any safety-preserved external-work projection without resending.
             try:
                 self._after_transition_rollback()
             except Exception:
-                # Never mask the original cycle failure with a best-effort projection
-                # repair error. The preserved outbox remains available on next boot.
                 pass
             raise
 
 
-# Compatibility names for code written against Genesis 1.7 before runtime consolidation.
 ContinuityKernelRuntime = ELIARuntime
 EliaContinuityRuntime = ELIARuntime
