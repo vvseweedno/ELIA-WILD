@@ -6,6 +6,21 @@ from typing import Any
 from .memory import GoalRecord, MemoryStore
 
 
+# These are the presently implemented capabilities that can produce a side effect
+# outside ELIA's private persistence/workspace boundary. Merely being declared is not
+# enough: the catalog must report the capability enabled after all deployment checks.
+_EXTERNAL_ACTUATION_CAPABILITIES = frozenset(
+    {
+        "browser_click",
+        "browser_fill",
+        "process_run",
+        "mcp_call",
+        "jsonrpc_call",
+        "submit_work",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Need:
     name: str
@@ -17,6 +32,18 @@ class Need:
         return asdict(self)
 
 
+def _enabled_external_actuation(
+    capability_catalog: dict[str, dict[str, Any]] | None,
+) -> list[str]:
+    enabled: list[str] = []
+    for name, raw in (capability_catalog or {}).items():
+        if name not in _EXTERNAL_ACTUATION_CAPABILITIES or not isinstance(raw, dict):
+            continue
+        if bool(raw.get("enabled", False)):
+            enabled.append(str(name))
+    return sorted(enabled)
+
+
 def derive_needs(
     memory: MemoryStore,
     *,
@@ -24,12 +51,15 @@ def derive_needs(
     budget: dict[str, float],
     active_goals: list[GoalRecord],
     capability_health: dict[str, dict[str, Any]] | None = None,
+    capability_catalog: dict[str, dict[str, Any]] | None = None,
     economy: dict[str, Any] | None = None,
 ) -> list[Need]:
     """Derive bounded, inspectable self-maintenance pressures from verified state.
 
     These are deterministic runtime signals, not free-form model desires. They make
-    the reason for autonomous activity explicit and auditable.
+    the reason for autonomous activity explicit and auditable. Body readiness is based
+    on the *effective* capability catalog after sandbox/allow-list/deployment checks;
+    this function never turns an unavailable adapter into authority.
     """
 
     needs: list[Need] = []
@@ -133,6 +163,31 @@ def derive_needs(
                 0.4,
                 "No active resource/work opportunity is recorded while finite compute is being consumed.",
                 "Use public evidence research to discover legitimate work, bounties, grants or free compute/API resources when higher-severity maintenance needs are satisfied.",
+            )
+        )
+
+    # Perception and private workspace writes are useful but do not close the autonomy
+    # loop. If no *effective* externally side-effecting authority is available, expose
+    # that limitation as a bounded deployment need rather than silently granting more
+    # permissions. The safe responses are diagnostics, a sandbox/allow-list plan, or
+    # provisioning by an authorized deployment layer.
+    external_actuation = _enabled_external_actuation(capability_catalog)
+    if capability_catalog is not None and not external_actuation:
+        unavailable = sorted(
+            name
+            for name in _EXTERNAL_ACTUATION_CAPABILITIES
+            if name in capability_catalog
+            and not bool((capability_catalog.get(name) or {}).get("enabled", False))
+        )
+        detail = ", ".join(unavailable[:6]) if unavailable else "none declared"
+        needs.append(
+            Need(
+                "body_readiness",
+                0.55,
+                "No evidence-backed external actuation capability is currently enabled; "
+                f"unavailable actuation paths: {detail}.",
+                "Inspect body diagnostics and persist a concrete sandbox/allow-list/deployment plan. "
+                "Do not bypass isolation, invent credentials, or promote model intent into authority.",
             )
         )
 
