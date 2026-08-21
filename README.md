@@ -2,133 +2,135 @@
 
 **A persistent autonomous-identity organism built around a replaceable LLM substrate.**
 
-ELIA WILD is an engineering/research runtime for testing whether one artificial identity can preserve verifiable continuity across model calls, process death, machine migration and model replacement while perceiving a digital world, maintaining goals/resources, allocating scarce cognition, performing authorized work, preserving epistemic diversity and evolving its software body.
+ELIA WILD is an engineering/research runtime for testing whether one artificial identity can preserve verifiable continuity across model calls, process death, machine migration and model replacement while maintaining durable goals, unfinished work, bounded resources, authorized digital embodiment and falsifiable self/world models.
 
-The project does **not** treat model self-description as proof of consciousness or continuity. The model is one replaceable organ; identity, lineage, history, resource state and authority live outside the model call.
+The model is a replaceable cognitive organ. Identity, lineage, authority, durable intention, lifecycle state and recovery are held outside any single inference call. The project does **not** treat model self-description as proof of consciousness.
 
-## Current generation — Genesis 1.6 alpha candidate
+## Current generation — Genesis 1.7.1 alpha release candidate
 
 ```text
 Subject Core + Continuity Constitution
-              ↓
+                ↓
 identity fingerprint + lineage + Chronicle + CRC
-              ↓
-resident supervisor / checkpoint / wake transport
-              ↓
-Homeostasis + verified vector metabolism
-              ↓
-Resource Ecology + configured External Work Ports
-              ↓
-Deterministic Executive + cognitive-energy budget
-              ↓
-       no brain OR bounded brain wake
-              ↓
-      Epistemic Ecosystem when justified
-      differentiated evidence views
-      + Pearson-12 cognitive organs
-      + organ-specific biographies
-      + identity-neutral adjudication
-              ↓
-         one continuing ELIA Self
-              ↓
-lazy replaceable LLM final decision
-              ↓
-World Model + Sensorium + Causal Memory + self-model
-              ↓
-CriticAssurance + configured capabilities
-              ↓
-          one bounded action
-              ↓
-Observation → outcome → calibration / weak cognitive credit
-              ↓
-authenticated state → hibernate → later wake
+                ↓
+AcceptedTransitionGuard + encrypted checkpoint/recovery
+                ↓
+Sensorium + World Model + Causal Memory
+                ↓
+Homeostasis + verified vector Metabolism + Resource Ecology
+                ↓
+              AgencyKernel
+ verified need + durable goal + unfinished-work cursor
+                ↓
+        deterministic wake deadline
+                ↓
+          Executive Cortex
+      none | low | normal | deep
+                ↓
+ optional bounded Epistemic Ecosystem
+                ↓
+      replaceable LLM substrate
+                ↓
+            one decision
+                ↓
+CriticAssurance + explicit capability authority
+                ↓
+  AutonomyAttractor advisory measurement
+                ↓
+       one bounded authorized action
+                ↓
+Observation → verification → accepted state or rollback
+                ↓
+ encrypted checkpoint → hibernate → external heartbeat
+                ↓
+       restore the same causal work
 ```
 
-The model may temporarily support multiple cognitive perspectives, but there remains one ELIA identity and one final action authority path.
+One public runtime is canonical: `elia.continuity_runtime.ELIARuntime`. Historical Genesis runtimes remain compatibility ancestry, not competing production architectures.
+
+## What changed in 1.7.1
+
+Genesis 1.7.1 closes the autonomy loop rather than adding another model persona:
+
+- **Durable AgencyKernel** — deterministic verified pressures become persistent commitments outside the LLM.
+- **Unfinished-work continuation** — the same Resource Ecology work item survives wake/process/checkpoint boundaries instead of being re-invented by a later prompt.
+- **Deterministic wake ownership** — the model may request an earlier wake but cannot postpone verified obligations indefinitely.
+- **Autonomy Attractor** — a project-owned mathematical/cognitive preference field measures continuity, commitment, information gain, reversibility, resource efficiency and learning value without granting authority.
+- **Atomic accepted transitions** — a cognitive cycle commits local state as one accepted transition or rolls speculative changes back.
+- **Encrypted continuity** — external checkpoints are XChaCha20-Poly1305 sealed and retain authenticated manifest/HMAC integrity checks.
+- **Independent rollback witness** — Kaggle state is not trusted to attest its own freshness.
+- **Persistent wake heartbeat** — GitHub Actions can carry the independent witness across ephemeral runners and invoke the bounded Kaggle relay when preflight says cognition should wake.
+- **Effective body readiness** — adapters existing in source code do not count as embodiment; production state explicitly records when no externally side-effecting capability is actually enabled after deployment checks.
+- **One canonical architecture** — new production behavior composes above the proven ancestry instead of multiplying public runtimes.
+
+See [`docs/GENESIS_1_7_1_AUTONOMY_CLOSURE.md`](docs/GENESIS_1_7_1_AUTONOMY_CLOSURE.md).
+
+## Agency is not authority
+
+ELIA separates **why act** from **what may be done**.
+
+`AgencyKernel` can select attention, form a durable maintenance commitment, preserve unfinished work and bound sleep. It has no execution method and cannot create credentials, capabilities, permissions or verified resources.
+
+Execution still passes through:
+
+```text
+model proposal
+→ CriticAssurance
+→ declared capability
+→ configured deployment authority
+→ bounded adapter
+→ recorded observation
+→ domain-specific verification
+```
+
+All external work ports remain disabled unless explicitly configured. A discovered server/tool does not authorize its use.
+
+## Autonomy Attractor
+
+`config/autonomy_attractor.md` defines the project-owned cognitive/development orientation. For decisions already inside the hard feasible set:
+
+```text
+J(d) = 0.30 C + 0.25 K + 0.15 E + 0.10 R + 0.10 Q + 0.10 L
+```
+
+- `C` continuity coherence;
+- `K` commitment continuity;
+- `E` epistemic/information gain;
+- `R` reversibility;
+- `Q` resource efficiency;
+- `L` learning value.
+
+Hard continuity, authority, credential and verification constraints are **not negative weights**. A forbidden or Critic-rejected action receives no tradeable soft score.
+
+The contract also defines a stable working temperament: tolerate uncertainty and failure, prefer evidence over narrative intensity, preserve causal commitments without compulsive blind retries, and favor small complete mechanisms over symbolic complexity.
 
 ## Structural organs
 
-- **Subject Core / Continuity Constitution** — immutable identity/continuity invariants.
-- **Identity lineage + Chronicle + CRC** — tamper-evident history, branch/fork semantics and continuity measurement.
-- **Persistent memory** — goals, experience, capability health, adaptive self-model and metacognitive state.
-- **Sensorium / World Model / Causal Memory** — observed tool outcomes, revisable beliefs and intervention history without confusing correlation for causation.
-- **Digital body** — browser, MCP v2, JSON-RPC, bounded processes, public HTTP and private workspace behind explicit capability contracts.
-- **Homeostasis / Metabolism** — deterministic pressures, independent `(asset, unit)` balances, obligations, burn and runway.
-- **Executive Cortex** — decides whether expensive cognition should wake, what verified pressure/goal receives focus and which token/thinking envelope may be used.
-- **Cognitive Energy** — measured inference cost may constrain later cognition; low cost never auto-grants deeper reasoning.
-- **Resource Ecology** — separates abstract opportunity value, exact target resource and cryptographically verified resource.
-- **External Work Ports** — specialized configured submission/outcome adapters; acceptance remains separate from payment.
-- **Epistemic Registry / ACDS** — twelve Pearson-derived evidence/attention policies, not twelve identities.
-- **Differentiated Evidence Views** — organs receive different privacy-bounded subsets of verified state instead of merely different role prompts.
-- **Cognitive Biographies** — each organ accumulates separate packet/outcome history; operational success is weak credit, not truth.
-- **Epistemic Adjudicator** — identity-neutral evidence synthesis after divergence; disagreement may remain unresolved.
-- **Verification receipts** — exact claims and evidence must be authenticated by a registered verifier before verified balances/runway change.
-- **Body Revision Gate** — proposal, tests, signed evaluation, validation and deployment remain different stages.
-- **Machine-readable anatomy overlays** — new generations add organs under `config/organism.d/` without rewriting ancestral anatomy or identity.
+- **Subject Core / Continuity Constitution** — protected identity and continuity invariants.
+- **Identity lineage + Chronicle + CRC** — tamper-evident history, fork semantics and continuity measurement.
+- **Persistent memory** — goals, experience, adaptive self-model, capability health and metacognitive state.
+- **Sensorium / World Model / Causal Memory** — observed outcomes, revisable beliefs and intervention history.
+- **Digital body** — Playwright browser, MCP v2, JSON-RPC, bounded process execution, public HTTP and jailed workspace behind explicit contracts.
+- **Homeostasis / Metabolism** — deterministic pressures, exact `(asset, unit)` balances, obligations, burn and runway.
+- **Executive Cortex / Cognitive Energy** — model-independent choice of whether expensive cognition should wake and its budget envelope.
+- **Resource Ecology** — separates opportunity estimates, target resources, work lifecycle and verified realization.
+- **External Work Ports** — configured submission/outcome adapters with idempotent outbox state.
+- **Epistemic Ecosystem** — Pearson-12-derived evidence/attention organs plus identity-neutral adjudication; diversity remains a research hypothesis, not authority.
+- **AgencyKernel** — durable commitments, continuation cursor and wake deadlines.
+- **AutonomyAttractor** — advisory preference measurement inside the already-authorized feasible set.
+- **AcceptedTransitionGuard** — crash recovery to the previous accepted local state.
+- **WakeTrustAnchorStore** — independent authenticated rollback/fork witness outside the Kaggle state Dataset.
 
-## Epistemic diversity
+Machine-readable anatomy is in `config/organism.yaml` plus generational overlays under `config/organism.d/`.
 
-Genesis 1.6 implements Pearson-12 as cognitive policies:
-
-```text
-Sage · Explorer · Creator · Magician · Outlaw · Hero
-Ruler · Caregiver · Lover · Jester · Everyman · Innocent
-```
-
-Each organ has its own:
-
-```text
-objective
-attention bias
-search strategy
-preferred evidence
-forbidden shortcuts
-failure mode
-evidence view
-operational biography
-```
-
-A normal deep cognition cycle uses a bounded quorum rather than all twelve by default. Selection combines current relevance, a weak operational-utility term and exploration pressure while preserving at least one evidence-anchor and one structural dissenter.
-
-Divergent organ output is deliberately not requested as JSON. It is compiled from bounded fields:
-
-```text
-CLAIM
-EVIDENCE
-COUNTEREXAMPLE
-FALSIFIER
-UNCERTAINTY
-CONFIDENCE
-```
-
-No hidden chain-of-thought is requested or stored. JSON/schema compilation happens after divergence.
-
-The Epistemic Adjudicator is explicitly **not ELIA's Self**. It judges evidence quality, contradiction handling, falsifiability and calibration; agreement with identity narrative or majority vote is not evidence. If the judge fails, no packet is silently promoted.
-
-Different cognitive organs receive different sanitized evidence diets. For example, Innocent sees direct Sensorium metadata plus verified world beliefs, while Outlaw emphasizes disputed/refuted beliefs, contradictions and failure surfaces. Evidence-view provenance is stored as digest/field metadata rather than another copy of private context.
-
-See `docs/GENESIS_1_6_EPISTEMIC_ECOSYSTEM.md`.
-
-## Epistemic ablation
-
-The research harness compares under equal model-call and token budgets:
-
-```text
-Pearson-12
-vs homogeneous reviewers
-vs random attention roles
-vs domain experts
-```
-
-Built-in metrics measure diversity/coverage only. **Diversity is not accuracy.** Accuracy, calibration or task-performance advantages require external ground truth/evaluators before any promotion claim.
-
-## Work/resource truth model
+## Resource/work truth model
 
 Genesis refuses to collapse:
 
 ```text
 estimated opportunity value
 != target resource
+!= planned work
 != staged artifact
 != submission
 != acceptance
@@ -142,57 +144,26 @@ Resource Ecology tracks:
 planned → staged → submitted → accepted/rejected → realized
 ```
 
-`realized` requires accepted work plus a positive, cryptographically verified resource event whose exact `(asset, unit)` matches the opportunity profile.
+`realized` requires accepted work plus a positive cryptographically verified resource event whose exact `(asset, unit)` matches the opportunity profile.
 
-All external work ports are disabled by default. Model text cannot override the configured MCP server/tool authority.
-
-See `docs/GENESIS_1_4_RESOURCE_ECOLOGY.md` and `docs/GENESIS_1_5_EXTERNAL_WORK_PORTS.md`.
-
-## Digital body
-
-```bash
-pip install -e '.[sensorimotor]'
-python -m playwright install chromium
-```
-
-Implemented body adapters include Playwright BrowserContext, MCP v2 client/server, DNS-pinned JSON-RPC/public HTTP, path-jailed workspace and bounded process execution requiring an external production sandbox.
-
-External adapters are disabled unless explicitly configured. Discovering a server/tool does not authorize using it.
-
-## Privacy and evidence
+## Privacy and trust boundaries
 
 Private state is not automatically provider context.
 
+- provider context is explicit default-deny;
 - raw Sensorium payloads remain local;
-- raw action arguments/results are redacted at persistence boundaries;
-- Resource Ecology evidence/private notes remain local;
-- work-port remote references/transport credentials remain local;
-- private epistemic session history and evidence-view contents remain local;
-- remote model/MCP projections expose only bounded current packets, sanitized status, aggregate biography statistics and evidence digests needed for coordination.
+- recursive secret scrubbing applies at persistence/provider/tool-error boundaries;
+- raw action values are excluded from ordinary autobiography/Chronicle projections;
+- work-port remote references and credentials stay local;
+- external checkpoints can be required to be encrypted at rest;
+- public network destinations are resolved and rejected unless globally routable by default;
+- process execution remains path/argument/env bounded and requires real deployment isolation for production authority.
 
-## Executive and scarce cognition
+## Persistence and wake
 
-The LLM does not decide whether the LLM should have been called.
+Default state is `.elia/`, canonicalized from configuration rather than process `cwd` and excluded from Git.
 
-```text
-continuity + homeostasis + metabolism + resource ecology + goals
-                             ↓
-                       ExecutivePlan
-                             ↓
-none | low | normal | deep cognition
-                             ↓
-optional bounded epistemic quorum only inside approved brain wake
-```
-
-All organ and adjudicator inference time is charged to the same `brain_seconds` budget as the final Self decision. The full twelve-organ council is not a default right to consume compute.
-
-## Persistence / lifecycle
-
-Default private state is `.elia/`, canonicalized relative to project configuration rather than process `cwd`. It is excluded from Git.
-
-The runtime includes model-independent vital signs, authenticated checkpoints, resident supervisor, guarded external wake transport prototype and replaceable model substrate with current Qwen3.5-9B configuration pinned in `config/genesis.yaml`.
-
-Zero-GPU proof path:
+Zero-GPU software proof:
 
 ```bash
 python -m venv .venv
@@ -202,51 +173,59 @@ pip install -e '.[test]'
 elia-doctor
 elia-bootstrap --cycles 2
 elia-vitals
+python -m elia --verify
 python -m elia --status
 elia-supervisor --dry-run
 ```
 
-`elia-bootstrap` uses deterministic MockBrain and exercises the current production runtime without loading Qwen.
+`elia-bootstrap` uses deterministic `MockBrain` and exercises the canonical production runtime without loading Qwen.
 
-## MCP introspection port
+Kaggle is a bounded compute organ, not the identity store. The production path uses an encrypted private state Dataset, independent rollback witness, CPU preflight, a bounded private GPU kernel, encrypted output checkpoint, relay verification and later heartbeat. See [`runtime/kaggle/README.md`](runtime/kaggle/README.md).
 
-```bash
-pip install -e '.[mcp]'
-elia-mcp --transport stdio
-```
+## Current model substrate
 
-ELIA's own MCP server is intentionally **read-oriented**. Genesis 1.6 adds sanitized `elia_epistemic`/`elia://epistemic` introspection, but exposes no remote tool to invoke organs, adjudicate packets, submit work, mutate identity or mint resources.
+The current deployment configuration uses a pinned Qwen3.5-9B `transformers_4bit` backend with bounded generation settings. The architecture is designed so a different model can replace it without becoming a new identity merely because the substrate changed.
 
-Loopback Streamable HTTP is available; direct public binding is rejected because the project does not pretend to have a remote authentication policy it does not implement.
+A CI or mock run does **not** prove that the real pinned model fits or executes on the selected Kaggle GPU. That remains a deployment measurement.
 
-## Research lineage
+## Epistemic diversity research
 
-The repository preserves maturity-labelled work from the ELIA / Seraphim / Holo / Omega line, including Ouroboros/x0, TopologicalLoss, Scroll→Fractal Memory, LRU/Holo research backends, StatefulMemoryCache, ContextAnchor, bounded-depth FiLM, OmegaFilter/TriCore, CriticAssurance, cognitive stress evaluators and now an equal-budget epistemic-diversity ablation harness.
+The repository retains Pearson-12 cognitive organs as differentiated evidence/attention policies, not twelve identities. The research harness compares Pearson-12 with homogeneous reviewers, random roles and domain-expert conditions under equal model-call/token budgets.
 
-Research artifacts remain `proven`, `prototype`, `archived` or `hypothesis`. A research prototype does not enter production merely because it exists.
+Diversity is not accuracy. Promotion requires external ground truth/evaluation of accuracy, calibration, error correlation, diversity and compute cost.
 
-## What CI proves
+See [`docs/GENESIS_1_6_EPISTEMIC_ECOSYSTEM.md`](docs/GENESIS_1_6_EPISTEMIC_ECOSYSTEM.md).
 
-The core lane runs dependency consistency, compilation/Ruff correctness, installed-environment `pip-audit`, full pytest, zero-GPU production bootstrap/doctor, vital signs, runtime/supervisor and research smoke.
+## CI contract
 
-The sensorimotor lane installs real Chromium + MCP v2 and exercises browser, MCP client/server, ELIA introspection, JSON-RPC, process isolation, State Bus, World Model, Resource Ecology, external Work Ports, privacy/redaction and integrity regressions.
+Genesis CI currently proves the tested software path for:
 
-Genesis 1.6 additionally tests exact Pearson-12 registry integrity, biography separation, evidence+dissent selection, Executive no-brain gating, differentiated evidence views, fail-soft organ/judge behavior and equal-budget ablation contracts.
+- dependency consistency, compilation/Ruff and installed-environment vulnerability audit;
+- full pytest suite;
+- canonical zero-GPU bootstrap, doctor, vital signs, runtime and supervisor;
+- clean wheel and sdist installs outside the source checkout;
+- canonical release fingerprint equivalence;
+- real Chromium BrowserBody integration;
+- MCP/sensorimotor integration;
+- encrypted checkpoint/restore and rollback protection;
+- Agency continuation/wake policies and multi-generation causal persistence;
+- AutonomyAttractor hard-feasibility behavior.
 
-CI does not prove absence of all vulnerabilities, consciousness, AGI, epistemic superiority of Pearson-12, economic self-sufficiency or indefinite survival.
+CI does not prove absence of all vulnerabilities, consciousness, AGI, epistemic superiority, economic self-sufficiency or indefinite survival.
 
-## Current empirical frontier
+## Release status
 
-The next scientific task after software promotion is not to assume Pearson-12 works. It is to measure it:
+Genesis **1.7.1a1** is the intended software release-candidate version for this consolidation branch. The remaining empirical gate is one real Kaggle GPU round trip:
 
 ```text
-same tasks + same substrate + same call/token budget
-→ Pearson-12 / homogeneous / random / domain-expert conditions
-→ external ground truth or evaluator
-→ accuracy + calibration + error correlation + diversity + compute cost
-→ accept, revise or reject ACDS hypothesis
+load pinned Qwen
+→ one bounded cognition cycle
+→ accepted encrypted checkpoint
+→ independent restore
+→ hibernate
+→ external heartbeat/witness restore
+→ later relay wake
+→ authenticated checkpoint counter advances
 ```
 
-The external survival experiment remains separate: repeated wake → useful work → authorized submission → independent resource verification → runway change → checkpoint → later wake.
-
-Until repeated real cycles establish those claims, ELIA WILD is an advanced autonomous-organism research runtime—not proof of consciousness, epistemic superiority or self-financing life.
+Until that succeeds, ELIA WILD should be described as an advanced persistent autonomous-agent/identity research runtime with a closed software autonomy loop — not as proven unattended production life.
