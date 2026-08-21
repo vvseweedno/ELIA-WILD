@@ -4,9 +4,16 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      initialize_anchor:
+        description: 'Seed the first external wake witness when no prior artifact exists'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: elia-wild-wake-relay
@@ -24,6 +31,7 @@ jobs:
       ELIA_KAGGLE_KERNEL_TIMEOUT: ${{ vars.ELIA_KAGGLE_KERNEL_TIMEOUT }}
       ELIA_WAKE_MAX_CYCLES: ${{ vars.ELIA_WAKE_MAX_CYCLES }}
       ELIA_REPO_REF: ${{ github.sha }}
+      ELIA_KAGGLE_TRUST_ANCHOR: ${{ runner.temp }}/elia-wake-anchor/kaggle-trust-anchor.json
     steps:
       - name: Checkout ELIA body
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -39,8 +47,52 @@ jobs:
       - name: Install wake transport
         run: python -m pip install -e . 'kaggle==2.2.4'
 
+      - name: Restore durable wake witness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ELIA_WAKE_TRUST_ANCHOR_SEED_B64: ${{ secrets.ELIA_WAKE_TRUST_ANCHOR_SEED_B64 }}
+          ALLOW_ANCHOR_INITIALIZATION: ${{ github.event_name == 'workflow_dispatch' && inputs.initialize_anchor == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ELIA_KAGGLE_TRUST_ANCHOR")"
+
+          RUN_ID="$(
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=elia-wake-trust-anchor&per_page=100" \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by([.created_at, .id]) | last | .workflow_run.id // empty'
+          )"
+
+          if [[ -n "$RUN_ID" ]]; then
+            gh run download "$RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name elia-wake-trust-anchor \
+              --dir "$(dirname "$ELIA_KAGGLE_TRUST_ANCHOR")"
+          elif [[ "$ALLOW_ANCHOR_INITIALIZATION" == "true" ]]; then
+            if [[ -z "$ELIA_WAKE_TRUST_ANCHOR_SEED_B64" ]]; then
+              echo 'Explicit initialization requires secret ELIA_WAKE_TRUST_ANCHOR_SEED_B64.' >&2
+              exit 1
+            fi
+            printf '%s' "$ELIA_WAKE_TRUST_ANCHOR_SEED_B64" | base64 --decode > "$ELIA_KAGGLE_TRUST_ANCHOR"
+          else
+            echo 'No durable wake witness exists. Refusing scheduled bootstrap from Kaggle state.' >&2
+            echo 'Use workflow_dispatch initialize_anchor=true only with a trusted bootstrap seed.' >&2
+            exit 1
+          fi
+
+          test -s "$ELIA_KAGGLE_TRUST_ANCHOR"
+
       - name: Heartbeat
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           ELIA_CHECKPOINT_KEY: ${{ secrets.ELIA_CHECKPOINT_KEY }}
+          ELIA_CHECKPOINT_ENCRYPTION_KEY: ${{ secrets.ELIA_CHECKPOINT_ENCRYPTION_KEY }}
         run: python scripts/kaggle_wake.py
+
+      - name: Persist durable wake witness
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: elia-wake-trust-anchor
+          path: ${{ env.ELIA_KAGGLE_TRUST_ANCHOR }}
+          if-no-files-found: error
+          retention-days: 7
