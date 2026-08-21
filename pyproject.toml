@@ -47,6 +47,7 @@ elia-doctor = "elia.doctor:main"
 elia-bootstrap = "elia.bootstrap:main"
 elia-fork = "elia.branching:main"
 elia-mcp = "elia.mcp_server:main"
+elia-control = "elia.control:main"
 
 [tool.setuptools.packages.find]
 include = ["elia*"]
