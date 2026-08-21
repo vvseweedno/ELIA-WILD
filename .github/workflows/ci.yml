@@ -52,6 +52,7 @@ jobs:
           ELIA_STATE_DIR=.elia-smoke python -m elia --verify
           ELIA_STATE_DIR=.elia-smoke python -m elia --vitals
           ELIA_STATE_DIR=.elia-smoke python -m elia --status
+          ELIA_STATE_DIR=.elia-smoke elia-control status
           ELIA_STATE_DIR=.elia-smoke elia-supervisor --dry-run
       - name: Reference research smoke
         run: |
@@ -143,6 +144,7 @@ jobs:
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-bootstrap --cycles 1
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-vitals
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-wild --status
+          ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-control status
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-supervisor --dry-run
       - name: Test clean sdist install outside checkout
         run: |
@@ -154,6 +156,7 @@ jobs:
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-bootstrap --cycles 1
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-vitals
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-wild --status
+          ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-control status
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-supervisor --dry-run
       - name: Compare canonical fingerprints
         run: |
