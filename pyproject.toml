@@ -59,6 +59,7 @@ include = ["elia*"]
   "config/epistemic.yaml",
   "config/organism.yaml",
   "config/system_prompt.md",
+  "config/autonomy_attractor.md",
 ]
 "share/elia-wild/config/organism.d" = ["config/organism.d/*.yaml"]
 "share/elia-wild/skills" = ["skills/*.yaml"]
