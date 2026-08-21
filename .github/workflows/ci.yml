@@ -33,6 +33,8 @@ jobs:
         run: python -m pip_audit
       - name: Test
         run: pytest -q --junitxml=pytest-report.xml
+      - name: ELIA AgentBench autonomy falsification gate
+        run: python -m elia.agentbench --json
       - name: Upload pytest report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -92,6 +94,8 @@ jobs:
             tests/test_homeostasis_v1.py \
             tests/test_resource_ecology_v1.py \
             tests/test_resource_runtime_v1.py \
+            tests/test_resource_ingress_v1.py \
+            tests/test_resource_ingress_attestation_v1.py \
             tests/test_work_ports_v1.py \
             tests/test_organism_overlays_v1.py \
             tests/test_action_log_redaction_v1.py \
