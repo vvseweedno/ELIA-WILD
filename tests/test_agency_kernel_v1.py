@@ -48,6 +48,7 @@ def test_agency_forms_baseline_commitment_without_model(tmp_path: Path) -> None:
     assert snapshot.selected_need is None
     assert snapshot.continuation_work_item is None
     assert snapshot.created_goal_ids == (goals[0].id,)
+    assert agency.wake_policy(snapshot.as_dict())["max_sleep_seconds"] is None
 
 
 def test_urgent_verified_need_preempts_weaker_goal_without_replacing_it(tmp_path: Path) -> None:
@@ -74,6 +75,9 @@ def test_urgent_verified_need_preempts_weaker_goal_without_replacing_it(tmp_path
     assert second.created_goal_ids == ()
     assert memory.goal(existing_id) is not None
     assert memory.goal(existing_id).status == "active"  # type: ignore[union-attr]
+    wake = agency.wake_policy(second.as_dict())
+    assert wake["max_sleep_seconds"] == 3600.0
+    assert wake["reason"] == "need:capability_repair"
 
 
 def test_resolved_maintenance_pressure_closes_agency_goal_deterministically(
@@ -115,6 +119,10 @@ def test_continuation_prefers_most_causally_advanced_unfinished_work(tmp_path: P
     assert snapshot.continuation_work_item is not None
     assert snapshot.continuation_work_item["id"] == 4
     assert snapshot.continuation_work_item["status"] == "accepted"
+    wake = agency.wake_policy(snapshot.as_dict())
+    assert wake["max_sleep_seconds"] == 3600.0
+    assert wake["reason"] == "work:accepted"
+    assert wake["continuation_work_item_id"] == 4
 
 
 def test_continuation_prevents_newer_work_from_starving_older_same_stage(tmp_path: Path) -> None:
@@ -134,6 +142,21 @@ def test_continuation_prevents_newer_work_from_starving_older_same_stage(tmp_pat
     assert snapshot.continuation_work_item["id"] == 6
 
 
+def test_stricter_need_deadline_wins_over_work_deadline(tmp_path: Path) -> None:
+    memory = MemoryStore(tmp_path / "memory.sqlite3")
+    agency = AgencyKernel(memory)
+
+    snapshot = agency.reconcile(
+        [need("durable_checkpoint", 0.9)],
+        active_work=[work(11, "submitted", updated_at="2030-01-01T00:00:00+00:00")],
+    )
+    wake = agency.wake_policy(snapshot.as_dict())
+
+    assert wake["max_sleep_seconds"] == 1800.0
+    assert wake["reason"] == "need:durable_checkpoint"
+    assert wake["continuation_work_item_id"] == 11
+
+
 def test_agency_state_and_continuation_are_durable_and_non_authoritative(tmp_path: Path) -> None:
     memory = MemoryStore(tmp_path / "memory.sqlite3")
     AgencyKernel(memory).reconcile(
@@ -141,10 +164,12 @@ def test_agency_state_and_continuation_are_durable_and_non_authoritative(tmp_pat
         active_work=[work(21, "staged", updated_at="2030-01-01T00:00:00+00:00")],
     )
 
-    restored = AgencyKernel(MemoryStore(tmp_path / "memory.sqlite3")).snapshot()
+    restored_agency = AgencyKernel(MemoryStore(tmp_path / "memory.sqlite3"))
+    restored = restored_agency.snapshot()
 
     assert restored["selected_need"]["name"] == "runtime_reliability"
     assert restored["focus_goal"]["title"] == "Restore runtime reliability"
     assert restored["continuation_work_item"]["id"] == 21
     assert restored["continuation_work_item"]["status"] == "staged"
     assert "cannot mint capabilities" in restored["authority_rule"]
+    assert restored_agency.wake_policy(restored)["max_sleep_seconds"] == 3600.0
