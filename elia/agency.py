@@ -11,9 +11,9 @@ BASELINE_GOAL_TITLE = "Increase verified autonomy while preserving continuity"
 AGENCY_STATE_META = "agency_state_v1"
 AGENCY_SOURCE = "agency_kernel"
 
-# Deterministic needs are translated into durable commitments.  This mapping is
-# deliberately small and inspectable: the agency layer may prioritize existing
-# authority, but it never creates new capabilities or permissions.
+# Deterministic needs are translated into durable commitments. This mapping is small
+# and inspectable: the agency layer may prioritize existing authority, but it never
+# creates new capabilities or permissions.
 _NEED_GOALS: dict[str, tuple[str, str]] = {
     "continuity_integrity": (
         "Restore trusted continuity integrity",
@@ -57,7 +57,7 @@ _NEED_GOALS: dict[str, tuple[str, str]] = {
     ),
 }
 
-# These commitments correspond to deterministic maintenance predicates.  When the
+# These commitments correspond to deterministic maintenance predicates. When the
 # predicate disappears from verified state, an agency-created goal can be closed
 # without asking the model to remember to do bookkeeping.
 _AUTO_RESOLVE = {
@@ -70,6 +70,15 @@ _AUTO_RESOLVE = {
     "goal_unblocking",
 }
 _TITLE_TO_NEED = {title: name for name, (title, _) in _NEED_GOALS.items()}
+_WORK_STATUS_PRIORITY = {
+    # Accepted work has unresolved resource realization; submitted work has unresolved
+    # external outcome; staged work is ready to leave the local trust boundary; planned
+    # work still needs a deliverable. Preserve this causal order between wake sessions.
+    "accepted": 4,
+    "submitted": 3,
+    "staged": 2,
+    "planned": 1,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,7 @@ class AgencySnapshot:
     version: int
     selected_need: dict[str, Any] | None
     focus_goal: dict[str, Any] | None
+    continuation_work_item: dict[str, Any] | None
     created_goal_ids: tuple[int, ...]
     resolved_goal_ids: tuple[int, ...]
     authority_rule: str
@@ -91,12 +101,13 @@ class AgencySnapshot:
 class AgencyKernel:
     """Durable model-independent commitment selection for the canonical runtime.
 
-    The cognitive model proposes concrete actions, but verified organism needs and
-    durable goals exist independently of a single inference call.  This kernel turns
-    deterministic pressures into commitments, selects one current focus, and closes
-    maintenance commitments when their verified predicate is gone.
+    The cognitive model proposes concrete actions, but verified organism needs,
+    durable goals and unfinished work exist independently of a single inference call.
+    This kernel turns deterministic pressures into commitments, selects one current
+    goal, preserves a cursor to unfinished work, and closes maintenance commitments
+    when their verified predicate is gone.
 
-    It intentionally has *no* capability registry and no execution method.  Agency may
+    It intentionally has *no* capability registry and no execution method. Agency may
     choose what deserves attention; authority remains exclusively in the existing body,
     assurance, executive, and tool policy layers.
     """
@@ -132,6 +143,50 @@ class AgencyKernel:
         items = [item for raw in values if (item := self._need_dict(raw)) is not None]
         items.sort(key=lambda item: (-float(item["severity"]), str(item["name"])))
         return items[:24]
+
+    @staticmethod
+    def _work_dict(raw: Any) -> dict[str, Any] | None:
+        if hasattr(raw, "as_dict") and callable(raw.as_dict):
+            raw = raw.as_dict()
+        if not isinstance(raw, dict):
+            return None
+        try:
+            work_id = int(raw.get("id"))
+            opportunity_id = int(raw.get("opportunity_id"))
+        except (TypeError, ValueError):
+            return None
+        status = str(raw.get("status", "")).strip().lower()
+        if work_id < 1 or opportunity_id < 1 or status not in _WORK_STATUS_PRIORITY:
+            return None
+        item: dict[str, Any] = {
+            "id": work_id,
+            "opportunity_id": opportunity_id,
+            "status": status,
+            "objective": str(raw.get("objective", ""))[:2000],
+            "estimated_gpu_hours": max(0.0, float(raw.get("estimated_gpu_hours", 0.0) or 0.0)),
+            "updated_at": str(raw.get("updated_at", ""))[:64],
+        }
+        for key in ("artifact_path", "submission_observation_id", "resource_event_id"):
+            if raw.get(key) is not None:
+                item[key] = raw.get(key)
+        return item
+
+    def _continuation_work(self, values: Any) -> dict[str, Any] | None:
+        if not isinstance(values, list):
+            return None
+        items = [item for raw in values if (item := self._work_dict(raw)) is not None]
+        if not items:
+            return None
+        # Resolve the most causally advanced unfinished work first. For equal status,
+        # older update/id wins to prevent starvation by newly-created work.
+        items.sort(
+            key=lambda item: (
+                -_WORK_STATUS_PRIORITY[str(item["status"])],
+                str(item.get("updated_at", "")),
+                int(item["id"]),
+            )
+        )
+        return items[0]
 
     @staticmethod
     def _goal_dict(goal: GoalRecord | None) -> dict[str, Any] | None:
@@ -221,11 +276,12 @@ class AgencyKernel:
         score = max(goal.priority, need_pressure) - status_penalty
         return score, goal.priority, -goal.id
 
-    def reconcile(self, needs: Any) -> AgencySnapshot:
+    def reconcile(self, needs: Any, *, active_work: Any = None) -> AgencySnapshot:
         normalized = self._normalize_needs(needs)
         actionable = [item for item in normalized if item["name"] != "goal_formation"]
         selected_need = actionable[0] if actionable else None
         need_names = {str(item["name"]) for item in normalized}
+        continuation_work = self._continuation_work(active_work)
 
         goals = self.memory.active_goals(self.max_active_goals + 8)
         resolved_ids = self._resolve_absent_maintenance(need_names, goals)
@@ -235,7 +291,7 @@ class AgencyKernel:
         created_ids: list[int] = []
         if selected_need is not None:
             # Urgent maintenance can become a durable commitment even when unrelated
-            # goals already exist.  Softer pressures create a commitment only when the
+            # goals already exist. Softer pressures create a commitment only when the
             # organism otherwise has no active direction.
             severity = float(selected_need["severity"])
             if severity >= 0.75 or not goals:
@@ -266,6 +322,7 @@ class AgencyKernel:
             version=1,
             selected_need=selected_need,
             focus_goal=self._goal_dict(focus),
+            continuation_work_item=continuation_work,
             created_goal_ids=tuple(created_ids),
             resolved_goal_ids=tuple(resolved_ids),
             authority_rule=(
@@ -288,6 +345,9 @@ class AgencyKernel:
                 source=AGENCY_SOURCE,
                 metadata={
                     "focus_goal_id": focus.id if focus is not None else None,
+                    "continuation_work_item_id": (
+                        continuation_work.get("id") if continuation_work else None
+                    ),
                     "selected_need": selected_need.get("name") if selected_need else None,
                 },
             )
@@ -300,6 +360,7 @@ class AgencyKernel:
                 version=1,
                 selected_need=None,
                 focus_goal=None,
+                continuation_work_item=None,
                 created_goal_ids=(),
                 resolved_goal_ids=(),
                 authority_rule=(
