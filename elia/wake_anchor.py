@@ -65,9 +65,14 @@ class WakeTrustAnchorStore:
 
     The state Dataset carries the encrypted checkpoint plus transport metadata. That is
     not enough to detect replay of an older *entire* Dataset version. This store binds
-    the last accepted checkpoint counter/digest to a separate durable relay-host file,
-    authenticated with the checkpoint HMAC key. Deleting/tampering with the anchor is
-    fail-closed; normal relay operation never silently reinitializes it.
+    the last accepted checkpoint counter/digest to a separate durable relay witness,
+    authenticated with the checkpoint HMAC key.
+
+    Source verification and forward advancement are intentionally separate. A relay
+    restored from an older external witness must never silently learn a newer truth from
+    the Dataset it is supposed to police; that condition is fail-closed and requires
+    recovery of the missing witness. Only a checkpoint that has already passed relay
+    validation may advance the anchor.
     """
 
     def __init__(
@@ -157,11 +162,37 @@ class WakeTrustAnchorStore:
             current = self.read()
             if current is None:
                 raise WakeTrustAnchorError("wake trust anchor unexpectedly disappeared")
-            return self.accept(counter=counter, digest=digest)
+            self.verify(counter=counter, digest=digest)
+            return current
         return self._write(counter, digest)
 
-    def accept(self, *, counter: int, digest: str) -> WakeTrustAnchor:
-        """Validate source/output against the durable anchor and advance only forward."""
+    def verify(self, *, counter: int, digest: str) -> WakeTrustAnchor:
+        """Require the candidate to equal the independently persisted trusted state."""
+
+        current = self.read()
+        if current is None:
+            raise WakeTrustAnchorError(
+                "wake trust anchor is missing; initialize it during trusted state bootstrap"
+            )
+        counter = int(counter)
+        digest = str(digest).strip().lower()
+        if counter < current.counter:
+            raise WakeTrustAnchorRollbackError(
+                f"state rollback detected: counter {counter} < trusted {current.counter}"
+            )
+        if counter > current.counter:
+            raise WakeTrustAnchorError(
+                "state is ahead of the durable wake trust anchor; recover the latest external "
+                "anchor before accepting Dataset state"
+            )
+        if not hmac.compare_digest(digest, current.digest):
+            raise WakeTrustAnchorRollbackError(
+                "state fork/replay detected at the trusted checkpoint counter"
+            )
+        return current
+
+    def advance(self, *, counter: int, digest: str) -> WakeTrustAnchor:
+        """Advance after a newly validated checkpoint has become durable externally."""
 
         current = self.read()
         if current is None:
@@ -175,9 +206,10 @@ class WakeTrustAnchorStore:
                 f"state rollback detected: counter {counter} < trusted {current.counter}"
             )
         if counter == current.counter:
-            if not hmac.compare_digest(digest, current.digest):
-                raise WakeTrustAnchorRollbackError(
-                    "state fork/replay detected at the trusted checkpoint counter"
-                )
-            return current
+            return self.verify(counter=counter, digest=digest)
         return self._write(counter, digest)
+
+    def accept(self, *, counter: int, digest: str) -> WakeTrustAnchor:
+        """Compatibility alias for trusted forward acceptance; prefer verify/advance."""
+
+        return self.advance(counter=counter, digest=digest)
