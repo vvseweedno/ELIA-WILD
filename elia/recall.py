@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import re
-import sqlite3
 from typing import Any, Iterable
 
 from .memory import MemoryRecord, MemoryStore
+from .memory_trust import memory_trust_class, memory_trust_score
 
 
 TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -16,21 +16,23 @@ def _tokens(value: str) -> set[str]:
 
 
 class RecallEngine:
-    """Deterministic memory recall over the persistent SQLite store.
+    """Deterministic trust-aware memory recall over persistent SQLite state.
 
-    It combines recency, importance, kind diversity and lexical relevance to current
-    goals/needs. This is intentionally a strong CPU baseline before adding an embedding
-    index; retrieval remains inspectable and does not require another model call.
+    Relevance alone is not authority. Retrieval combines trust class, recency,
+    importance, lexical relevance and kind diversity. Model-authored persistent text is
+    therefore useful as a hypothesis but cannot dominate verified/runtime evidence only
+    by assigning itself high importance or an emotionally salient autobiographical kind.
     """
 
     KIND_BONUS = {
-        "self": 0.20,
-        "lesson": 0.15,
-        "goal": 0.12,
-        "uncertainty": 0.12,
-        "economy": 0.08,
-        "runtime_error": 0.12,
+        "self": 0.12,
+        "lesson": 0.10,
+        "goal": 0.10,
+        "uncertainty": 0.10,
+        "economy": 0.06,
+        "runtime_error": 0.10,
         "action_result": 0.02,
+        "brain_hypothesis": 0.0,
     }
 
     def __init__(self, memory: MemoryStore):
@@ -58,6 +60,7 @@ class RecallEngine:
             age = max_id - record.id
             recency = 1.0 / (1.0 + age / 12.0)
             importance = max(0.0, min(1.0, record.importance))
+            trust = memory_trust_score(record)
             record_tokens = _tokens(record.content)
             lexical = (
                 len(record_tokens & query_tokens) / len(query_tokens)
@@ -65,7 +68,13 @@ class RecallEngine:
                 else 0.0
             )
             kind_bonus = self.KIND_BONUS.get(record.kind, 0.0)
-            score = 0.42 * importance + 0.28 * recency + 0.25 * lexical + kind_bonus
+            score = (
+                0.30 * importance
+                + 0.20 * recency
+                + 0.22 * lexical
+                + 0.23 * trust
+                + kind_bonus
+            )
             scored.append(
                 (
                     score,
@@ -74,6 +83,7 @@ class RecallEngine:
                         "importance": importance,
                         "recency": recency,
                         "lexical": lexical,
+                        "trust": trust,
                         "kind_bonus": kind_bonus,
                     },
                 )
@@ -81,8 +91,9 @@ class RecallEngine:
 
         scored.sort(key=lambda item: (-item[0], -item[1].id))
 
-        # First pass: preserve kind diversity so self/lesson/uncertainty cannot be
-        # completely crowded out by many action_result rows.
+        # First pass preserves semantic diversity, but trust remains part of the score;
+        # model-authored hypotheses cannot impersonate privileged `self`/`lesson` kinds
+        # because MemoryTrustGate stores them as `brain_hypothesis`.
         selected: list[tuple[float, MemoryRecord, dict[str, float]]] = []
         seen_kinds: set[str] = set()
         for item in scored:
@@ -105,6 +116,7 @@ class RecallEngine:
         return [
             {
                 **asdict(record),
+                "trust_class": memory_trust_class(record),
                 "recall_score": score,
                 "recall_components": components,
             }
