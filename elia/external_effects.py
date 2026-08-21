@@ -213,6 +213,7 @@ class ExternalEffectLedger:
                     effect_id,
                     name,
                     args_sha,
+                    idempotency_key,
                     str(risk_class)[:128],
                     timestamp,
                     timestamp,
