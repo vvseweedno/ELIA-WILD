@@ -80,6 +80,29 @@ _WORK_STATUS_PRIORITY = {
     "planned": 1,
 }
 
+# The model may always request an earlier wake, but it may not postpone a verified
+# commitment beyond these deterministic deadlines. The external heartbeat is currently
+# hourly, so sub-hour deadlines mean "launch on the next available heartbeat" rather
+# than pretending the transport can schedule more frequently than its platform permits.
+_NEED_WAKE_CAP_SECONDS: dict[str, float] = {
+    "continuity_integrity": 300.0,
+    "durable_checkpoint": 1800.0,
+    "runtime_reliability": 3600.0,
+    "capability_repair": 3600.0,
+    "goal_unblocking": 7200.0,
+    "resource_acquisition": 21600.0,
+    "opportunity_review": 21600.0,
+    "opportunity_discovery": 21600.0,
+    "compute_conservation": 21600.0,
+    "compute_survival": 21600.0,
+}
+_WORK_WAKE_CAP_SECONDS: dict[str, float] = {
+    "accepted": 3600.0,
+    "submitted": 3600.0,
+    "staged": 7200.0,
+    "planned": 21600.0,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class AgencySnapshot:
@@ -104,8 +127,8 @@ class AgencyKernel:
     The cognitive model proposes concrete actions, but verified organism needs,
     durable goals and unfinished work exist independently of a single inference call.
     This kernel turns deterministic pressures into commitments, selects one current
-    goal, preserves a cursor to unfinished work, and closes maintenance commitments
-    when their verified predicate is gone.
+    goal, preserves a cursor to unfinished work, closes maintenance commitments when
+    their verified predicate is gone, and bounds how long those obligations may sleep.
 
     It intentionally has *no* capability registry and no execution method. Agency may
     choose what deserves attention; authority remains exclusively in the existing body,
@@ -153,6 +176,9 @@ class AgencyKernel:
         try:
             work_id = int(raw.get("id"))
             opportunity_id = int(raw.get("opportunity_id"))
+            estimated_gpu_hours = max(
+                0.0, float(raw.get("estimated_gpu_hours", 0.0) or 0.0)
+            )
         except (TypeError, ValueError):
             return None
         status = str(raw.get("status", "")).strip().lower()
@@ -163,7 +189,7 @@ class AgencyKernel:
             "opportunity_id": opportunity_id,
             "status": status,
             "objective": str(raw.get("objective", ""))[:2000],
-            "estimated_gpu_hours": max(0.0, float(raw.get("estimated_gpu_hours", 0.0) or 0.0)),
+            "estimated_gpu_hours": estimated_gpu_hours,
             "updated_at": str(raw.get("updated_at", ""))[:64],
         }
         for key in ("artifact_path", "submission_observation_id", "resource_event_id"):
@@ -373,3 +399,47 @@ class AgencyKernel:
         except json.JSONDecodeError:
             return {"version": 1, "state_error": "invalid persisted agency state"}
         return item if isinstance(item, dict) else {"version": 1, "state_error": "invalid agency state"}
+
+    def wake_policy(self, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return the deterministic maximum sleep permitted by current commitments."""
+
+        state = snapshot if isinstance(snapshot, dict) else self.snapshot()
+        candidates: list[tuple[float, str]] = []
+
+        selected = state.get("selected_need")
+        if isinstance(selected, dict):
+            name = str(selected.get("name", ""))
+            cap = _NEED_WAKE_CAP_SECONDS.get(name)
+            if cap is not None:
+                candidates.append((cap, f"need:{name}"))
+
+        work = state.get("continuation_work_item")
+        if isinstance(work, dict):
+            status = str(work.get("status", "")).strip().lower()
+            cap = _WORK_WAKE_CAP_SECONDS.get(status)
+            if cap is not None:
+                candidates.append((cap, f"work:{status}"))
+
+        if not candidates:
+            return {
+                "max_sleep_seconds": None,
+                "reason": "no deterministic agency wake deadline",
+                "selected_need": (
+                    str(selected.get("name", "")) if isinstance(selected, dict) else None
+                ),
+                "continuation_work_item_id": (
+                    work.get("id") if isinstance(work, dict) else None
+                ),
+            }
+
+        cap, reason = min(candidates, key=lambda item: (item[0], item[1]))
+        return {
+            "max_sleep_seconds": cap,
+            "reason": reason,
+            "selected_need": (
+                str(selected.get("name", "")) if isinstance(selected, dict) else None
+            ),
+            "continuation_work_item_id": (
+                work.get("id") if isinstance(work, dict) else None
+            ),
+        }
