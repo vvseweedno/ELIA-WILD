@@ -371,10 +371,12 @@ def _bounded_agency(value: Any) -> dict[str, Any]:
             if selected is not None
             else None
         ),
+        # Deliberately omit durable goal description/evidence. The provider needs the
+        # public commitment label and priority, not the private persistence transcript.
         "focus_goal": (
             {
                 key: focus.get(key)
-                for key in ("id", "title", "description", "priority", "status", "source", "parent_id")
+                for key in ("id", "title", "priority", "status", "source", "parent_id")
                 if key in focus
             }
             if focus is not None
