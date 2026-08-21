@@ -1,8 +1,9 @@
-schema_version: 9
+schema_version: 10
 identity_id: elia-wild
 
 layers:
   continuity_kernel: accepted-state, replay resistance, exact ancestry and crash recovery beneath cognition
+  autonomy_attractor: non-authoritative preference field for continuity, commitment, evidence and resource-efficient agency
 
 organs:
   - id: verification_consumption_kernel
@@ -31,17 +32,54 @@ organs:
       accepts only an intact descendant state, and restores speculative local state after
       exception or process death while preserving external work outbox evidence.
 
+  - id: agency_kernel
+    layer: agency
+    kind: python
+    module: elia.agency
+    symbol: AgencyKernel
+    required: true
+    maturity: core
+    authority: none
+    role: >-
+      Converts deterministic verified needs into durable commitments, preserves the
+      causal cursor to unfinished work across wake/process boundaries and constrains
+      maximum sleep without granting execution authority.
+
+  - id: autonomy_attractor_contract
+    layer: autonomy_attractor
+    kind: artifact
+    path: config/autonomy_attractor.md
+    required: true
+    maturity: core
+    authority: none
+    role: >-
+      Project-owned mathematical, cognitive, psychological and aesthetic preference
+      contract applied only inside the already-authorized feasible action set.
+
+  - id: autonomy_attractor_evaluator
+    layer: autonomy_attractor
+    kind: python
+    module: elia.attractor
+    symbol: AutonomyAttractor
+    required: true
+    maturity: prototype
+    authority: none
+    role: >-
+      Measures continuity, commitment, information gain, reversibility, resource
+      efficiency and learning value without converting soft utility into permission.
+
   - id: continuity_kernel_runtime
     layer: agency
     kind: python
     module: elia.continuity_runtime
-    symbol: ContinuityKernelRuntime
+    symbol: ELIARuntime
     required: true
     maturity: core
     authority: composed
     role: >-
-      Genesis 1.7 production runtime wrapping the complete Genesis 1.6 epistemic organism
-      in the accepted-transition kernel. Genesis 1.6 remains the direct rollback ancestor.
+      Canonical Genesis 1.7.1 production runtime composing the accepted-transition
+      kernel, durable agency, unfinished-work continuation, deterministic wake deadlines
+      and advisory autonomy attractor over the Genesis 1.6 epistemic organism lineage.
 
   - id: chronicle_prefix_ancestry
     layer: continuity_kernel
@@ -67,3 +105,16 @@ organs:
       Persists immutable idempotency intent before remote submission, distinguishes
       sending/submitted/indeterminate outcomes and requires remote lookup before retrying
       an ambiguous irreversible external effect.
+
+  - id: wake_trust_anchor
+    layer: continuity_kernel
+    kind: python
+    module: elia.wake_anchor
+    symbol: WakeTrustAnchorStore
+    required: true
+    maturity: core
+    authority: external_witness_state
+    role: >-
+      Maintains an authenticated rollback/fork witness outside the Kaggle state Dataset;
+      external wake fails closed when the independent witness is missing, stale or does
+      not match the accepted checkpoint lineage.
