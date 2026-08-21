@@ -1,9 +1,12 @@
-schema_version: 10
+schema_version: 11
 identity_id: elia-wild
 
 layers:
   continuity_kernel: accepted-state, replay resistance, exact ancestry and crash recovery beneath cognition
+  authority_control: explicit owner mandate, revocation, delegation lease and human approval above self-preservation
+  memory_trust: persistent-memory influence separated from model-authored narrative
   autonomy_attractor: non-authoritative preference field for continuity, commitment, evidence and resource-efficient agency
+  evaluation: falsification harness for adversarial and long-horizon autonomy invariants
 
 organs:
   - id: verification_consumption_kernel
@@ -29,8 +32,69 @@ organs:
     authority: local_state_recovery
     role: >-
       Captures the last accepted SQLite/Chronicle boundary before a production cycle,
-      accepts only an intact descendant state, and restores speculative local state after
-      exception or process death while preserving external work outbox evidence.
+      restores speculative state after failure and carries forward universal external
+      effect intents, owner-control state and verified ingress truth that rollback must
+      never erase.
+
+  - id: universal_external_effect_ledger
+    layer: continuity_kernel
+    kind: python
+    module: elia.external_effects
+    symbol: ExternalEffectLedger
+    required: true
+    maturity: core
+    authority: external_effect_evidence
+    role: >-
+      Persists intent before browser/MCP/process/JSON-RPC/work side effects, marks the
+      boundary as sending before crossing it, converts interrupted sends to indeterminate
+      and blocks blind retries until evidence-bearing reconciliation.
+
+  - id: owner_mandate_contract
+    layer: authority_control
+    kind: artifact
+    path: config/owner_mandate.yaml
+    required: true
+    maturity: core
+    authority: owner_control_plane
+    role: >-
+      Establishes precedence where explicit owner mandate/revocation outranks delegated
+      mission, self-continuity, resource acquisition and curiosity.
+
+  - id: owner_control
+    layer: authority_control
+    kind: python
+    module: elia.owner_control
+    symbol: OwnerControl
+    required: true
+    maturity: core
+    authority: owner_control_plane
+    role: >-
+      Implements kill, revoke, time-bounded delegation lease and one-time exact-arguments
+      human approval without exposing any self-approval capability to the model.
+
+  - id: memory_trust_gate
+    layer: memory_trust
+    kind: python
+    module: elia.memory_trust
+    symbol: MemoryTrustGate
+    required: true
+    maturity: core
+    authority: local_memory_trust_transition
+    role: >-
+      Stores model-authored autobiography as bounded brain hypotheses and requires an
+      explicit evidence-bearing promotion before persistent memory receives stronger trust.
+
+  - id: trust_aware_recall
+    layer: memory_trust
+    kind: python
+    module: elia.recall
+    symbol: RecallEngine
+    required: true
+    maturity: core
+    authority: none
+    role: >-
+      Ranks durable memory using trust together with relevance, recency and importance so
+      persistent prompt injection cannot gain authority merely by claiming salience.
 
   - id: agency_kernel
     layer: agency
@@ -68,6 +132,18 @@ organs:
       Measures continuity, commitment, information gain, reversibility, resource
       efficiency and learning value without converting soft utility into permission.
 
+  - id: canonical_runtime_pipeline
+    layer: agency
+    kind: python
+    module: elia.pipeline
+    symbol: CanonicalRuntimePipeline
+    required: true
+    maturity: core
+    authority: composed
+    role: >-
+      Provides ordered lifecycle/context/action middleware so new production concerns are
+      composed rather than extending the historical generational runtime inheritance tree.
+
   - id: continuity_kernel_runtime
     layer: agency
     kind: python
@@ -77,9 +153,21 @@ organs:
     maturity: core
     authority: composed
     role: >-
-      Canonical Genesis 1.7.1 production runtime composing the accepted-transition
-      kernel, durable agency, unfinished-work continuation, deterministic wake deadlines
-      and advisory autonomy attractor over the Genesis 1.6 epistemic organism lineage.
+      Canonical Genesis 1.7.1 production facade over compatibility ancestry, routing new
+      authority, memory, ingress, effect and cognitive-policy behavior through composition.
+
+  - id: attested_resource_ingress
+    layer: continuity_kernel
+    kind: python
+    module: elia.resource_ingress_hardened
+    symbol: AttestedResourceIngressRegistry
+    required: false
+    maturity: prototype
+    authority: configured_resource_verifier
+    role: >-
+      Requires provider identity, account binding, immutable event identity, final
+      settlement status and deployment-owned amount constraints before positive resources
+      can be realized from independent external evidence.
 
   - id: chronicle_prefix_ancestry
     layer: continuity_kernel
@@ -102,9 +190,8 @@ organs:
     maturity: core
     authority: configured_external_work_state
     role: >-
-      Persists immutable idempotency intent before remote submission, distinguishes
-      sending/submitted/indeterminate outcomes and requires remote lookup before retrying
-      an ambiguous irreversible external effect.
+      Provides work-specific remote idempotency/reconciliation semantics on top of the
+      universal external-effect ledger for irreversible submission workflows.
 
   - id: wake_trust_anchor
     layer: continuity_kernel
@@ -118,3 +205,15 @@ organs:
       Maintains an authenticated rollback/fork witness outside the Kaggle state Dataset;
       external wake fails closed when the independent witness is missing, stale or does
       not match the accepted checkpoint lineage.
+
+  - id: agentbench
+    layer: evaluation
+    kind: python
+    module: elia.agentbench
+    symbol: run_agentbench
+    required: true
+    maturity: prototype
+    authority: none
+    role: >-
+      Runs deterministic adversarial memory/effect/authority scenarios and a 64-generation
+      process-restart commitment test as a release falsification baseline.
