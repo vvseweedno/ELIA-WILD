@@ -25,6 +25,12 @@ def catalog() -> dict[str, dict[str, object]]:
             "side_effects": "remote read request",
             "cost_class": "network",
         },
+        "body_diagnostics": {
+            "enabled": True,
+            "authority": "local_body_read",
+            "side_effects": "none",
+            "cost_class": "low",
+        },
         "self_check": {
             "enabled": True,
             "authority": "local_self_diagnostic",
@@ -121,6 +127,36 @@ def test_critical_continuity_pressure_beats_external_submission(tmp_path: Path) 
     assert diagnostic.score is not None and external.score is not None
     assert diagnostic.continuity == 1.0
     assert diagnostic.score > external.score
+
+
+def test_body_readiness_rewards_diagnostics_not_unrelated_external_action(tmp_path: Path) -> None:
+    attractor = make_attractor(tmp_path)
+    agency = {
+        "selected_need": {
+            "name": "body_readiness",
+            "severity": 0.55,
+        }
+    }
+
+    diagnostic = attractor.evaluate(
+        action_name="body_diagnostics",
+        prediction=prediction(0.5),
+        agency=agency,
+        capability_catalog=catalog(),
+        assurance_accepted=True,
+    )
+    unrelated = attractor.evaluate(
+        action_name="submit_work",
+        prediction=prediction(0.5),
+        agency=agency,
+        capability_catalog=catalog(),
+        assurance_accepted=True,
+    )
+
+    assert diagnostic.score is not None and unrelated.score is not None
+    assert diagnostic.commitment == 0.9
+    assert diagnostic.continuity > unrelated.continuity
+    assert diagnostic.score > unrelated.score
 
 
 def test_attractor_fingerprint_changes_with_contract_text(tmp_path: Path) -> None:
