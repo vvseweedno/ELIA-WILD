@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .agency import AgencyKernel
@@ -21,11 +22,14 @@ class ELIARuntime(EpistemicOrganismRuntime):
     process exits, hibernation, and substrate replacement without gaining any new
     execution authority. Unfinished resource work is reconciled into the same durable
     agency cursor so a later wake continues the most causally advanced open work item
-    instead of inventing a fresh approximation of the prior objective.
+    instead of inventing a fresh approximation of the prior objective. Agency also
+    provides a one-way wake deadline: cognition may request an earlier wake, never a
+    later one than verified commitments permit.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._transition_recovery: TransitionRecovery | None = None
+        self._last_agency_wake_policy: dict[str, Any] | None = None
         super().__init__(*args, **kwargs)
         self.agency = AgencyKernel(
             self.memory,
@@ -73,6 +77,35 @@ class ELIARuntime(EpistemicOrganismRuntime):
         context["_system_prompt"] = self.prompt_template.render(context)
         return context
 
+    def _schedule_next_wake(self, requested: float | None) -> tuple[float, str]:
+        # The substrate may propose how long to sleep, but verified commitments own the
+        # upper bound. This prevents one hallucinated/over-conservative decision from
+        # indefinitely abandoning an accepted external outcome or repair obligation.
+        model_requested = (
+            float(self.config.runtime.cycle_sleep_seconds)
+            if requested is None
+            else float(requested)
+        )
+        model_requested = max(0.0, min(model_requested, 86400.0))
+        policy = self.agency.wake_policy()
+        cap = policy.get("max_sleep_seconds")
+        effective = model_requested
+        if cap is not None:
+            effective = min(effective, max(0.0, float(cap)))
+        delay, wake_at = super()._schedule_next_wake(effective)
+        audited = {
+            **policy,
+            "model_requested_sleep_seconds": model_requested,
+            "effective_sleep_seconds": delay,
+            "next_wake_at": wake_at,
+        }
+        self._last_agency_wake_policy = audited
+        self.memory.set_meta(
+            "agency_wake_policy_v1",
+            json.dumps(audited, ensure_ascii=False, sort_keys=True),
+        )
+        return delay, wake_at
+
     def cycle(self) -> dict[str, Any]:
         guard = AcceptedTransitionGuard(self.config.runtime.state_dir, self.chronicle)
         try:
@@ -94,6 +127,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 )
                 report = super().cycle()
                 report["agency"] = agency.as_dict()
+                report["agency_wake_policy"] = dict(self._last_agency_wake_policy or {})
                 transition.accept()
             return report
         except BaseException:
