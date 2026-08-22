@@ -280,8 +280,12 @@ class ResourceIngressRegistry:
         self.workspace = (self.state_dir / "workspace").resolve()
         self.config = dict((tool_config or {}).get("resource_ingress") or {})
         database = self.state_dir / "memory.sqlite3"
-        self.store = ResourceIngressStore(database)
+        # ResourceIngress has foreign-key references into the economy and ecology
+        # domains. Initialize those owning schemas first so a clean state directory
+        # cannot reach the verifier with dangling parent-table definitions.
+        EconomyStore(database)
         self.resource_ecology = ResourceEcologyStore(database)
+        self.store = ResourceIngressStore(database)
         self.observations = ObservationStore(database)
         self.causal = CausalMemoryStore(database)
         self.state_bus = OrganismStateBus(database)
@@ -330,7 +334,6 @@ class ResourceIngressRegistry:
         raw = key.encode("utf-8")
         if len(raw) < 16:
             raise RuntimeError(f"resource verifier key {env_name!r} must be at least 16 bytes")
-        # Refuse accidental delegation of the local signing key to the remote MCP server.
         server = self.mcp.servers().get(str(verifier["server"]), {})
         header_envs = {
             str(value).strip()
@@ -519,9 +522,6 @@ class ResourceIngressRegistry:
             unit = _clean(verifier["unit"], field="unit", maximum=64)
             kind = _clean(verifier["kind"], field="kind", maximum=64)
             authority = _clean(verifier["authority"], field="authority", maximum=256)
-            # Validate local signing authority before any network call. This prevents an
-            # accidental key_env reuse in MCP transport credentials from leaking the
-            # verifier signing key even when the remote call would otherwise succeed.
             key = self._key(verifier)
             self._validate_work_target(work_item_id, asset=asset, unit=unit)
 
