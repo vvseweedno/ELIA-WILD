@@ -261,6 +261,7 @@ jobs:
             --output-reproducible \
             --output-format JSON \
             --output-file dist/elia-wild.cdx.json
+          python release_tools/finalize_cyclonedx.py dist/elia-wild.cdx.json
           python -m json.tool dist/elia-wild.cdx.json > /dev/null
           sha256sum dist/*.whl dist/*.tar.gz dist/*.json dist/SOURCE_COMMIT > dist/SHA256SUMS
           sha256sum --check dist/SHA256SUMS

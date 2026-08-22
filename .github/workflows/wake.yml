@@ -41,7 +41,6 @@ jobs:
       ELIA_KAGGLE_KERNEL_TIMEOUT: ${{ vars.ELIA_KAGGLE_KERNEL_TIMEOUT }}
       ELIA_WAKE_MAX_CYCLES: ${{ vars.ELIA_WAKE_MAX_CYCLES }}
       ELIA_REPO_REF: ${{ github.sha }}
-      ELIA_KAGGLE_TRUST_ANCHOR: ${{ runner.temp }}/elia-wake-anchor/kaggle-trust-anchor.json
       ELIA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       ELIA_REPOSITORY_ID: ${{ github.repository_id }}
     steps:
@@ -65,6 +64,7 @@ jobs:
         id: restore
         env:
           GH_TOKEN: ${{ github.token }}
+          ELIA_KAGGLE_TRUST_ANCHOR: ${{ runner.temp }}/elia-wake-anchor/kaggle-trust-anchor.json
           ELIA_WAKE_TRUST_ANCHOR_SEED_B64: ${{ secrets.ELIA_WAKE_TRUST_ANCHOR_SEED_B64 }}
           ALLOW_ANCHOR_INITIALIZATION: ${{ github.event_name == 'workflow_dispatch' && inputs.initialize_anchor == true }}
         shell: bash
@@ -137,6 +137,7 @@ jobs:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           ELIA_CHECKPOINT_KEY: ${{ secrets.ELIA_CHECKPOINT_KEY }}
           ELIA_CHECKPOINT_ENCRYPTION_KEY: ${{ secrets.ELIA_CHECKPOINT_ENCRYPTION_KEY }}
+          ELIA_KAGGLE_TRUST_ANCHOR: ${{ runner.temp }}/elia-wake-anchor/kaggle-trust-anchor.json
           ELIA_WAKE_RESET_AUTH: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_circuit == true && secrets.ELIA_WAKE_RESET_AUTH || '' }}
           ELIA_WAKE_RESET_CIRCUIT: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_circuit == true }}
           ELIA_WAKE_RESET_REASON: ${{ inputs.reset_reason }}
@@ -147,7 +148,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: elia-wake-trust-anchor
-          path: ${{ env.ELIA_KAGGLE_TRUST_ANCHOR }}
+          path: ${{ runner.temp }}/elia-wake-anchor/kaggle-trust-anchor.json
           if-no-files-found: error
           retention-days: 90
 

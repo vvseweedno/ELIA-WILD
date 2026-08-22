@@ -81,6 +81,7 @@ def test_codeql_and_dependency_update_workflows_are_present() -> None:
     assert "--follow-imports=skip" not in ci_text
     assert "SOURCE_DATE_EPOCH=\"$(git log -1 --format=%ct)\"" in ci_text
     assert "release_tools/normalize_sdist.py" in ci_text
+    assert "release_tools/finalize_cyclonedx.py" in ci_text
     assert 'cmp "$RUNNER_TEMP"/elia-dist-a/*.whl' in ci_text
     assert 'cmp "$RUNNER_TEMP"/elia-dist-a/*.tar.gz' in ci_text
 
