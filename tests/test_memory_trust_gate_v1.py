@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from elia.memory import MemoryStore
 from elia.memory_trust import MemoryTrustGate
 from elia.recall import RecallEngine
@@ -71,3 +73,24 @@ def test_promotion_requires_evidence_and_cannot_create_protected_identity(tmp_pa
     )
     assert promotion.from_class == "brain_hypothesis"
     assert promotion.to_class == "corroborated_memory"
+
+
+def test_generic_promotion_cannot_mint_verified_fact(tmp_path: Path) -> None:
+    memory = MemoryStore(tmp_path / "memory.sqlite3")
+    gate = MemoryTrustGate(memory)
+    memory_id = gate.remember_from_brain(
+        {"content": "A claim that still needs external verification.", "importance": 0.5},
+        identity_fingerprint="identity",
+        model_id="model",
+    )
+    assert memory_id is not None
+    with pytest.raises(
+        ValueError,
+        match="verified_fact requires a domain-specific authenticated verifier",
+    ):
+        gate.promote(
+            memory_id,
+            to_class="verified_fact",
+            evidence="an untrusted local label is not enough",
+            authority="string-only-authority",
+        )
