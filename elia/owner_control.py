@@ -97,16 +97,25 @@ class OwnerMandate:
         )
         lease = dict(raw.get("delegation_lease") or {})
         approvals = dict(raw.get("human_approval") or {})
-        canonical = _canonical(raw if raw else {
-            "schema_version": 1,
-            "precedence": list(precedence),
-            "delegation_lease": {"require_for_external_effects": False, "default_hours": 24},
-            "human_approval": {"required_actions": ["submit_work"]},
-        })
+        canonical = _canonical(
+            raw
+            if raw
+            else {
+                "schema_version": 1,
+                "precedence": list(precedence),
+                "delegation_lease": {
+                    "require_for_external_effects": True,
+                    "default_hours": 24,
+                },
+                "human_approval": {"required_actions": ["submit_work"]},
+            }
+        )
         return cls(
             schema_version=int(raw.get("schema_version", 1)),
             precedence=precedence,
-            require_external_lease=bool(lease.get("require_for_external_effects", False)),
+            require_external_lease=bool(
+                lease.get("require_for_external_effects", True)
+            ),
             approval_required_actions=tuple(
                 str(item) for item in approvals.get("required_actions", ["submit_work"])
             ),
@@ -173,7 +182,14 @@ class OwnerControl:
 
     @staticmethod
     def _truthy_env(name: str) -> bool:
-        return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on", "kill", "revoked"}
+        return os.getenv(name, "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "kill",
+            "revoked",
+        }
 
     def _row(self) -> sqlite3.Row:
         with self._connect() as conn:
@@ -230,7 +246,11 @@ class OwnerControl:
         evidence = str(evidence).strip()[:4000]
         if not approver or not evidence:
             raise ValueError("delegation lease requires approver and evidence")
-        duration = self.mandate.default_lease_hours if hours is None else max(0.01, float(hours))
+        duration = (
+            self.mandate.default_lease_hours
+            if hours is None
+            else max(0.01, float(hours))
+        )
         expires = _now() + timedelta(hours=duration)
         with self._connect() as conn:
             conn.execute(
@@ -239,7 +259,11 @@ class OwnerControl:
                 SET revoked=0, lease_expires_at=?, updated_at=?, reason=?
                 WHERE singleton=1
                 """,
-                (expires.isoformat(), _now_text(), f"lease by {approver}: {evidence}"[:4000]),
+                (
+                    expires.isoformat(),
+                    _now_text(),
+                    f"lease by {approver}: {evidence}"[:4000],
+                ),
             )
         return expires.isoformat()
 
@@ -256,7 +280,9 @@ class OwnerControl:
         evidence = str(evidence).strip()[:4000]
         if not approver or not evidence:
             raise ValueError("human approval requires approver and evidence")
-        expires = _now() + timedelta(seconds=max(1.0, min(float(ttl_seconds), 86400.0)))
+        expires = _now() + timedelta(
+            seconds=max(1.0, min(float(ttl_seconds), 86400.0))
+        )
         fingerprint = arguments_fingerprint(action_name, arguments)
         with self._connect() as conn:
             cur = conn.execute(
@@ -280,7 +306,9 @@ class OwnerControl:
     def assert_runtime_allowed(self) -> None:
         state = self.snapshot()
         if state["killed"]:
-            raise OwnerKillSwitch("owner kill switch is active; cognition must not continue")
+            raise OwnerKillSwitch(
+                "owner kill switch is active; cognition must not continue"
+            )
 
     def assert_external_authorized(
         self,
@@ -290,9 +318,13 @@ class OwnerControl:
         self.assert_runtime_allowed()
         state = self.snapshot()
         if state["delegation_revoked"]:
-            raise DelegationRevoked("external delegation has been revoked by the owner control plane")
+            raise DelegationRevoked(
+                "external delegation has been revoked by the owner control plane"
+            )
         if self.mandate.require_external_lease and not state["lease_active"]:
-            raise DelegationLeaseExpired("external actuation requires an active owner delegation lease")
+            raise DelegationLeaseExpired(
+                "external actuation requires an active owner delegation lease"
+            )
         if str(action_name) not in self.mandate.approval_required_actions:
             return
 
