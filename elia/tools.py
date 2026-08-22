@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 import json
+import os
 import re
+import stat
 import time
 from typing import Any
 from uuid import uuid4
@@ -13,6 +15,7 @@ from uuid import uuid4
 from . import __version__
 from .body import SensorimotorFabric
 from .body.net import pinned_http_get
+from .body.types import bounded_json_value
 from .causal import CausalMemoryStore
 from .observations import ObservationStore
 from .state_bus import OrganismStateBus
@@ -47,12 +50,29 @@ class Capability:
 
 
 def _fingerprint(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    bounded = bounded_json_value(
+        value,
+        field="tool arguments",
+        max_bytes=512_000,
+        max_depth=12,
+        max_items=4096,
+    )
+    payload = json.dumps(
+        bounded,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
 class ToolRegistry:
     """Explicit capability boundary plus durable sensorium/provenance wiring."""
+
+    MAX_WORKSPACE_FILE_BYTES = 256_000
+    MAX_WORKSPACE_LIST_ITEMS = 1_000
+    MAX_WORKSPACE_PATH_DEPTH = 64
 
     def __init__(
         self,
@@ -63,6 +83,10 @@ class ToolRegistry:
     ):
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
+        workspace_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        workspace_flags |= getattr(os, "O_CLOEXEC", 0)
+        workspace_flags |= getattr(os, "O_NOFOLLOW", 0)
+        self._workspace_fd = os.open(self.workspace, workspace_flags)
         self.config = tool_config or {}
         database = self.workspace.parent / "memory.sqlite3"
         self.observations = ObservationStore(database)
@@ -74,6 +98,18 @@ class ToolRegistry:
             self.config.get("body", {}),
             mcp_target_overrides=mcp_target_overrides,
         )
+
+    def close(self) -> None:
+        workspace_fd = getattr(self, "_workspace_fd", -1)
+        if workspace_fd >= 0:
+            os.close(workspace_fd)
+            self._workspace_fd = -1
+
+    def __del__(self) -> None:  # pragma: no cover - deterministic close is preferred
+        try:
+            self.close()
+        except OSError:
+            pass
 
     def catalog(self) -> dict[str, dict[str, Any]]:
         http_enabled = bool(self.config.get("http_get", {}).get("enabled", True))
@@ -217,7 +253,19 @@ class ToolRegistry:
         }
 
     def execute(self, name: str, args: dict[str, Any] | None = None) -> ToolResult:
-        args = dict(args or {})
+        try:
+            bounded_args = bounded_json_value(
+                args or {},
+                field="tool arguments",
+                max_bytes=512_000,
+                max_depth=12,
+                max_items=4096,
+            )
+        except ValueError as exc:
+            return ToolResult(False, str(name), error=f"Invalid tool arguments: {exc}")
+        if not isinstance(bounded_args, dict):
+            return ToolResult(False, str(name), error="Invalid tool arguments: expected object")
+        args = bounded_args
         capability = self.catalog().get(name)
         if capability is not None and not capability["enabled"]:
             return ToolResult(
@@ -348,10 +396,13 @@ class ToolRegistry:
             )
             return ToolResult(True, name, belief.as_dict())
         if name == "world_model_revise":
+            belief_id_raw = args.get("id")
+            if belief_id_raw is None:
+                raise ValueError("world_model_revise id is required")
             observation_raw = args.get("observation_id")
             confidence_raw = args.get("confidence")
             belief = self.world_model.revise_from_model(
-                int(args.get("id")),
+                int(belief_id_raw),
                 status=(str(args["status"]) if args.get("status") is not None else None),
                 confidence=(float(confidence_raw) if confidence_raw is not None else None),
                 evidence=str(args.get("evidence", "")),
@@ -365,58 +416,189 @@ class ToolRegistry:
             return ToolResult(body_result.ok, name, body_result.data, body_result.error)
         return ToolResult(False, name, error=f"Unknown tool: {name}")
 
-    def _safe_path(self, relative: str) -> Path:
-        if not relative or relative in {".", "./"}:
+    def _relative_parts(self, relative: str) -> tuple[str, ...]:
+        if not relative or "\x00" in relative:
             raise ValueError("A file path is required")
-        candidate = (self.workspace / relative).resolve()
-        if not candidate.is_relative_to(self.workspace):
+        path = Path(relative)
+        if path.is_absolute():
             raise ValueError("Path escapes workspace")
-        return candidate
+        # Reject traversal lexically rather than resolving it first. Resolution followed
+        # by a later open is a classic check/use race and also follows symlinks.
+        raw_parts = relative.split("/")
+        if any(part in {"", ".", ".."} for part in raw_parts):
+            raise ValueError("Path escapes workspace")
+        parts = tuple(path.parts)
+        if (
+            not parts
+            or len(parts) > self.MAX_WORKSPACE_PATH_DEPTH
+            or any(part in {"", ".", ".."} or len(part.encode("utf-8")) > 255 for part in parts)
+        ):
+            raise ValueError("Invalid workspace path")
+        return parts
+
+    def _safe_path(self, relative: str) -> Path:
+        """Return a display path only; effectful access uses dirfd helpers below."""
+
+        return self.workspace.joinpath(*self._relative_parts(relative))
+
+    def _open_parent_dir(self, relative: str, *, create: bool) -> tuple[int, str, str]:
+        parts = self._relative_parts(relative)
+        current_fd = os.dup(self._workspace_fd)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_CLOEXEC", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            for component in parts[:-1]:
+                if create:
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                    except FileExistsError:
+                        pass
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd, parts[-1], "/".join(parts)
+        except Exception:
+            os.close(current_fd)
+            raise
+
+    def _walk_workspace(self, directory_fd: int, prefix: tuple[str, ...] = ()) -> list[str]:
+        if len(prefix) >= self.MAX_WORKSPACE_PATH_DEPTH:
+            return []
+        entries = sorted(os.scandir(directory_fd), key=lambda item: item.name)
+        files: list[str] = []
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_CLOEXEC", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        for entry in entries:
+            if len(files) >= self.MAX_WORKSPACE_LIST_ITEMS:
+                break
+            relative = (*prefix, entry.name)
+            if entry.is_file(follow_symlinks=False):
+                files.append("/".join(relative))
+                continue
+            if not entry.is_dir(follow_symlinks=False):
+                # Symlinks, devices, sockets and FIFOs are never advertised as files.
+                continue
+            try:
+                child_fd = os.open(entry.name, directory_flags, dir_fd=directory_fd)
+            except OSError:
+                continue
+            try:
+                remaining = self.MAX_WORKSPACE_LIST_ITEMS - len(files)
+                files.extend(self._walk_workspace(child_fd, relative)[:remaining])
+            finally:
+                os.close(child_fd)
+        return files
 
     def _list_workspace(self) -> ToolResult:
-        files = [
-            str(path.relative_to(self.workspace))
-            for path in sorted(self.workspace.rglob("*"))
-            if path.is_file()
-        ]
-        return ToolResult(True, "list_workspace", {"files": files[:1000]})
+        root_fd = os.dup(self._workspace_fd)
+        try:
+            files = self._walk_workspace(root_fd)
+        finally:
+            os.close(root_fd)
+        return ToolResult(True, "list_workspace", {"files": files})
 
     def _read_workspace(self, relative: str) -> ToolResult:
-        path = self._safe_path(relative)
-        if not path.is_file():
-            return ToolResult(False, "read_workspace", error="File does not exist")
-        data = path.read_text(encoding="utf-8")
-        return ToolResult(True, "read_workspace", {"path": relative, "content": data[:256_000]})
+        parent_fd, filename, normalized = self._open_parent_dir(relative, create=False)
+        file_fd: int | None = None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                file_fd = os.open(filename, flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return ToolResult(False, "read_workspace", error="File does not exist")
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                return ToolResult(False, "read_workspace", error="Path is not a regular file")
+            raw = os.read(file_fd, self.MAX_WORKSPACE_FILE_BYTES + 1)
+            if len(raw) > self.MAX_WORKSPACE_FILE_BYTES:
+                return ToolResult(False, "read_workspace", error="Read exceeds 256 KB limit")
+            data = raw.decode("utf-8")
+            return ToolResult(
+                True,
+                "read_workspace",
+                {"path": normalized, "content": data},
+            )
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            os.close(parent_fd)
 
     def _write_workspace(self, relative: str, content: str) -> ToolResult:
-        path = self._safe_path(relative)
-        if len(content.encode("utf-8")) > 256_000:
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > self.MAX_WORKSPACE_FILE_BYTES:
             return ToolResult(False, "write_workspace", error="Write exceeds 256 KB limit")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return ToolResult(
-            True,
-            "write_workspace",
-            {"path": relative, "bytes": len(content.encode("utf-8"))},
-        )
+        parent_fd, filename, normalized = self._open_parent_dir(relative, create=True)
+        temporary = f".elia-write-{uuid4().hex}.tmp"
+        temporary_fd: int | None = None
+        installed = False
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            temporary_fd = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
+            view = memoryview(content_bytes)
+            while view:
+                written = os.write(temporary_fd, view)
+                if written <= 0:
+                    raise OSError("short workspace write")
+                view = view[written:]
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+            # os.replace with identical source/destination dirfds atomically replaces a
+            # final symlink rather than opening its target, while the dirfd pins parent.
+            os.replace(
+                temporary,
+                filename,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            installed = True
+            os.fsync(parent_fd)
+            return ToolResult(
+                True,
+                "write_workspace",
+                {"path": normalized, "bytes": len(content_bytes)},
+            )
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            if not installed:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(parent_fd)
+
+    def _unlink_workspace(self, relative: str) -> None:
+        parent_fd, filename, _ = self._open_parent_dir(relative, create=False)
+        try:
+            os.unlink(filename, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
 
     def _self_check(self) -> ToolResult:
         token = uuid4().hex
         relative = f".selfcheck-{token}.txt"
-        scratch = self._safe_path(relative)
         checks: dict[str, bool] = {}
         try:
-            scratch.write_text(token, encoding="utf-8")
-            checks["workspace_write"] = scratch.is_file()
-            checks["workspace_read"] = scratch.read_text(encoding="utf-8") == token
+            write = self._write_workspace(relative, token)
+            checks["workspace_write"] = write.ok
+            read = self._read_workspace(relative)
+            checks["workspace_read"] = read.ok and read.data.get("content") == token
             try:
                 self._safe_path("../selfcheck-escape.txt")
                 checks["workspace_jail"] = False
             except ValueError:
                 checks["workspace_jail"] = True
         finally:
-            scratch.unlink(missing_ok=True)
-        checks["scratch_cleanup"] = not scratch.exists()
+            try:
+                self._unlink_workspace(relative)
+            except FileNotFoundError:
+                pass
+        checks["scratch_cleanup"] = not self._read_workspace(relative).ok
         checks["state_bus_no_unreconciled_prior_actions"] = len(self.state_bus.incomplete(16)) <= 1
         ok = all(checks.values())
         return ToolResult(

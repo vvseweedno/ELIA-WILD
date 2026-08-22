@@ -13,7 +13,9 @@ from uuid import uuid4
 
 import yaml
 
+from .canonical import canonical_json
 from .provider_context import provider_context
+from .sqlite_utils import inserted_row_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +290,7 @@ class CognitiveBiographyStore:
 
     @staticmethod
     def _digest(value: Any) -> str:
-        payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        payload = canonical_json(value)
         return sha256(payload.encode("utf-8")).hexdigest()
 
     def begin_session(
@@ -342,7 +344,7 @@ class CognitiveBiographyStore:
                     packet.response_fingerprint,
                 ),
             )
-            packet_id = int(cur.lastrowid)
+            packet_id = inserted_row_id(cur, operation="epistemic packet insert")
         return EpistemicPacket(packet_id, packet.session_id, packet.organ_id, packet.claim, packet.evidence, packet.counterexample, packet.falsifier, packet.uncertainty, packet.confidence, packet.response_fingerprint)
 
     def finish_adjudication(self, session_id: str, adjudication: EpistemicAdjudication) -> None:
@@ -682,7 +684,7 @@ class EpistemicCortex:
         public = provider_context(context)
         # The current ecosystem must never recursively ingest its own generated packets.
         public.pop("epistemic", None)
-        raw = json.dumps(public, ensure_ascii=False, sort_keys=True, default=str)
+        raw = canonical_json(public)
         bounded = raw[: self.registry.policy.max_public_context_chars]
         return bounded, sha256(bounded.encode("utf-8")).hexdigest()
 

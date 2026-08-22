@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-import json
 from pathlib import Path
 import sqlite3
 from typing import Any
+
+from .canonical import canonical_json
+from .sqlite_utils import inserted_row_id
 
 
 # These capabilities are still preserved in the raw audit table, but they are local
@@ -29,7 +31,7 @@ def _now() -> str:
 
 
 def _fingerprint(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = canonical_json(value)
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -142,7 +144,7 @@ class CausalMemoryStore:
                     str(source).strip()[:64] or "runtime",
                 ),
             )
-            row_id = int(cur.lastrowid)
+            row_id = inserted_row_id(cur, operation="causal experience insert")
         item = self.get(row_id)
         if item is None:
             raise RuntimeError("intervention experience disappeared after insert")

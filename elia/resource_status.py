@@ -126,9 +126,13 @@ def public_resource_ecology(value: dict[str, Any]) -> dict[str, Any]:
     for raw in list(value.get("candidates") or [])[:16]:
         if not isinstance(raw, dict):
             continue
-        opportunity = raw.get("opportunity") if isinstance(raw.get("opportunity"), dict) else {}
-        profile = (
-            raw.get("resource_profile") if isinstance(raw.get("resource_profile"), dict) else {}
+        opportunity_value = raw.get("opportunity")
+        opportunity: dict[str, Any] = (
+            opportunity_value if isinstance(opportunity_value, dict) else {}
+        )
+        profile_value = raw.get("resource_profile")
+        profile: dict[str, Any] = (
+            profile_value if isinstance(profile_value, dict) else {}
         )
         work_items: list[dict[str, Any]] = []
         for work in list(raw.get("work_items") or [])[:8]:

@@ -9,6 +9,17 @@ from mcp.server import MCPServer
 from elia.body.mcp import MCPBody
 
 
+ADD_ARGUMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "a": {"type": "integer"},
+        "b": {"type": "integer"},
+    },
+    "required": ["a", "b"],
+    "additionalProperties": False,
+}
+
+
 def _server() -> MCPServer:
     server = MCPServer("ELIA Body Test")
 
@@ -37,6 +48,7 @@ def _body(server: MCPServer) -> MCPBody:
                     "enabled": True,
                     "allow_tool_calls": True,
                     "allowed_tools": ["add"],
+                    "tool_argument_schemas": {"add": ADD_ARGUMENT_SCHEMA},
                     "allowed_resources": ["test://*"],
                     "timeout_seconds": 5,
                 }
@@ -63,9 +75,16 @@ def test_mcp_v2_inprocess_discovery_call_and_resource() -> None:
     assert denied.ok is False
     assert "not allow-listed" in (denied.error or "")
 
+    out_of_scope = body.call("local", "add", {"a": 1, "b": 2, "command": "extra"})
+    assert out_of_scope.ok is False
+    assert "out-of-scope fields" in (out_of_scope.error or "")
+
     resource = body.read_resource("local", "test://hello")
     assert resource.ok is True, resource.error
-    assert any("hello from MCP" in item.get("text", "") for item in resource.data["contents"])
+    assert any(
+        "hello from MCP" in item.get("text", "")
+        for item in resource.data["contents"]
+    )
 
 
 def test_mcp_server_name_cannot_be_invented_by_model() -> None:
@@ -73,3 +92,26 @@ def test_mcp_server_name_cannot_be_invented_by_model() -> None:
     result = body.discover("unconfigured")
     assert result.ok is False
     assert "unknown or disabled MCP server" in (result.error or "")
+
+
+def test_url_mcp_transport_requires_network_isolation_even_without_credentials() -> None:
+    body = MCPBody(
+        {
+            "enabled": True,
+            "servers": {
+                "public": {
+                    "enabled": True,
+                    "url": "https://example.com/mcp",
+                    "allow_tool_calls": False,
+                    "allowed_resources": [],
+                }
+            },
+        }
+    )
+    assert body.enabled is False
+    caps = {item.name: item for item in body.capabilities()}
+    assert caps["mcp_discover"].enabled is False
+    assert caps["mcp_discover"].readiness == "network_isolation_or_transport_required"
+    result = body.discover("public")
+    assert result.ok is False
+    assert "network_isolation_required" in (result.error or "")

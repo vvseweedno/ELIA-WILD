@@ -17,6 +17,7 @@ from elia.identity import IdentityBundle, IdentityStore, build_self_model_snapsh
 from elia.memory import MemoryStore
 from elia.prompting import PromptTemplate
 from elia.tools import ToolRegistry
+from elia.wake_anchor import WakeTrustAnchorStore, default_anchor_path
 from elia.wake_transport import (
     CHECKPOINT_NAME,
     DIGEST_NAME,
@@ -30,7 +31,11 @@ from elia.wake_transport import (
 
 def _kaggle_child_env() -> dict[str, str]:
     env = os.environ.copy()
+    # Kaggle CLI needs only its own API credential. Never delegate identity-state
+    # authentication or encryption keys to an unrelated child process.
     env.pop("ELIA_CHECKPOINT_KEY", None)
+    env.pop("ELIA_CHECKPOINT_ENCRYPTION_KEY", None)
+    env.pop("ELIA_CHECKPOINT_REQUIRE_ENCRYPTION", None)
     return env
 
 
@@ -44,16 +49,25 @@ def command(args: list[str]) -> None:
         env=_kaggle_child_env(),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(args[:4])}\n{result.stdout[-6000:]}")
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {' '.join(args[:4])}\n{result.stdout[-6000:]}"
+        )
     if result.stdout:
         print(result.stdout.rstrip())
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Create the first ELIA private Kaggle state bundle without GPU")
+    parser = argparse.ArgumentParser(
+        description="Create the first encrypted ELIA private Kaggle state bundle without GPU"
+    )
     parser.add_argument("--config", default="config/genesis.yaml")
     parser.add_argument("--dataset", required=True, help="Kaggle dataset id owner/dataset-slug")
     parser.add_argument("--output", default=".bootstrap/elia-wild-state")
+    parser.add_argument(
+        "--trust-anchor",
+        default=str(default_anchor_path()),
+        help="Durable relay-host rollback anchor kept outside the Kaggle Dataset",
+    )
     parser.add_argument(
         "--create-dataset",
         action="store_true",
@@ -69,9 +83,12 @@ def main() -> None:
     key = os.getenv("ELIA_CHECKPOINT_KEY", "").strip()
     if len(key) < 16:
         raise RuntimeError("ELIA_CHECKPOINT_KEY must be set to a secret of at least 16 characters")
+    if not os.getenv("ELIA_CHECKPOINT_ENCRYPTION_KEY", "").strip():
+        raise RuntimeError(
+            "ELIA_CHECKPOINT_ENCRYPTION_KEY must be set to a base64-encoded 32-byte key"
+        )
 
-    repo_root = Path(__file__).resolve().parents[1]
-    config = load_config(repo_root / args.config)
+    config = load_config(args.config)
     identity = IdentityBundle.load(
         config.subject_core_path,
         config.continuity_constitution_path,
@@ -137,7 +154,9 @@ def main() -> None:
                 "No real model inference or cross-machine continuity has occurred yet."
             ],
         )
-        _, self_model_fp = identity_store.record_self_model(snapshot, source="genesis-bootstrap")
+        _, self_model_fp = identity_store.record_self_model(
+            snapshot, source="genesis-bootstrap"
+        )
         memory.set_meta("self_model_fingerprint", self_model_fp)
         identity_store.record_lineage(
             event="genesis_seed",
@@ -146,7 +165,7 @@ def main() -> None:
             brain_backend=config.brain.backend,
             model_id=config.brain.model_id,
             identity_fingerprint=identity.fingerprint,
-            note="Zero-GPU initial identity seed before first authenticated checkpoint.",
+            note="Zero-GPU initial identity seed before first encrypted checkpoint.",
         )
         chronicle.append(
             "GENESIS_SEED",
@@ -171,17 +190,31 @@ def main() -> None:
             config.identity_name,
             key.encode("utf-8"),
             identity_fingerprint=identity.fingerprint,
+            require_encryption=True,
         ).export(output / CHECKPOINT_NAME)
 
     write_digest(output / DIGEST_NAME, info.digest)
     transport = mark_success(TransportState(), info.digest, info.counter)
-    write_transport_state(output / TRANSPORT_NAME, transport)
+    write_transport_state(
+        output / TRANSPORT_NAME,
+        transport,
+        key=key,
+        require_auth=True,
+    )
+    anchor_path = Path(args.trust_anchor).expanduser().resolve()
+    anchor = WakeTrustAnchorStore(
+        anchor_path,
+        key=key.encode("utf-8"),
+        identity_name=config.identity_name,
+        state_dataset=args.dataset,
+    ).initialize(counter=info.counter, digest=info.digest)
+
     metadata = {
-        "title": "ELIA WILD Private State",
+        "title": "ELIA WILD Private Encrypted State",
         "id": args.dataset,
         "licenses": [{"name": "copyright-authors"}],
         "description": (
-            "Private operational checkpoint transport for the ELIA WILD experiment. "
+            "Private encrypted operational checkpoint transport for the ELIA WILD experiment. "
             "Contains authenticated identity state, not public training data."
         ),
     }
@@ -202,6 +235,9 @@ def main() -> None:
                 "identity_fingerprint": identity.fingerprint,
                 "self_model_fingerprint": self_model_fp,
                 "private_by_default": True,
+                "encrypted_at_rest": True,
+                "external_trust_anchor": str(anchor_path),
+                "trust_anchor_counter": anchor.counter,
             },
             ensure_ascii=False,
             indent=2,

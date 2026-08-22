@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from .epistemic import CognitiveBiographyStore, CognitiveOrganSpec, EpistemicCortex
 from .epistemic_views import EpistemicViewStore, EvidenceViewProjector, ResilientEpistemicCortex
 

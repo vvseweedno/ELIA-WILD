@@ -4,7 +4,6 @@ import argparse
 from dataclasses import asdict, dataclass
 import json
 import os
-from pathlib import Path
 from typing import Any
 
 from .config import Config, load_config

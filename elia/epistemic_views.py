@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .canonical import canonical_json
 from .epistemic import (
     CognitiveBiographyStore,
-    CognitiveOrganSpec,
     EpistemicAdjudication,
     EpistemicCortex,
     EpistemicPacket,
@@ -21,7 +22,7 @@ from .provider_context import provider_context
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return canonical_json(value)
 
 
 def _digest(value: Any) -> str:
@@ -33,7 +34,9 @@ def _bounded(value: Any, *, depth: int = 0) -> Any:
         return str(value)[:500]
     if isinstance(value, str):
         return value[:1800]
-    if isinstance(value, (int, float, bool)) or value is None:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else "[NONFINITE_VALUE_REJECTED]"
+    if isinstance(value, (int, bool)) or value is None:
         return value
     if isinstance(value, list):
         return [_bounded(item, depth=depth + 1) for item in value[:12]]
@@ -228,7 +231,12 @@ class EpistemicViewStore:
 
 
 class ResilientEpistemicCortex(EpistemicCortex):
-    """Epistemic Cortex with different evidence views and graceful degradation."""
+    """Epistemic Cortex with differentiated views and explicit quorum failure.
+
+    A configured five-organ deep council is not silently re-labelled as a valid
+    two-organ council after provider failures. Partial packets remain inspectable, but
+    no synthesis is promoted unless the full selected quorum completed.
+    """
 
     MIN_QUORUM = 2
 
@@ -269,6 +277,7 @@ class ResilientEpistemicCortex(EpistemicCortex):
             }
 
         selected = self.select_organs(context)
+        required_quorum = max(self.MIN_QUORUM, len(selected))
         public_digest = _digest(provider_context(context))
         question = self._question(context)
         executive = context.get("executive") or {}
@@ -309,10 +318,10 @@ class ResilientEpistemicCortex(EpistemicCortex):
                 failures.append({"organ_id": spec.id, "error": error})
 
         degraded = bool(failures)
-        if len(packets) < self.MIN_QUORUM:
+        if len(packets) < required_quorum:
             adjudication = self._fallback_adjudication(
                 packets,
-                f"only {len(packets)} valid organ packet(s) remained below minimum quorum {self.MIN_QUORUM}",
+                f"only {len(packets)} valid organ packet(s) completed the configured quorum of {required_quorum}",
             )
             degraded = True
         else:
@@ -342,6 +351,12 @@ class ResilientEpistemicCortex(EpistemicCortex):
             "enabled": True,
             "triggered": True,
             "degraded": degraded,
+            "required_quorum": required_quorum,
+            "achieved_quorum": len(packets),
+            "quorum_satisfied": len(packets) >= required_quorum,
+            "adjudication_succeeded": bool(
+                len(packets) >= required_quorum and not degraded
+            ),
             "session_id": session_id,
             "selected_organs": [spec.id for spec in selected],
             "successful_organs": [packet.organ_id for packet in packets],

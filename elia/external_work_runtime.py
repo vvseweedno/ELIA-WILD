@@ -15,9 +15,16 @@ class ExternalWorkOrganismRuntime(ResourceOrganismRuntime):
     choose a configured port/work item, but it cannot choose arbitrary MCP server/tool
     names or mark lifecycle transitions by narration. The port itself records observed
     submission/outcome evidence before Resource Ecology advances.
+
+    Genesis 1.7 adds an explicit reconciliation read for ambiguous submission intents;
+    ordinary `submit_work` never blindly retries a `sending/indeterminate` remote effect.
     """
 
-    WORK_PORT_CAPABILITIES = {"submit_work", "check_work_outcome"}
+    WORK_PORT_CAPABILITIES = {
+        "submit_work",
+        "check_work_outcome",
+        "reconcile_work_submission",
+    }
 
     def __init__(
         self,
@@ -39,8 +46,6 @@ class ExternalWorkOrganismRuntime(ResourceOrganismRuntime):
         base = super().capability_state()
         catalog = dict(base["catalog"])
         catalog.update(self.work_ports.catalog())
-        # Recompute health against the full catalog so Executive/self-model/MCP status
-        # cannot disagree about a port capability merely because it is not ToolRegistry-owned.
         health = self.memory.capability_health_all(list(catalog), window=20)
         return {"catalog": catalog, "health": health}
 
@@ -88,6 +93,11 @@ class ExternalWorkOrganismRuntime(ResourceOrganismRuntime):
             error=result.error or "",
         )
         return result
+
+    def _after_transition_rollback(self) -> None:
+        """Repair Resource Ecology from safety-preserved work-port outbox state."""
+        self.work_ports._recover_interrupted_intents()
+        self.work_ports._reconcile_local_projection()
 
     def cycle(self) -> dict[str, Any]:
         report = super().cycle()

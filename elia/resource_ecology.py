@@ -9,6 +9,7 @@ import sqlite3
 from typing import Any
 
 from .economy import EconomyStore, Opportunity
+from .sqlite_utils import inserted_row_id
 
 
 def _now() -> str:
@@ -23,6 +24,8 @@ def _clean(value: Any, *, field: str, maximum: int = 128) -> str:
 
 
 def _finite_nonnegative(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be numeric")
     number = float(value)
     if not math.isfinite(number) or number < 0:
         raise ValueError(f"{field} must be a finite non-negative number")
@@ -30,10 +33,18 @@ def _finite_nonnegative(value: Any, *, field: str) -> float:
 
 
 def _probability(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be numeric")
     number = float(value)
-    if not math.isfinite(number):
-        raise ValueError(f"{field} must be finite")
-    return max(0.0, min(1.0, number))
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise ValueError(f"{field} must be finite and within [0, 1]")
+    return number
+
+
+def _finite_result(value: float, *, field: str) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"{field} exceeds the finite numeric range")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +98,14 @@ class ResourceCandidate:
     opportunity: Opportunity
     profile: ResourceProfile
     bottleneck_match: bool
+    effective_success_probability: float
     expected_resource_amount: float
-    expected_resource_per_gpu_hour: float
+    expected_resource_per_gpu_hour: float | None
     expected_runway_gain_days: float | None
+    expected_net_value: float
+    expected_net_value_unit: str
+    expected_net_value_per_gpu_hour: float | None
+    valuation_assumption: str
     work_items: tuple[WorkItem, ...]
 
     def as_dict(self) -> dict[str, Any]:
@@ -97,9 +113,18 @@ class ResourceCandidate:
             "opportunity": self.opportunity.as_dict(),
             "resource_profile": self.profile.as_dict(),
             "bottleneck_match": self.bottleneck_match,
+            "effective_success_probability": self.effective_success_probability,
             "expected_resource_amount": self.expected_resource_amount,
+            "expected_resource_key": {
+                "asset": self.profile.target_asset,
+                "unit": self.profile.target_unit,
+            },
             "expected_resource_per_gpu_hour": self.expected_resource_per_gpu_hour,
             "expected_runway_gain_days": self.expected_runway_gain_days,
+            "expected_net_value": self.expected_net_value,
+            "expected_net_value_unit": self.expected_net_value_unit,
+            "expected_net_value_per_gpu_hour": self.expected_net_value_per_gpu_hour,
+            "valuation_assumption": self.valuation_assumption,
             "work_items": [item.as_dict() for item in self.work_items],
         }
 
@@ -205,9 +230,17 @@ class ResourceEcologyStore:
             updated_at=str(row["updated_at"]),
             target_asset=str(row["target_asset"]),
             target_unit=str(row["target_unit"]),
-            target_amount=float(row["target_amount"]),
-            eligibility_confidence=float(row["eligibility_confidence"]),
-            evidence_quality=float(row["evidence_quality"]),
+            target_amount=_finite_nonnegative(
+                row["target_amount"], field="persisted target_amount"
+            ),
+            eligibility_confidence=_probability(
+                row["eligibility_confidence"],
+                field="persisted eligibility_confidence",
+            ),
+            evidence_quality=_probability(
+                row["evidence_quality"],
+                field="persisted evidence_quality",
+            ),
             evidence=str(row["evidence"]),
             blockers=blockers,
             source=str(row["source"]),
@@ -224,7 +257,10 @@ class ResourceEcologyStore:
             objective=str(row["objective"]),
             deliverable_spec=str(row["deliverable_spec"]),
             acceptance_criteria=str(row["acceptance_criteria"]),
-            estimated_gpu_hours=float(row["estimated_gpu_hours"]),
+            estimated_gpu_hours=_finite_nonnegative(
+                row["estimated_gpu_hours"],
+                field="persisted estimated_gpu_hours",
+            ),
             artifact_path=(str(row["artifact_path"]) if row["artifact_path"] else None),
             submission_observation_id=(
                 int(row["submission_observation_id"])
@@ -389,7 +425,7 @@ class ResourceEcologyStore:
                     source,
                 ),
             )
-            work_id = int(cur.lastrowid)
+            work_id = inserted_row_id(cur, operation="resource work item insert")
             conn.execute(
                 """
                 INSERT INTO ecology_work_events(work_item_id, timestamp, event, evidence)
@@ -660,8 +696,66 @@ class ResourceEcologyEngine:
         bottleneck: dict[str, Any] | None,
         work_items: list[WorkItem],
     ) -> ResourceCandidate:
-        expected_amount = profile.target_amount * opportunity.probability
-        expected_per_gpu = expected_amount / max(opportunity.estimated_gpu_hours, 0.05)
+        target_amount = _finite_nonnegative(
+            profile.target_amount,
+            field="profile target_amount",
+        )
+        success_probability = _probability(
+            opportunity.probability,
+            field="opportunity probability",
+        )
+        eligibility_probability = _probability(
+            profile.eligibility_confidence,
+            field="profile eligibility_confidence",
+        )
+        gpu_hours = _finite_nonnegative(
+            opportunity.estimated_gpu_hours,
+            field="opportunity estimated_gpu_hours",
+        )
+        value = _finite_nonnegative(
+            opportunity.estimated_value,
+            field="opportunity estimated_value",
+        )
+        cost = _finite_nonnegative(
+            opportunity.estimated_cost_value,
+            field="opportunity estimated_cost_value",
+        )
+
+        # The opportunity probability is interpreted as P(success | eligible), while
+        # profile eligibility_confidence estimates P(eligible). Their product is then
+        # P(success and eligible); evidence_quality remains a separate epistemic score
+        # rather than being mislabelled as another independent event probability.
+        effective_probability = _finite_result(
+            success_probability * eligibility_probability,
+            field="effective success probability",
+        )
+        expected_amount = _finite_result(
+            target_amount * effective_probability,
+            field="expected resource amount",
+        )
+        expected_net_value = _finite_result(
+            value * effective_probability - cost,
+            field="expected net value",
+        )
+        # Per-compute ratios are undefined at exactly zero estimated GPU hours. The
+        # previous arbitrary 0.05-hour denominator made a unit-free smoothing constant
+        # look like measured efficiency.
+        expected_per_gpu = (
+            _finite_result(
+                expected_amount / gpu_hours,
+                field="expected resource per GPU hour",
+            )
+            if gpu_hours > 0.0
+            else None
+        )
+        expected_net_per_gpu = (
+            _finite_result(
+                expected_net_value / gpu_hours,
+                field="expected net value per GPU hour",
+            )
+            if gpu_hours > 0.0
+            else None
+        )
         bottleneck_match = bool(
             bottleneck
             and profile.target_asset == str(bottleneck.get("asset", ""))
@@ -669,16 +763,31 @@ class ResourceEcologyEngine:
         )
         runway_gain = None
         if bottleneck_match:
-            daily_burn = float((bottleneck or {}).get("verified_daily_burn", 0.0) or 0.0)
+            daily_burn = _finite_nonnegative(
+                (bottleneck or {}).get("verified_daily_burn", 0.0) or 0.0,
+                field="bottleneck verified_daily_burn",
+            )
             if daily_burn > 0:
-                runway_gain = expected_amount / daily_burn
+                runway_gain = _finite_result(
+                    expected_amount / daily_burn,
+                    field="expected runway gain days",
+                )
         return ResourceCandidate(
             opportunity=opportunity,
             profile=profile,
             bottleneck_match=bottleneck_match,
+            effective_success_probability=effective_probability,
             expected_resource_amount=expected_amount,
             expected_resource_per_gpu_hour=expected_per_gpu,
             expected_runway_gain_days=runway_gain,
+            expected_net_value=expected_net_value,
+            expected_net_value_unit=opportunity.unit,
+            expected_net_value_per_gpu_hour=expected_net_per_gpu,
+            valuation_assumption=(
+                "opportunity.probability=P(success|eligible); "
+                "profile.eligibility_confidence=P(eligible); cost is incurred regardless of success; "
+                "per-GPU ratios are undefined when estimated_gpu_hours=0"
+            ),
             work_items=tuple(work_items),
         )
 
@@ -705,9 +814,12 @@ class ResourceEcologyEngine:
         result.sort(
             key=lambda item: (
                 0 if item.bottleneck_match else 1,
-                -item.profile.qualification_score,
+                0 if item.expected_net_value > 0.0 else 1,
                 -(item.expected_runway_gain_days or 0.0),
-                -item.expected_resource_per_gpu_hour,
+                0 if item.opportunity.estimated_gpu_hours == 0.0 else 1,
+                -(item.expected_resource_per_gpu_hour or 0.0),
+                -(item.expected_net_value_per_gpu_hour or 0.0),
+                -item.profile.qualification_score,
                 item.opportunity.id,
             )
         )
@@ -737,6 +849,8 @@ class ResourceEcologyEngine:
             "epistemic_rule": (
                 "Opportunity resource profiles are estimates, not receipts. Only exact "
                 "(asset, unit) matches can be ranked as bottleneck relief, and only a "
-                "linked cryptographically verified positive resource_event changes verified runway."
+                "linked cryptographically verified positive resource_event changes verified runway. "
+                "Expected value includes eligibility and unconditional estimated cost under the "
+                "stated conditional-probability model; evidence quality is reported separately."
             ),
         }

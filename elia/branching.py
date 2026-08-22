@@ -5,16 +5,19 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 from typing import Any
 
 from . import __version__
+from .checkpoint import recover_interrupted_restore
 from .chronicle import Chronicle
 from .config import Config, load_config
 from .identity import IdentityBundle, IdentityStore
 from .memory import MemoryStore
+from .transition_kernel import AcceptedTransitionGuard, StateWriterLock
 
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -27,6 +30,8 @@ class BranchForkReport:
     identity_fingerprint: str
     lineage_event_id: int
     parent_checkpoint_digest: str | None
+    parent_chronicle_seq: int
+    parent_chronicle_hash: str
     archived_crc_path: str | None
     archived_crc_sha256: str | None
     created_at: str
@@ -36,24 +41,39 @@ class BranchForkReport:
 
 
 class BranchManager:
-    """Create an explicit identity branch while preserving verifiable ancestry.
+    """Create an explicit branch as one crash-recoverable accepted transition.
 
-    Forking changes branch lineage, not the immutable Subject Core. The parent branch's
-    last healthy CRC is archived and removed from the active baseline so the child
-    branch establishes its own continuity baseline on the next vital-sign check.
+    The parent healthy CRC is moved atomically into the ancestry archive before branch
+    authority changes. SQLite lineage/meta plus BRANCH_FORK Chronicle evidence are then
+    wrapped by AcceptedTransitionGuard: exception/process death restores the old branch
+    and Chronicle. A missing active baseline is safe; VitalSigns establishes a new one
+    only after the recovered/committed branch is known.
     """
 
     def __init__(self, config: Config):
         self.config = config
-        self.state_dir = config.runtime.state_dir
+        self.state_dir = config.runtime.state_dir.resolve()
         self.database = self.state_dir / "memory.sqlite3"
-        self.memory = MemoryStore(self.database)
-        self.identity_store = IdentityStore(self.database)
+        # A checkpoint restore replaces the whole state directory. Finish/revert that
+        # operation before Chronicle/SQLite constructors can initialize a half-swapped
+        # directory, and hold the same external writer inode across both recoveries.
+        with StateWriterLock(self.state_dir):
+            recover_interrupted_restore(self.state_dir, lock_held=True)
+            self.chronicle = Chronicle(self.state_dir / "chronicle.jsonl")
+            AcceptedTransitionGuard.recover_incomplete(
+                self.state_dir,
+                self.chronicle,
+                lock_held=True,
+            )
+            self.memory = MemoryStore(self.database)
+            persisted = self.memory.get_meta("branch_id")
+            if persisted:
+                self.config.branch_id = str(persisted)
+            self.identity_store = IdentityStore(self.database)
         self.identity = IdentityBundle.load(
             config.subject_core_path,
             config.continuity_constitution_path,
         )
-        self.chronicle = Chronicle(self.state_dir / "chronicle.jsonl")
 
     def current_branch(self) -> str:
         persisted = self.memory.get_meta("branch_id")
@@ -61,6 +81,21 @@ class BranchManager:
             return str(persisted)
         head = self.identity_store.last_lineage()
         return head.branch_id if head else self.config.branch_id
+
+    def _archive_parent_crc(self, old_branch: str, new_branch: str) -> tuple[Path | None, str | None]:
+        organism_dir = self.state_dir / "workspace" / ".organism"
+        baseline = organism_dir / "last-healthy-crc.json"
+        if not baseline.is_file():
+            return None, None
+        archive_dir = organism_dir / "branch-ancestors"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        archived = archive_dir / f"{old_branch}--to--{new_branch}--{stamp}.crc.json"
+        # os.replace is atomic within this filesystem: there is never a stale parent
+        # baseline active after branch mutation starts.
+        os.replace(baseline, archived)
+        digest = sha256(archived.read_bytes()).hexdigest()
+        return archived, digest
 
     def fork(self, new_branch: str, *, note: str) -> BranchForkReport:
         new_branch = str(new_branch).strip()
@@ -89,60 +124,77 @@ class BranchManager:
         if not lineage_valid:
             raise RuntimeError(f"cannot fork invalid lineage: {lineage_error}")
 
+        parent_chronicle_seq, parent_chronicle_hash = self.chronicle.head()
+        checkpoint_digest = self.memory.get_meta("checkpoint_digest")
         organism_dir = self.state_dir / "workspace" / ".organism"
         baseline = organism_dir / "last-healthy-crc.json"
+        vitals_path = organism_dir / "vitals.json"
         archived_path: Path | None = None
         archived_sha: str | None = None
-        if baseline.is_file():
-            archive_dir = organism_dir / "branch-ancestors"
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-            archived_path = archive_dir / f"{old_branch}--to--{new_branch}--{stamp}.crc.json"
-            shutil.copy2(baseline, archived_path)
-            archived_sha = sha256(archived_path.read_bytes()).hexdigest()
 
-        checkpoint_digest = self.memory.get_meta("checkpoint_digest")
-        event_id = self.identity_store.record_lineage(
-            event="fork",
-            branch_id=new_branch,
-            body_version=self.memory.get_meta("body_version", __version__) or __version__,
-            brain_backend=self.config.brain.backend,
-            model_id=self.config.brain.model_id,
-            identity_fingerprint=self.identity.fingerprint,
-            checkpoint_digest=checkpoint_digest,
-            parent_checkpoint_digest=checkpoint_digest,
-            note=f"forked from branch {old_branch}: {note}",
-        )
-        self.memory.set_meta("branch_id", new_branch)
-        self.memory.set_meta("branch_parent_id", old_branch)
-        self.memory.set_meta("branch_fork_lineage_event", str(event_id))
-        self.memory.set_meta("branch_fork_note", note)
+        try:
+            with AcceptedTransitionGuard(self.state_dir, self.chronicle) as transition:
+                archived_path, archived_sha = self._archive_parent_crc(old_branch, new_branch)
+                event_id = self.identity_store.record_lineage(
+                    event="fork",
+                    branch_id=new_branch,
+                    body_version=self.memory.get_meta("body_version", __version__) or __version__,
+                    brain_backend=self.config.brain.backend,
+                    model_id=self.config.brain.model_id,
+                    identity_fingerprint=self.identity.fingerprint,
+                    checkpoint_digest=checkpoint_digest,
+                    parent_checkpoint_digest=checkpoint_digest,
+                    note=(
+                        f"forked from branch {old_branch}; parent Chronicle "
+                        f"{parent_chronicle_seq}:{parent_chronicle_hash}: {note}"
+                    ),
+                )
+                self.memory.set_meta("branch_id", new_branch)
+                self.memory.set_meta("branch_parent_id", old_branch)
+                self.memory.set_meta("branch_fork_lineage_event", str(event_id))
+                self.memory.set_meta("branch_fork_note", note)
+                self.memory.set_meta("branch_parent_chronicle_seq", str(parent_chronicle_seq))
+                self.memory.set_meta("branch_parent_chronicle_hash", parent_chronicle_hash)
 
-        payload = {
-            "from_branch": old_branch,
-            "to_branch": new_branch,
-            "identity_fingerprint": self.identity.fingerprint,
-            "lineage_event_id": event_id,
-            "parent_checkpoint_digest": checkpoint_digest,
-            "archived_crc_path": (
-                str(archived_path.relative_to(self.state_dir)) if archived_path else None
-            ),
-            "archived_crc_sha256": archived_sha,
-            "note": note,
-        }
-        self.chronicle.append("BRANCH_FORK", payload)
+                payload = {
+                    "from_branch": old_branch,
+                    "to_branch": new_branch,
+                    "identity_fingerprint": self.identity.fingerprint,
+                    "lineage_event_id": event_id,
+                    "parent_checkpoint_digest": checkpoint_digest,
+                    "parent_chronicle_seq": parent_chronicle_seq,
+                    "parent_chronicle_hash": parent_chronicle_hash,
+                    "archived_crc_path": (
+                        str(archived_path.relative_to(self.state_dir))
+                        if archived_path
+                        else None
+                    ),
+                    "archived_crc_sha256": archived_sha,
+                    "note": note,
+                }
+                self.chronicle.append("BRANCH_FORK", payload)
+                transition.accept()
+        except BaseException:
+            # Synchronous rollback restores DB/Chronicle. If we already moved the
+            # parent CRC, put it back when possible; process-death leaves no active
+            # baseline, which is fail-safe and will be re-established after recovery.
+            if archived_path is not None and archived_path.is_file() and not baseline.exists():
+                try:
+                    shutil.copy2(archived_path, baseline)
+                except OSError:
+                    pass
+            raise
 
-        # The child branch must establish its own baseline. Parent evidence remains
-        # archived and longitudinal observations remain in SQLite as ancestry.
-        baseline.unlink(missing_ok=True)
-        (organism_dir / "vitals.json").unlink(missing_ok=True)
-
+        vitals_path.unlink(missing_ok=True)
+        self.config.branch_id = new_branch
         return BranchForkReport(
             from_branch=old_branch,
             to_branch=new_branch,
             identity_fingerprint=self.identity.fingerprint,
             lineage_event_id=event_id,
             parent_checkpoint_digest=checkpoint_digest,
+            parent_chronicle_seq=parent_chronicle_seq,
+            parent_chronicle_hash=parent_chronicle_hash,
             archived_crc_path=str(archived_path) if archived_path else None,
             archived_crc_sha256=archived_sha,
             created_at=datetime.now(timezone.utc).isoformat(),

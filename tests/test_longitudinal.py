@@ -82,3 +82,27 @@ def test_longitudinal_series_preserves_falsification_events(tmp_path: Path) -> N
     assert summary["broken_count"] == 1
     assert summary["healthy_fraction"] == 0.5
     assert summary["falsification_events"][0]["critical_failures"] == ["chronicle moved backward"]
+
+
+def test_longitudinal_dedup_ignores_crc_poll_timestamp_and_derived_fingerprint(tmp_path: Path) -> None:
+    store = LongitudinalContinuityStore(tmp_path / "memory.sqlite3")
+    first_capsule = capsule("timestamp-derived-a")
+    first_capsule["created_at"] = "2026-08-18T00:00:00+00:00"
+    second_capsule = capsule("timestamp-derived-b")
+    second_capsule["created_at"] = "2026-08-18T00:01:00+00:00"
+
+    first = store.record(
+        capsule=first_capsule,
+        organism=organism("arch"),
+        comparison=None,
+        healthy=True,
+    )
+    duplicate = store.record(
+        capsule=second_capsule,
+        organism=organism("arch"),
+        comparison=None,
+        healthy=True,
+    )
+
+    assert duplicate.id == first.id
+    assert store.summary()["behavioral_identity_evaluated"] is False

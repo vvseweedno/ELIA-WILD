@@ -90,10 +90,65 @@ def test_only_exact_asset_and_unit_match_counts_as_bottleneck_relief(tmp_path: P
     candidates = snapshot["candidates"]
     assert candidates[0]["opportunity"]["id"] == usd_id
     assert candidates[0]["bottleneck_match"] is True
-    assert candidates[0]["expected_runway_gain_days"] == pytest.approx(2.0)
+    assert candidates[0]["effective_success_probability"] == pytest.approx(0.4)
+    assert candidates[0]["expected_runway_gain_days"] == pytest.approx(1.6)
+    assert candidates[0]["expected_net_value"] == pytest.approx(35.0)
     rub = next(item for item in candidates if item["opportunity"]["id"] == rub_id)
     assert rub["bottleneck_match"] is False
     assert rub["expected_runway_gain_days"] is None
+
+
+def test_zero_gpu_estimate_has_no_invented_per_gpu_denominator(tmp_path: Path) -> None:
+    db = tmp_path / "state.sqlite3"
+    economy = EconomyStore(db)
+    ecology = ResourceEcologyStore(db)
+    opportunity_id = economy.create_opportunity(
+        title="No-compute credit",
+        kind="grant",
+        source_url="https://example.com/grant",
+        evidence="Public grant terms.",
+        estimated_value=10.0,
+        estimated_cost_value=0.0,
+        unit="VALUE_UNIT",
+        probability=0.5,
+        estimated_gpu_hours=0.0,
+        source="test",
+    )
+    ecology.upsert_profile(
+        opportunity_id=opportunity_id,
+        target_asset="api",
+        target_unit="CREDIT",
+        target_amount=20.0,
+        eligibility_confidence=0.5,
+        evidence_quality=0.5,
+        evidence="Eligibility remains estimated.",
+    )
+
+    candidate = ResourceEcologyEngine(db).candidates({})[0].as_dict()
+
+    assert candidate["expected_resource_amount"] == pytest.approx(5.0)
+    assert candidate["expected_resource_per_gpu_hour"] is None
+    assert candidate["expected_net_value_per_gpu_hour"] is None
+
+
+def test_resource_profile_rejects_probability_outside_unit_interval(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "state.sqlite3"
+    economy = EconomyStore(db)
+    ecology = ResourceEcologyStore(db)
+    opportunity_id = _opportunity(economy)
+
+    with pytest.raises(ValueError, match=r"within \[0, 1\]"):
+        ecology.upsert_profile(
+            opportunity_id=opportunity_id,
+            target_asset="cash",
+            target_unit="USD",
+            target_amount=100.0,
+            eligibility_confidence=1.1,
+            evidence_quality=0.5,
+            evidence="Out-of-range fixture.",
+        )
 
 
 def test_work_requires_profile_and_staged_delivery_is_not_submission(tmp_path: Path) -> None:

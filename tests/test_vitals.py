@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
+from elia.chronicle import Chronicle
 from elia.config import load_config
+from elia.memory import MemoryStore
 from elia.vitals import VitalSigns
 
 
@@ -56,3 +60,44 @@ def test_vitals_are_model_independent(tmp_path: Path) -> None:
     assert report.organism["healthy"] is True
     assert report.crc["identity_id"] == "elia-wild"
     assert "prototype" in report.research_maturity
+
+
+def test_vitals_recovers_interrupted_checkpoint_restore_before_opening_stores(
+    tmp_path: Path,
+) -> None:
+    config = config_for(tmp_path)
+    state = config.runtime.state_dir
+    memory = MemoryStore(state / "memory.sqlite3")
+    memory.set_meta("branch_id", "accepted-before-restore-crash")
+    Chronicle(state / "chronicle.jsonl").append("BOOT", {"accepted": True})
+
+    backup = state.parent / f".{state.name}.backup-test"
+    staging = state.parent / f".{state.name}.restore-test"
+    os.replace(state, backup)
+    staging.mkdir()
+    (staging / "unaccepted.txt").write_text("replacement", encoding="utf-8")
+    control = state.parent / f".{state.name}.checkpoint-control"
+    control.mkdir()
+    (control / "restore.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state_dir": str(state.resolve()),
+                "staging": str(staging.resolve()),
+                "backup": str(backup.resolve()),
+                "had_original": True,
+                "status": "old_moved",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monitor = VitalSigns(config)
+
+    assert monitor.checkpoint_restore_recovered is True
+    assert monitor.transition_recovery.recovered is False
+    assert MemoryStore(state / "memory.sqlite3").get_meta("branch_id") == (
+        "accepted-before-restore-crash"
+    )
+    assert not staging.exists()
+    assert not (control / "restore.json").exists()

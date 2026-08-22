@@ -10,8 +10,8 @@ from typing import Any
 from .checkpoint import CheckpointError, CheckpointManager
 from .chronicle import Chronicle
 from .config import load_config
+from .continuity_runtime import ELIARuntime
 from .economy import EconomyStore
-from .epistemic_runtime import EpistemicOrganismRuntime
 from .epistemic_status import epistemic_status
 from .executive_status import executive_status_from_state
 from .homeostasis import HomeostasisEngine
@@ -81,7 +81,9 @@ def _checkpoint_manager(config, key_env: str) -> CheckpointManager:
     )
 
 
-def _maybe_auto_checkpoint(config, key_env: str, outcome: dict[str, Any]) -> dict[str, Any] | None:
+def _maybe_auto_checkpoint(
+    config, key_env: str, outcome: dict[str, Any]
+) -> dict[str, Any] | None:
     destination = config.runtime.auto_checkpoint_path
     if destination is None:
         return None
@@ -107,7 +109,9 @@ def _maybe_auto_checkpoint(config, key_env: str, outcome: dict[str, Any]) -> dic
     return {"ok": True, **info.as_dict()}
 
 
-def _status_physiology(config, tools: ToolRegistry) -> tuple[dict[str, Any], dict[str, Any]]:
+def _status_physiology(
+    config, tools: ToolRegistry
+) -> tuple[dict[str, Any], dict[str, Any]]:
     database = config.runtime.state_dir / "memory.sqlite3"
     metabolism = MetabolismEngine(
         database,
@@ -130,7 +134,11 @@ def main() -> None:
     state_dir = config.runtime.state_dir
     identity = _identity_bundle(config)
 
-    checkpoint_modes = [args.checkpoint_export, args.checkpoint_restore, args.checkpoint_inspect]
+    checkpoint_modes = [
+        args.checkpoint_export,
+        args.checkpoint_restore,
+        args.checkpoint_inspect,
+    ]
     if sum(value is not None for value in checkpoint_modes) > 1:
         raise SystemExit("choose only one checkpoint operation at a time")
 
@@ -142,9 +150,19 @@ def main() -> None:
                 expected_digest=args.expected_checkpoint_digest,
             )
         except CheckpointError as exc:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2
+                )
+            )
             raise SystemExit(2) from exc
-        print(json.dumps({"ok": True, "restored": info.as_dict()}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"ok": True, "restored": info.as_dict()},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
 
     if args.checkpoint_inspect:
@@ -155,9 +173,19 @@ def main() -> None:
                 expected_digest=args.expected_checkpoint_digest,
             )
         except CheckpointError as exc:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2
+                )
+            )
             raise SystemExit(2) from exc
-        print(json.dumps({"ok": True, "checkpoint": info.as_dict()}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"ok": True, "checkpoint": info.as_dict()},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
 
     if args.verify:
@@ -197,11 +225,15 @@ def main() -> None:
         skills = SkillRegistry(config.skills_dir)
         capability_catalog = dict(tools.catalog())
         capability_catalog.update(work_ports.catalog())
-        capability_health = memory.capability_health_all(list(capability_catalog), window=20)
+        capability_health = memory.capability_health_all(
+            list(capability_catalog), window=20
+        )
         skill_state = skills.prompt_catalog(capability_catalog, capability_health)
         economy = economy_store.snapshot(16)
         metabolism, homeostasis = _status_physiology(config, tools)
-        ecology_local = resource_ecology_status(config, metabolism_snapshot=metabolism, limit=16)
+        ecology_local = resource_ecology_status(
+            config, metabolism_snapshot=metabolism, limit=16
+        )
         ecology_public = public_resource_ecology(ecology_local)
         work_ports_public = public_work_port_state(work_ports.diagnostics())
         epistemic_public = epistemic_status(config)
@@ -210,7 +242,9 @@ def main() -> None:
         resources = executive_inputs.get("resources") or {}
         needs = list(executive_inputs.get("needs") or [])
         active_goals = memory.active_goals(16)
-        chronicle_valid, chronicle_error = Chronicle(state_dir / "chronicle.jsonl").verify()
+        chronicle_valid, chronicle_error = Chronicle(
+            state_dir / "chronicle.jsonl"
+        ).verify()
 
         anchor_path = state_dir / "checkpoint.anchor.json"
         anchor = None
@@ -233,7 +267,13 @@ def main() -> None:
             "last_drift_report": memory.get_meta("last_drift_report"),
         }
         if args.identity_report:
-            print(json.dumps({**identity_report, "vitals": vital_report.as_dict()}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {**identity_report, "vitals": vital_report.as_dict()},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             return
         incomplete = tools.state_bus.incomplete(32)
         print(
@@ -295,9 +335,19 @@ def main() -> None:
         try:
             info = manager.export(Path(args.checkpoint_export))
         except CheckpointError as exc:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2
+                )
+            )
             raise SystemExit(2) from exc
-        print(json.dumps({"ok": True, "checkpoint": info.as_dict()}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"ok": True, "checkpoint": info.as_dict()},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
 
     if not vital_report.healthy:
@@ -330,10 +380,13 @@ def main() -> None:
         )
         raise SystemExit(2 if preflight.mode == "halt" else 0)
 
-    runtime = EpistemicOrganismRuntime(config)
+    runtime = ELIARuntime(config)
     outcome = runtime.run(cycles=args.cycles)
-    auto_checkpoint = _maybe_auto_checkpoint(config, args.checkpoint_key_env, outcome)
+    auto_checkpoint = _maybe_auto_checkpoint(
+        config, args.checkpoint_key_env, outcome
+    )
     output: dict[str, Any] = {
+        "runtime_class": type(runtime).__name__,
         "preflight": preflight.as_dict(),
         "vitals": vital_report.as_dict(),
         "outcome": outcome,
@@ -341,9 +394,16 @@ def main() -> None:
         "identity_fingerprint": runtime.identity.fingerprint,
         "self_model_fingerprint": runtime.memory.get_meta("self_model_fingerprint"),
         "executive_enabled": runtime.executive_enabled,
-        "resource_ecology": public_resource_ecology(runtime._resource_ecology_snapshot()),
+        "resource_ecology": public_resource_ecology(
+            runtime._resource_ecology_snapshot()
+        ),
         "work_ports": public_work_port_state(runtime.work_ports.diagnostics()),
         "epistemic_ecosystem": epistemic_status(config),
+        "transition_recovery": (
+            runtime._transition_recovery.as_dict()
+            if runtime._transition_recovery is not None
+            else None
+        ),
     }
     if auto_checkpoint is not None:
         output["auto_checkpoint"] = auto_checkpoint

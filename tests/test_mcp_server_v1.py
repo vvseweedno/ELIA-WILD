@@ -10,6 +10,7 @@ pytest.importorskip("mcp")
 
 from mcp import Client
 
+from elia import __version__
 from elia.mcp_server import build_mcp_server
 
 
@@ -142,7 +143,7 @@ def test_real_inprocess_mcp_server_exposes_sanitized_organism_port(monkeypatch, 
             text = getattr(resource.contents[0], "text", "")
             identity = json.loads(text)
             assert identity["identity_id"] == "elia-wild"
-            assert identity["body_version"].startswith("1.6.")
+            assert identity["body_version"] == __version__
 
             epistemic_resource = await client.read_resource("elia://epistemic")
             assert epistemic_resource.contents

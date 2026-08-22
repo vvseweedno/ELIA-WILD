@@ -9,18 +9,24 @@ from typing import Any
 from .brain import MockBrain
 from .checkpoint import CheckpointManager
 from .config import Config, load_config
-from .epistemic_runtime import EpistemicOrganismRuntime
+from .continuity_runtime import ELIARuntime
 from .epistemic_status import epistemic_status
 from .identity import IdentityBundle
 from .vitals import VitalSigns
 
 
-def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None = None) -> dict[str, Any]:
-    """Initialize/continue zero-GPU ELIA state and prove the Genesis 1.6 organism path.
+def bootstrap(
+    config: Config,
+    *,
+    cycles: int = 2,
+    checkpoint_path: Path | None = None,
+) -> dict[str, Any]:
+    """Initialize/continue zero-GPU ELIA state through the canonical ELIA production runtime.
 
-    Deterministic MockBrain exercises the production Epistemic runtime without loading
-    Qwen. Expensive multi-organ deliberation remains Executive-gated; external work
-    ports and network body organs remain disabled by default.
+    Deterministic MockBrain exercises the accepted-transition/continuity kernel plus
+    the full 1.6 ancestry without loading Qwen. Expensive epistemic deliberation stays
+    Executive-gated; external work ports and network body organs remain disabled by
+    default.
     """
 
     before = VitalSigns(config).check(persist=True)
@@ -32,11 +38,12 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
             "brain_backend_used": "none",
         }
 
-    runtime = EpistemicOrganismRuntime(config, brain=MockBrain())
+    runtime = ELIARuntime(config, brain=MockBrain())
     outcome = runtime.run(cycles=max(1, min(int(cycles), 16)))
     after = VitalSigns(config).check(persist=True)
     result: dict[str, Any] = {
         "ok": after.healthy,
+        "runtime_class": type(runtime).__name__,
         "identity_fingerprint": runtime.identity.fingerprint,
         "outcome": outcome,
         "vitals": after.as_dict(),
@@ -57,6 +64,11 @@ def bootstrap(config: Config, *, cycles: int = 2, checkpoint_path: Path | None =
         "causal_memory": runtime.tools.causal.snapshot(8),
         "digital_body": runtime.tools.body.diagnostics(),
         "state_bus_incomplete": runtime.tools.state_bus.incomplete(16),
+        "transition_recovery": (
+            runtime._transition_recovery.as_dict()
+            if runtime._transition_recovery is not None
+            else None
+        ),
     }
 
     if checkpoint_path is not None:

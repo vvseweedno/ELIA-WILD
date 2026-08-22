@@ -4,9 +4,26 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      initialize_anchor:
+        description: 'Seed the first external wake witness when no prior artifact exists'
+        required: false
+        type: boolean
+        default: false
+      reset_circuit:
+        description: 'Reset the launch circuit after operator diagnosis'
+        required: false
+        type: boolean
+        default: false
+      reset_reason:
+        description: 'Incident/change reference for the audited reset'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: elia-wild-wake-relay
@@ -14,7 +31,7 @@ concurrency:
 
 jobs:
   heartbeat:
-    if: ${{ vars.ELIA_WAKE_ENABLED == 'true' }}
+    if: ${{ vars.ELIA_WAKE_ENABLED == 'true' && github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -24,6 +41,9 @@ jobs:
       ELIA_KAGGLE_KERNEL_TIMEOUT: ${{ vars.ELIA_KAGGLE_KERNEL_TIMEOUT }}
       ELIA_WAKE_MAX_CYCLES: ${{ vars.ELIA_WAKE_MAX_CYCLES }}
       ELIA_REPO_REF: ${{ github.sha }}
+      ELIA_KAGGLE_TRUST_ANCHOR: ${{ runner.temp }}/elia-wake-anchor/kaggle-trust-anchor.json
+      ELIA_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      ELIA_REPOSITORY_ID: ${{ github.repository_id }}
     steps:
       - name: Checkout ELIA body
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -37,10 +57,100 @@ jobs:
           cache: pip
 
       - name: Install wake transport
-        run: python -m pip install -e . 'kaggle==2.2.4'
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -e . 'kaggle==2.2.4'
+
+      - name: Restore durable wake witness
+        id: restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ELIA_WAKE_TRUST_ANCHOR_SEED_B64: ${{ secrets.ELIA_WAKE_TRUST_ANCHOR_SEED_B64 }}
+          ALLOW_ANCHOR_INITIALIZATION: ${{ github.event_name == 'workflow_dispatch' && inputs.initialize_anchor == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ELIA_KAGGLE_TRUST_ANCHOR")"
+
+          ARTIFACT_CANDIDATES="$(
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=elia-wake-trust-anchor&per_page=100" \
+            | jq -r \
+                --arg branch "$ELIA_DEFAULT_BRANCH" \
+                --argjson repository_id "$ELIA_REPOSITORY_ID" \
+                '[.artifacts[]
+                  | select(.expired == false)
+                  | select(.size_in_bytes <= 65536)
+                  | select(.workflow_run.head_branch == $branch)
+                  | select(.workflow_run.head_repository_id == $repository_id)]
+                 | sort_by([.created_at, .id]) | reverse[]
+                 | [.id, .workflow_run.id] | @tsv'
+          )"
+
+          ARTIFACT_ID=''
+          while IFS=$'\t' read -r candidate_id run_id; do
+            [[ -n "$candidate_id" && -n "$run_id" ]] || continue
+            RUN_PATH="$(
+              gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+                --jq '.path'
+            )"
+            if [[ "$RUN_PATH" == '.github/workflows/wake.yml' ]]; then
+              ARTIFACT_ID="$candidate_id"
+              break
+            fi
+          done <<< "$ARTIFACT_CANDIDATES"
+
+          if [[ -n "$ARTIFACT_ID" ]]; then
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+              > "$RUNNER_TEMP/elia-wake-trust-anchor.zip"
+            mapfile -t archive_entries < <(
+              unzip -Z1 "$RUNNER_TEMP/elia-wake-trust-anchor.zip"
+            )
+            if [[ "${#archive_entries[@]}" -ne 1 \
+              || "${archive_entries[0]}" != 'kaggle-trust-anchor.json' ]]; then
+              echo 'Wake witness artifact has an unexpected archive layout.' >&2
+              exit 1
+            fi
+            unzip -p "$RUNNER_TEMP/elia-wake-trust-anchor.zip" \
+              'kaggle-trust-anchor.json' > "$ELIA_KAGGLE_TRUST_ANCHOR"
+          elif [[ "$ALLOW_ANCHOR_INITIALIZATION" == "true" ]]; then
+            if [[ -z "$ELIA_WAKE_TRUST_ANCHOR_SEED_B64" ]]; then
+              echo 'Explicit initialization requires secret ELIA_WAKE_TRUST_ANCHOR_SEED_B64.' >&2
+              exit 1
+            fi
+            printf '%s' "$ELIA_WAKE_TRUST_ANCHOR_SEED_B64" | base64 --decode > "$ELIA_KAGGLE_TRUST_ANCHOR"
+          else
+            echo 'No durable wake witness exists. Refusing scheduled bootstrap from Kaggle state.' >&2
+            echo 'Use workflow_dispatch initialize_anchor=true only with a trusted bootstrap seed.' >&2
+            exit 1
+          fi
+
+          test -s "$ELIA_KAGGLE_TRUST_ANCHOR"
+          test "$(wc -c < "$ELIA_KAGGLE_TRUST_ANCHOR")" -le 65536
 
       - name: Heartbeat
+        id: heartbeat
+        continue-on-error: true
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           ELIA_CHECKPOINT_KEY: ${{ secrets.ELIA_CHECKPOINT_KEY }}
+          ELIA_CHECKPOINT_ENCRYPTION_KEY: ${{ secrets.ELIA_CHECKPOINT_ENCRYPTION_KEY }}
+          ELIA_WAKE_RESET_AUTH: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_circuit == true && secrets.ELIA_WAKE_RESET_AUTH || '' }}
+          ELIA_WAKE_RESET_CIRCUIT: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_circuit == true }}
+          ELIA_WAKE_RESET_REASON: ${{ inputs.reset_reason }}
         run: python scripts/kaggle_wake.py
+
+      - name: Persist durable wake witness
+        if: ${{ always() && steps.restore.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: elia-wake-trust-anchor
+          path: ${{ env.ELIA_KAGGLE_TRUST_ANCHOR }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Propagate heartbeat failure
+        if: ${{ always() && steps.heartbeat.outcome == 'failure' }}
+        run: exit 1

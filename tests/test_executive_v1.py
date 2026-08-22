@@ -129,6 +129,35 @@ def test_low_compute_runway_forces_low_cognitive_tier() -> None:
     assert plan.cognitive_budget.allow_thinking is False
 
 
+def test_canonical_uncovered_obligation_name_enters_resource_mode() -> None:
+    context = _base_context()
+    context["needs"] = [
+        {
+            "name": "uncovered_essential_obligation",
+            "severity": 0.92,
+            "reason": "Cumulative verified cash flow is short.",
+            "response_hint": "Address the earliest deadline.",
+        }
+    ]
+    plan = ExecutiveController().plan(context)
+    assert plan.mode == "resource"
+    assert plan.focus.name == "uncovered_essential_obligation"
+
+
+def test_executive_ignores_unregistered_need_names() -> None:
+    context = _base_context()
+    context["needs"] = [
+        {
+            "name": "uncovered_obligation",
+            "severity": 1.0,
+            "reason": "legacy spelling",
+            "response_hint": "must not route",
+        }
+    ]
+    plan = ExecutiveController().plan(context)
+    assert plan.focus.name != "uncovered_obligation"
+
+
 def test_executive_store_records_and_resolves_measured_cycle(tmp_path: Path) -> None:
     context = _base_context()
     context["needs"] = [

@@ -7,6 +7,8 @@ import json
 import sqlite3
 from typing import Any
 
+from .sqlite_utils import inserted_row_id
+
 from .redaction import redact_serialized_action_record
 
 
@@ -150,7 +152,7 @@ class MemoryStore:
                     json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
                 ),
             )
-            return int(cur.lastrowid)
+            return inserted_row_id(cur, operation="memory insert")
 
     def recent(self, limit: int = 12) -> list[MemoryRecord]:
         with self._connect() as conn:
@@ -225,7 +227,7 @@ class MemoryStore:
                 """,
                 (timestamp, timestamp, title, description, priority, source[:64], parent_id),
             )
-            goal_id = int(cur.lastrowid)
+            goal_id = inserted_row_id(cur, operation="goal insert")
             conn.execute(
                 "INSERT INTO goal_events(goal_id, timestamp, kind, content) VALUES (?, ?, 'created', ?)",
                 (goal_id, timestamp, description[:4000]),
@@ -357,7 +359,7 @@ class MemoryStore:
                     str(error)[:4000],
                 ),
             )
-            return int(cur.lastrowid)
+            return inserted_row_id(cur, operation="capability event insert")
 
     def capability_health(self, capability: str, window: int = 20) -> dict[str, Any]:
         name = str(capability).strip()

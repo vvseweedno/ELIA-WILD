@@ -4,12 +4,20 @@ import atexit
 from hashlib import sha256
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, cast, get_args
 from urllib.parse import urlparse
-from typing import Any
 from uuid import uuid4
 
-from .net import assert_http_url, is_safe_browser_subresource
+from .net import (
+    assert_http_url,
+    is_safe_browser_subresource,
+    network_isolation_attested,
+)
 from .types import BodyCapability, BodyResult
+
+if TYPE_CHECKING:
+    from playwright._impl._api_structures import AriaRole
+    from playwright.sync_api import Browser, BrowserContext, Page, Playwright
 
 
 class BrowserBody:
@@ -20,16 +28,34 @@ class BrowserBody:
     network-isolation attestation from the deployment layer (container/firewall policy
     denying loopback, RFC1918, link-local and metadata ranges unless intentionally
     permitted). Interactive actions additionally require an origin allow-list.
+
+    Genesis 1.7 treats the *destination* of an interaction as a separate authority
+    boundary. After a click/fill operation begins, every subsequent request in that
+    page remains inside the configured trusted interaction origins until a separately
+    authorized explicit navigation resets the context. Denied
+    top-level navigations are answered locally with HTTP 204 rather than aborted so
+    Chromium keeps the last trusted document instead of replacing it with an error
+    document. No request is sent to the denied destination.
     """
 
-    def __init__(self, workspace: Path, config: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        config: dict[str, Any] | None = None,
+        *,
+        network_isolation_verifier: Callable[[dict[str, Any]], bool] | None = None,
+    ):
         self.workspace = Path(workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.config = dict(config or {})
-        self._playwright = None
-        self._browser = None
-        self._context = None
-        self._page = None
+        self._network_isolation_verifier = network_isolation_verifier
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
+        self._interaction_active = False
+        self._interaction_denied_url: str | None = None
+        self._explicit_navigation_origin: str | None = None
         atexit.register(self.close)
 
     @property
@@ -38,7 +64,10 @@ class BrowserBody:
 
     @property
     def network_isolation_confirmed(self) -> bool:
-        return bool(self.config.get("network_isolation_confirmed", False))
+        return network_isolation_attested(
+            self.config,
+            verifier=self._network_isolation_verifier,
+        )
 
     @property
     def enabled(self) -> bool:
@@ -105,8 +134,8 @@ class BrowserBody:
                 "Click one locator only on a configured trusted interaction origin.",
                 "{locator: {kind: role|text|css, role?: str, name?: str, text?: str, selector?: str}}",
                 "configured_browser_interaction",
-                "may cause remote state changes through an allow-listed web origin",
-                "current_trusted_origin",
+                "may cause remote state changes only through allow-listed interaction origins",
+                "current_and_interaction_request_origins_trusted",
                 "network",
                 self.interaction_enabled,
                 interaction_readiness,
@@ -116,8 +145,8 @@ class BrowserBody:
                 "Fill one form control only on a configured trusted interaction origin without submitting it.",
                 "{locator: {...}, value: str}",
                 "configured_browser_interaction",
-                "changes current browser form state and may trigger application events",
-                "current_trusted_origin",
+                "changes current browser form state; script requests remain origin-gated",
+                "current_and_interaction_request_origins_trusted",
                 "network",
                 self.interaction_enabled,
                 interaction_readiness,
@@ -135,6 +164,23 @@ class BrowserBody:
             ),
         ]
 
+    @staticmethod
+    def _origin(url: str) -> str:
+        parsed = urlparse(str(url))
+        if parsed.scheme in {"about", "data", "blob"}:
+            return str(url).lower().rstrip("/")
+        if not parsed.scheme or not parsed.hostname:
+            return ""
+        port = parsed.port
+        default = (parsed.scheme == "https" and port == 443) or (
+            parsed.scheme == "http" and port == 80
+        )
+        suffix = "" if port is None or default else f":{port}"
+        return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{suffix}"
+
+    def _interaction_destination_allowed(self, url: str) -> bool:
+        return self._origin(url) in self._trusted_interaction_origins()
+
     def _ensure_started(self) -> None:
         if not self.enabled:
             if not self.installed:
@@ -148,31 +194,103 @@ class BrowserBody:
             return
         from playwright.sync_api import sync_playwright
 
-        self._playwright = sync_playwright().start()
+        playwright = sync_playwright().start()
+        browser = None
+        context = None
         browser_name = str(self.config.get("browser", "chromium")).strip().lower()
-        browser_type = getattr(self._playwright, browser_name, None)
-        if browser_type is None or browser_name not in {"chromium", "firefox", "webkit"}:
-            raise ValueError(f"unsupported Playwright browser: {browser_name}")
-        self._browser = browser_type.launch(headless=bool(self.config.get("headless", True)))
-        self._context = self._browser.new_context(
-            viewport={"width": int(self.config.get("viewport_width", 1280)), "height": int(self.config.get("viewport_height", 720))},
-            accept_downloads=False,
-            service_workers="block",
-        )
-        allow_private = bool(self.config.get("allow_private", False))
+        try:
+            browser_type = getattr(playwright, browser_name, None)
+            if browser_type is None or browser_name not in {
+                "chromium",
+                "firefox",
+                "webkit",
+            }:
+                raise ValueError(f"unsupported Playwright browser: {browser_name}")
+            browser = browser_type.launch(
+                headless=bool(self.config.get("headless", True))
+            )
+            context = browser.new_context(
+                viewport={
+                    "width": int(self.config.get("viewport_width", 1280)),
+                    "height": int(self.config.get("viewport_height", 720)),
+                },
+                accept_downloads=False,
+                service_workers="block",
+            )
+            allow_private = bool(self.config.get("allow_private", False))
 
-        def guard(route: Any) -> None:
-            if is_safe_browser_subresource(route.request.url, allow_private=allow_private):
-                route.continue_()
-            else:
-                route.abort("blockedbyclient")
+            def guard(route: Any) -> None:
+                request = route.request
+                if (
+                    self._explicit_navigation_origin is not None
+                    and request.resource_type == "document"
+                    and self._origin(request.url) != self._explicit_navigation_origin
+                ):
+                    # The configured action authorized one exact navigation origin, not an
+                    # arbitrary cross-origin redirect or iframe document.
+                    self._interaction_denied_url = request.url
+                    route.fulfill(status=204, content_type="text/plain", body="")
+                    return
+                if self._interaction_active and not self._interaction_destination_allowed(
+                    request.url
+                ):
+                    self._interaction_denied_url = request.url
+                    if request.resource_type == "document":
+                        # A local 204 does not contact the destination and keeps Chromium on
+                        # the previous document. route.abort() would replace it with
+                        # chrome-error://chromewebdata/, destroying trusted interaction state.
+                        route.fulfill(status=204, content_type="text/plain", body="")
+                    else:
+                        route.abort("blockedbyclient")
+                    return
+                if is_safe_browser_subresource(
+                    request.url, allow_private=allow_private
+                ):
+                    route.continue_()
+                else:
+                    route.abort("blockedbyclient")
 
-        self._context.route("**/*", guard)
-        self._page = self._context.new_page()
+            context.route("**/*", guard)
+            page = context.new_page()
+        except BaseException:
+            for resource in (context, browser):
+                if resource is not None:
+                    try:
+                        resource.close()
+                    except Exception:
+                        pass
+            try:
+                playwright.stop()
+            except Exception:
+                pass
+            raise
+
+        self._playwright = playwright
+        self._browser = browser
+        self._context = context
+        self._page = page
+
+    def _started_page(self) -> Page:
+        self._ensure_started()
+        page = self._page
+        if page is None:
+            raise RuntimeError("Playwright page initialization did not complete")
+        return page
 
     def close(self) -> None:
-        page, context, browser, playwright = self._page, self._context, self._browser, self._playwright
-        self._page = self._context = self._browser = self._playwright = None
+        page, context, browser, playwright = (
+            self._page,
+            self._context,
+            self._browser,
+            self._playwright,
+        )
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._playwright = None
+        self._interaction_active = False
+        self._interaction_denied_url = None
+        self._explicit_navigation_origin = None
         for item in (page, context, browser):
             if item is not None:
                 try:
@@ -185,26 +303,45 @@ class BrowserBody:
             except Exception:
                 pass
 
-    @staticmethod
-    def _origin(url: str) -> str:
-        parsed = urlparse(str(url))
-        if parsed.scheme in {"about", "data", "blob"}:
-            return str(url).lower().rstrip("/")
-        if not parsed.scheme or not parsed.hostname:
-            return ""
-        port = parsed.port
-        default = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
-        suffix = "" if port is None or default else f":{port}"
-        return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{suffix}"
-
     def _assert_interaction_origin(self) -> None:
-        self._ensure_started()
-        origin = self._origin(self._page.url)
+        page = self._started_page()
+        origin = self._origin(page.url)
         if origin not in self._trusted_interaction_origins():
-            raise PermissionError(f"browser interaction origin is not allow-listed: {origin or self._page.url!r}")
+            raise PermissionError(
+                f"browser interaction origin is not allow-listed: {origin or page.url!r}"
+            )
+
+    def _consume_interaction_denial(self) -> str | None:
+        denied_url = self._interaction_denied_url
+        self._interaction_denied_url = None
+        return denied_url
+
+    def _run_interaction(self, action: Callable[[], None]) -> None:
+        """Run one interaction as a fail-closed authority transaction."""
+        self._interaction_denied_url = None
+        # The guard remains active after the synchronous Playwright method returns.
+        # Page JavaScript can schedule delayed fetch/navigation work; only an explicit
+        # owner-gated browser_navigate action may reset this origin capability.
+        self._interaction_active = True
+        try:
+            action()
+        except Exception as exc:
+            denied_url = self._consume_interaction_denial()
+            if denied_url is not None:
+                raise PermissionError(
+                    f"browser interaction destination is not allow-listed: {denied_url!r}"
+                ) from exc
+            raise
+
+        denied_url = self._consume_interaction_denial()
+        if denied_url is not None:
+            raise PermissionError(
+                f"browser interaction destination is not allow-listed: {denied_url!r}"
+            )
+        self._assert_interaction_origin()
 
     def _locator(self, spec: dict[str, Any]) -> Any:
-        self._ensure_started()
+        page = self._started_page()
         if not isinstance(spec, dict):
             raise ValueError("locator must be an object")
         kind = str(spec.get("kind", "")).strip().lower()
@@ -213,32 +350,42 @@ class BrowserBody:
             name = str(spec.get("name", "")).strip() or None
             if not role:
                 raise ValueError("role locator requires role")
-            return self._page.get_by_role(role, name=name)
+            from playwright._impl._api_structures import AriaRole as RuntimeAriaRole
+
+            if role not in get_args(RuntimeAriaRole):
+                raise ValueError(f"unsupported ARIA role: {role}")
+            role_value = cast("AriaRole", role)
+            return page.get_by_role(role_value, name=name)
         if kind == "text":
             text = str(spec.get("text", "")).strip()
             if not text:
                 raise ValueError("text locator requires text")
-            return self._page.get_by_text(text, exact=bool(spec.get("exact", True)))
+            return page.get_by_text(text, exact=bool(spec.get("exact", True)))
         if kind == "css":
             selector = str(spec.get("selector", "")).strip()
             if not selector or len(selector) > 2000:
                 raise ValueError("css locator requires a bounded selector")
-            return self._page.locator(selector)
+            return page.locator(selector)
         raise ValueError("locator kind must be role, text, or css")
 
     def _snapshot(self) -> dict[str, Any]:
-        self._ensure_started()
+        page = self._started_page()
         max_text = max(1000, min(int(self.config.get("max_text_chars", 50_000)), 200_000))
-        text = self._page.locator("body").inner_text(timeout=int(self.config.get("timeout_ms", 20_000))) if self._page.locator("body").count() else ""
-        links = self._page.locator("a").evaluate_all(
+        body = page.locator("body")
+        text = (
+            body.inner_text(timeout=int(self.config.get("timeout_ms", 20_000)))
+            if body.count()
+            else ""
+        )
+        links = page.locator("a").evaluate_all(
             "els => els.slice(0,100).map(e => ({text:(e.innerText||'').trim().slice(0,500), href:e.href}))"
         )
-        controls = self._page.locator("button,input,textarea,select").evaluate_all(
+        controls = page.locator("button,input,textarea,select").evaluate_all(
             "els => els.slice(0,100).map(e => ({tag:e.tagName.toLowerCase(), type:e.type||null, name:e.name||null, aria:e.getAttribute('aria-label'), placeholder:e.placeholder||null, text:(e.innerText||'').trim().slice(0,300)}))"
         )
         return {
-            "url": self._page.url,
-            "title": self._page.title(),
+            "url": page.url,
+            "title": page.title(),
             "text": text[:max_text],
             "text_truncated": len(text) > max_text,
             "links": links,
@@ -249,13 +396,42 @@ class BrowserBody:
         if not self.enabled:
             return BodyResult(False, "browser_navigate", error="browser body is disabled/unavailable")
         assert_http_url(url, allow_private=bool(self.config.get("allow_private", False)))
-        self._ensure_started()
-        response = self._page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=int(self.config.get("timeout_ms", 20_000)),
-        )
-        final_url = self._page.url
+        page = self._started_page()
+        # Navigation is a separately classified external effect. It is the only action
+        # that deliberately replaces the interaction-scoped origin capability. Close
+        # the prior page while its gate is still active so pagehide/unload or delayed
+        # JavaScript cannot exploit the reset window to emit off-origin traffic.
+        if self._interaction_active:
+            context = self._context
+            if context is None:
+                raise RuntimeError("Playwright context is unavailable during navigation")
+            prior_page = page
+            self._page = None
+            prior_page.close()
+            page = context.new_page()
+            self._page = page
+        self._interaction_active = False
+        self._interaction_denied_url = None
+        target_origin = self._origin(url)
+        if not target_origin:
+            raise ValueError("browser navigation URL has no valid origin")
+        self._explicit_navigation_origin = target_origin
+        try:
+            response = page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=int(self.config.get("timeout_ms", 20_000)),
+            )
+        finally:
+            self._explicit_navigation_origin = None
+        denied_url = self._consume_interaction_denial()
+        if denied_url is not None:
+            raise PermissionError(
+                f"browser navigation redirected to an unauthorized origin: {denied_url!r}"
+            )
+        final_url = page.url
+        if self._origin(final_url) != target_origin:
+            raise PermissionError("browser navigation final origin differs from authorized origin")
         assert_http_url(final_url, allow_private=bool(self.config.get("allow_private", False)))
         data = self._snapshot()
         data["status_code"] = response.status if response is not None else None
@@ -273,7 +449,9 @@ class BrowserBody:
         try:
             self._assert_interaction_origin()
             target = self._locator(locator)
-            target.click(timeout=int(self.config.get("timeout_ms", 20_000)))
+            self._run_interaction(
+                lambda: target.click(timeout=int(self.config.get("timeout_ms", 20_000)))
+            )
             return BodyResult(True, "browser_click", self._snapshot())
         except Exception as exc:
             return BodyResult(False, "browser_click", error=f"{type(exc).__name__}: {exc}")
@@ -286,19 +464,24 @@ class BrowserBody:
         try:
             self._assert_interaction_origin()
             target = self._locator(locator)
-            target.fill(str(value), timeout=int(self.config.get("timeout_ms", 20_000)))
+            self._run_interaction(
+                lambda: target.fill(
+                    str(value),
+                    timeout=int(self.config.get("timeout_ms", 20_000)),
+                )
+            )
             return BodyResult(True, "browser_fill", self._snapshot())
         except Exception as exc:
             return BodyResult(False, "browser_fill", error=f"{type(exc).__name__}: {exc}")
 
     def screenshot(self, full_page: bool = False) -> BodyResult:
-        self._ensure_started()
+        page = self._started_page()
         artifact_dir = (self.workspace / "browser-artifacts").resolve()
         if not artifact_dir.is_relative_to(self.workspace):
             raise RuntimeError("browser artifact directory escaped workspace")
         artifact_dir.mkdir(parents=True, exist_ok=True)
         path = artifact_dir / f"page-{uuid4().hex}.png"
-        self._page.screenshot(path=str(path), full_page=bool(full_page))
+        page.screenshot(path=str(path), full_page=bool(full_page))
         raw = path.read_bytes()
         return BodyResult(
             True,
@@ -307,11 +490,13 @@ class BrowserBody:
                 "path": str(path.relative_to(self.workspace)),
                 "bytes": len(raw),
                 "sha256": sha256(raw).hexdigest(),
-                "url": self._page.url,
+                "url": page.url,
             },
         )
 
     def _set_content_for_test(self, html: str) -> None:
         """Exercise the real Playwright context in tests without external network."""
-        self._ensure_started()
-        self._page.set_content(str(html))
+        page = self._started_page()
+        self._interaction_active = False
+        self._interaction_denied_url = None
+        page.set_content(str(html))

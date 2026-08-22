@@ -10,7 +10,12 @@ from .decay import DecaySchedule
 class MemoryBackend(Protocol):
     name: str
 
-    def step(self, value: float, *, gate: float | None = None) -> float: ...
+    def step(
+        self,
+        value: float | complex,
+        *,
+        gate: float | None = None,
+    ) -> float | complex: ...
 
     def state(self) -> Any: ...
 
@@ -23,10 +28,25 @@ class ScrollMemory:
     name: str = "scroll"
     _items: list[float] = field(default_factory=list)
 
-    def step(self, value: float, *, gate: float | None = None) -> float:
+    def __post_init__(self) -> None:
+        self.capacity = int(self.capacity)
+        if self.capacity < 1:
+            raise ValueError("scroll memory capacity must be positive")
+        normalized = [float(item) for item in self._items]
+        if any(not isfinite(item) for item in normalized):
+            raise ValueError("scroll memory state must be finite")
+        self._items = normalized[-self.capacity :]
+
+    def step(self, value: float | complex, *, gate: float | None = None) -> float:
+        if isinstance(value, complex):
+            if value.imag != 0.0:
+                raise ValueError("scroll memory requires a real-valued input")
+            value = value.real
         value = float(value)
+        if not isfinite(value):
+            raise ValueError("scroll memory value must be finite")
         self._items.append(value)
-        if len(self._items) > max(1, int(self.capacity)):
+        if len(self._items) > self.capacity:
             del self._items[: len(self._items) - self.capacity]
         return value
 
@@ -50,20 +70,42 @@ class FractalMemory:
     _writes: int = 0
 
     def __post_init__(self) -> None:
+        self.levels = int(self.levels)
+        if not 1 <= self.levels <= 64:
+            raise ValueError("fractal memory levels must be in 1..64")
+        if not isfinite(float(self.threshold)) or not 0.0 <= float(self.threshold) <= 1.0:
+            raise ValueError("fractal memory threshold must be finite and within [0, 1]")
         if not self._level_state:
-            self._level_state = [0.0 for _ in range(max(1, int(self.levels)))]
+            self._level_state = [0.0 for _ in range(self.levels)]
+        else:
+            self._level_state = [float(item) for item in self._level_state]
+            if len(self._level_state) != self.levels:
+                raise ValueError("fractal memory state length must equal levels")
+            if any(not isfinite(item) for item in self._level_state):
+                raise ValueError("fractal memory state must be finite")
+        if int(self._writes) < 0:
+            raise ValueError("fractal memory write count must be non-negative")
+        self._writes = int(self._writes)
 
     def step(
         self,
-        value: float,
+        value: float | complex,
         *,
         gate: float | None = None,
         surprisal: float | None = None,
     ) -> float:
+        if isinstance(value, complex):
+            if value.imag != 0.0:
+                raise ValueError("fractal memory requires a real-valued input")
+            value = value.real
         value = float(value)
+        if not isfinite(value):
+            raise ValueError("memory value must be finite")
         surprise = float(surprisal if surprisal is not None else (gate if gate is not None else 1.0))
         if not isfinite(surprise):
             raise ValueError("surprisal must be finite")
+        if not 0.0 <= surprise <= 1.0:
+            raise ValueError("bounded surprisal gate must be within [0, 1]")
         if surprise < self.threshold:
             return self.read()
 
@@ -128,16 +170,33 @@ def lru_scan(
     h_t = f_t * h_{t-1} + (1-f_t) * x_t
     """
 
+    value_list = [float(value) for value in values]
+    gate_list = [float(gate) for gate in forget_gates]
+    if len(value_list) != len(gate_list):
+        raise ValueError("values and forget_gates must have equal length")
+    initial_value = float(initial)
+    if not isfinite(initial_value):
+        raise ValueError("initial scan state must be finite")
     elements: list[AffineRecurrence] = []
-    for value, gate in zip(values, forget_gates):
-        f = max(0.0, min(0.999999, float(gate)))
-        elements.append(AffineRecurrence(complex(f), complex((1.0 - f) * float(value))))
-    return [float(prefix.apply(complex(initial)).real) for prefix in associative_prefix(elements)]
+    for value, gate in zip(value_list, gate_list):
+        if not isfinite(value) or not isfinite(gate):
+            raise ValueError("scan values and gates must be finite")
+        if not 0.0 <= gate <= 1.0:
+            raise ValueError("forget gates must be within [0, 1]")
+        f = gate
+        elements.append(AffineRecurrence(complex(f), complex((1.0 - f) * value)))
+    return [
+        float(prefix.apply(complex(initial_value)).real)
+        for prefix in associative_prefix(elements)
+    ]
 
 
 def log_domain_forget(raw: float) -> float:
     """Stable positive forget parameterization used by reference recurrent scans."""
-    raw = max(-60.0, min(60.0, float(raw)))
+    raw = float(raw)
+    if not isfinite(raw):
+        raise ValueError("raw forget parameter must be finite")
+    raw = max(-60.0, min(60.0, raw))
     # sigmoid(-softplus(raw)) style bounded gate, represented without external deps.
     softplus = raw if raw > 20 else exp(raw) if raw < -20 else __import__("math").log1p(exp(raw))
     return exp(-softplus)
@@ -157,16 +216,30 @@ def holo_scan(
     """
 
     values_list = [complex(value) for value in values]
-    gate_list = list(forget_gates)
-    phase_list = list(phases) if phases is not None else [0.0] * len(values_list)
+    gate_list = [float(gate) for gate in forget_gates]
+    phase_list = [float(phase) for phase in phases] if phases is not None else [0.0] * len(values_list)
+    if len(values_list) != len(gate_list) or len(values_list) != len(phase_list):
+        raise ValueError("values, forget_gates and phases must have equal length")
+    initial_value = complex(initial)
+    if not isfinite(initial_value.real) or not isfinite(initial_value.imag):
+        raise ValueError("initial Holo scan state must be finite")
     elements: list[AffineRecurrence] = []
     for value, gate, phase in zip(values_list, gate_list, phase_list):
-        f = max(0.0, min(0.999999, float(gate)))
-        rotation = complex(__import__("math").cos(float(phase)), __import__("math").sin(float(phase)))
+        if not (
+            isfinite(value.real)
+            and isfinite(value.imag)
+            and isfinite(gate)
+            and isfinite(phase)
+        ):
+            raise ValueError("Holo scan values, gates and phases must be finite")
+        if not 0.0 <= gate <= 1.0:
+            raise ValueError("Holo forget gates must be within [0, 1]")
+        f = gate
+        rotation = complex(__import__("math").cos(phase), __import__("math").sin(phase))
         a = f * rotation
         b = (1.0 - f) * value
         elements.append(AffineRecurrence(a, b))
-    return [prefix.apply(initial) for prefix in associative_prefix(elements)]
+    return [prefix.apply(initial_value) for prefix in associative_prefix(elements)]
 
 
 @dataclass(slots=True)
@@ -175,12 +248,29 @@ class RecurrentScanMemory:
     complex_state: bool = False
     state_value: complex = 0j
 
+    def __post_init__(self) -> None:
+        self.state_value = complex(self.state_value)
+        if not isfinite(self.state_value.real) or not isfinite(self.state_value.imag):
+            raise ValueError("recurrent memory initial state must be finite")
+        if not self.complex_state and self.state_value.imag != 0.0:
+            raise ValueError("real recurrent memory initial state must be real")
+
     def step(self, value: float | complex, *, gate: float | None = None) -> float | complex:
-        f = 0.9 if gate is None else max(0.0, min(0.999999, float(gate)))
+        gate_value = 0.9 if gate is None else float(gate)
+        if not isfinite(gate_value):
+            raise ValueError("memory gate must be finite")
+        if not 0.0 <= gate_value <= 1.0:
+            raise ValueError("memory gate must be within [0, 1]")
+        candidate = complex(value)
+        if not isfinite(candidate.real) or not isfinite(candidate.imag):
+            raise ValueError("memory value must be finite")
+        f = gate_value
         if self.complex_state:
-            self.state_value = f * self.state_value + (1.0 - f) * complex(value)
+            self.state_value = f * self.state_value + (1.0 - f) * candidate
             return self.state_value
-        real = f * self.state_value.real + (1.0 - f) * float(value)
+        if candidate.imag != 0.0:
+            raise ValueError("real recurrent memory cannot accept a complex value")
+        real = f * self.state_value.real + (1.0 - f) * candidate.real
         self.state_value = complex(real)
         return real
 
