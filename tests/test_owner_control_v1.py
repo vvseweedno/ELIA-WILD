@@ -69,3 +69,11 @@ def test_one_time_human_approval_is_exact_and_consumed(tmp_path: Path) -> None:
         control.assert_external_authorized(
             "submit_work", {"port": "configured", "work_item_id": 8}
         )
+
+
+def test_missing_owner_mandate_fails_closed_for_external_effects(tmp_path: Path) -> None:
+    mandate = OwnerMandate.load(tmp_path / "missing-owner-mandate.yaml", required=False)
+    assert mandate.require_external_lease is True
+    control = OwnerControl(tmp_path / "fallback-memory.sqlite3", mandate)
+    with pytest.raises(DelegationLeaseExpired):
+        control.assert_external_authorized("browser_click", {"selector": "#ok"})
