@@ -19,7 +19,7 @@ TRUST_SCORES: dict[str, float] = {
     "protected_identity": 1.00,
 }
 
-PROMOTABLE = frozenset({"corroborated_memory", "causal_evidence", "verified_fact"})
+PROMOTABLE = frozenset({"corroborated_memory", "causal_evidence"})
 
 
 def memory_trust_class(record: MemoryRecord) -> str:
@@ -65,9 +65,11 @@ class MemoryTrustGate:
     """Trust transition boundary for persistent autobiographical memory.
 
     Model-authored memory is useful as a hypothesis, never as authority. The model has
-    no method to promote a memory. Promotion is an explicit local/runtime operation with
-    evidence and an authority label; protected identity is intentionally outside this
-    mutable memory gate and remains governed by Subject Core/Constitution fingerprints.
+    no method to promote a memory. Generic promotion can only reach bounded local
+    corroboration/causal-evidence classes; a `verified_fact` must come from a
+    domain-specific authenticated verifier rather than a caller-supplied authority
+    string. Protected identity remains outside this mutable memory gate and is governed
+    by Subject Core/Constitution fingerprints.
     """
 
     def __init__(self, memory: MemoryStore) -> None:
@@ -143,7 +145,7 @@ class MemoryTrustGate:
         target = str(to_class).strip()
         if target not in PROMOTABLE:
             raise ValueError(
-                "memory may only be promoted to corroborated_memory, causal_evidence, or verified_fact"
+                "generic memory promotion may only reach corroborated_memory or causal_evidence; verified_fact requires a domain-specific authenticated verifier"
             )
         evidence = str(evidence).strip()[:8000]
         authority = str(authority).strip()[:256]
