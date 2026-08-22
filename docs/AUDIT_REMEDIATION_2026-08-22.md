@@ -70,7 +70,11 @@ silently enter a signature, idempotency key or accepted-state fingerprint.
   then authenticated anchor. Restore requires the exact trusted predecessor and
   counter, uses a journal, and retains external-safety truth across rollback.
 - CRC v2 binds identity, branch, checkpoint lineage, exact Chronicle prefix and
-  canonical capsule data. Legacy v1 state has an explicit upgrade path.
+  strictly validated finite capsule data while preserving the versioned v1/v2 byte
+  encoding. Legacy v1 state has an explicit upgrade path.
+- Identity YAML, identity/lineage fingerprints and Chronicle append/read paths reject
+  non-finite values, non-string keys, duplicate JSON names, implicit string coercion,
+  schema drift and exact-type substitutions such as `true` for sequence `1`.
 - Branch, lifecycle and supervisor recovery run before a dirty suffix can become a
   new trusted baseline. The supervisor has singleton/process-group discipline,
   bounded child handling and kill polling.
@@ -114,8 +118,9 @@ verifier/provider keys remain outside a local-only proof.
 - Agency considers every active need and deadline, uses stable ordering, fair aging,
   clock-skew clamps and capacity-aware emergency focus rather than selecting one
   pressure and discarding the rest.
-- Metabolism uses finite `Decimal` arithmetic, time-ordered cash flow and cumulative
-  essential-obligation shortfall. Asset/unit identities cannot be exchanged by
+- Persisted resource ledger values must be finite. Metabolic runway and cumulative
+  obligation projections convert them through `Decimal(str(value))` before
+  time-ordered cash-flow arithmetic. Asset/unit identities cannot be exchanged by
   numeric coincidence.
 - Opportunity ranking separates expected value, eligibility and GPU cost; a zero GPU
   estimate does not invent a per-GPU denominator.
@@ -165,6 +170,8 @@ CUDA deadlock. The external Kaggle kernel timeout remains the final process boun
 - GitHub Actions are pinned to full commit SHAs. CI includes CodeQL, Dependabot,
   pip-audit, high-severity Bandit, full typing, normal/optimized invariant regressions,
   real Chromium/MCP integration and release artifact checks.
+- CI and wake runners upgrade to the current audited `pip==26.2.1`; clean wheel and
+  sdist environments receive the same installer baseline before package installation.
 - Wheel and normalized sdist are built twice from a fixed source epoch and compared
   byte-for-byte. Clean source, wheel and sdist runs must have identical identity,
   organism and actual source-byte manifests.
@@ -175,19 +182,18 @@ CUDA deadlock. The external Kaggle kernel timeout remains the final process boun
 
 | Verification | Result |
 |---|---|
-| Non-browser pytest integration/regression | 495 passed in 46.15 s |
+| Non-browser pytest integration/regression | 510 passed in 39.26 s |
 | Browser readiness without launching Chromium | 1 passed |
 | Real browser cases | 5 delegated to CI Chromium job; local binary unavailable |
 | Full mypy | 0 issues in 98 source files |
 | Ruff + compileall + `git diff --check` | passed |
 | AgentBench normal / optimized | 19/19 / 19/19, identical source manifest |
-| Source byte manifest | `2aafeba394f050e785e3269345c88074ac3f2803782a550465d1f398939a3926` |
+| Source byte manifest | `7d30ddd7f5482021fd190e7718bdce9490a44edbd8c1bc38c5850844eafbb8f5` |
 | Branch coverage (`elia` + `scripts`, browser file excluded) | 77% |
 | `pip check` / `pip-audit` | clean / no known audited dependency vulnerabilities |
 | Bandit | 0 High; 8 Medium triaged: 2 immutable-revision scanner limitations and 6 parameter-bound fixed-shape SQL constructions |
-| Reproducible wheel SHA256 | `35dccd4e9cdc5898a01ec9a6994903158728b52842858dcbb3d772b1b98d5d4b` |
-| Reproducible normalized sdist SHA256 | `2ebb5a8802a13ec853cfaceddba56c48cf0d8c33e5ed1856c6b2ea1eb475fd06` |
-| Reproducible base SBOM SHA256 | `c9caf7b882b639362b5ff93f4a9086edcec28f1efd066834b6722d94103d5cd7` |
+| Reproducible wheel / normalized sdist | two same-epoch builds are byte-identical; exact-commit hashes are emitted in the CI `SHA256SUMS` artifact |
+| Reproducible base SBOM | deterministic CycloneDX 1.6 JSON validated locally; exact-commit hash is emitted by CI |
 | Clean source / wheel / sdist | doctor healthy; AgentBench 19/19; exact identity, organism and source parity |
 
 The Bandit SQL warnings are not caller-interpolated SQL values: dynamic text is
@@ -229,4 +235,6 @@ These are not silently relabeled as solved software findings:
    proof; future changes should raise critical-boundary branch coverage without gaming
    the metric.
 
-Until the live GPU/wake gate succeeds, PR #19 should remain a draft release candidate.
+Promotion to `main` does not close the live GPU/wake gates. Until they succeed, the
+software remains an alpha research runtime and must not be represented as a proven
+production-deployment or biological/consciousness result.

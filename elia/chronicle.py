@@ -11,6 +11,7 @@ import os
 from types import ModuleType
 from typing import Any, Iterator
 
+from .canonical import canonical_json, strict_json_loads
 from .redaction import redact_action_record
 
 fcntl: ModuleType | None = None
@@ -70,17 +71,14 @@ class Chronicle:
         payload: dict[str, Any],
         previous_hash: str,
     ) -> str:
-        canonical = json.dumps(
+        canonical = canonical_json(
             {
                 "seq": seq,
                 "timestamp": timestamp,
                 "kind": kind,
                 "payload": payload,
                 "previous_hash": previous_hash,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
+            }
         )
         return sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -100,15 +98,21 @@ class Chronicle:
     def _last_unlocked(self) -> tuple[int, str]:
         if not self.path.exists() or self.path.stat().st_size == 0:
             return 0, GENESIS_HASH
-        last_line = ""
+        previous_hash = GENESIS_HASH
+        expected_seq = 1
+        last_seq = 0
         with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    last_line = line
-        if not last_line:
-            return 0, GENESIS_HASH
-        item = json.loads(last_line)
-        return int(item["seq"]), str(item["hash"])
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                last_seq, previous_hash = self._validated_item(
+                    line,
+                    line_number=line_number,
+                    expected_seq=expected_seq,
+                    previous_hash=previous_hash,
+                )
+                expected_seq += 1
+        return last_seq, previous_hash
 
     def head(self) -> tuple[int, str]:
         """Return the current sequence/hash head without mutating the Chronicle."""
@@ -129,8 +133,12 @@ class Chronicle:
         return ChronicleCheckpoint(seq=seq, hash=digest, byte_size=size)
 
     def append(self, kind: str, payload: dict[str, Any]) -> ChronicleEntry:
+        if type(kind) is not str:
+            raise TypeError("Chronicle kind must be an exact string")
+        if type(payload) is not dict:
+            raise TypeError("Chronicle payload must be an exact JSON object")
         persisted_payload = (
-            redact_action_record(payload) if str(kind).upper() == "CYCLE" else payload
+            redact_action_record(payload) if kind.upper() == "CYCLE" else payload
         )
         with self._locked(exclusive=True):
             last_seq, previous_hash = self._last_unlocked()
@@ -140,7 +148,15 @@ class Chronicle:
             entry = ChronicleEntry(
                 seq, timestamp, kind, persisted_payload, previous_hash, digest
             )
-            serialized = json.dumps(asdict(entry), ensure_ascii=False, sort_keys=True) + "\n"
+            serialized = (
+                json.dumps(
+                    asdict(entry),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            )
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(serialized)
                 handle.flush()
@@ -156,20 +172,40 @@ class Chronicle:
         previous_hash: str,
     ) -> tuple[int, str]:
         try:
-            item = json.loads(line)
-            seq = int(item["seq"])
-            timestamp = str(item["timestamp"])
-            kind = str(item["kind"])
-            payload = dict(item["payload"])
-            item_previous = str(item["previous_hash"])
-            item_hash = str(item["hash"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            item = strict_json_loads(line)
+            if type(item) is not dict:
+                raise TypeError("entry must be an exact JSON object")
+            required = {"seq", "timestamp", "kind", "payload", "previous_hash", "hash"}
+            if set(item) != required:
+                raise ValueError("entry fields differ from the Chronicle schema")
+            seq = item["seq"]
+            timestamp = item["timestamp"]
+            kind = item["kind"]
+            payload = item["payload"]
+            item_previous = item["previous_hash"]
+            item_hash = item["hash"]
+            if type(seq) is not int:
+                raise TypeError("seq must be an exact integer")
+            if type(timestamp) is not str:
+                raise TypeError("timestamp must be an exact string")
+            if type(kind) is not str:
+                raise TypeError("kind must be an exact string")
+            if type(payload) is not dict:
+                raise TypeError("payload must be an exact JSON object")
+            if type(item_previous) is not str:
+                raise TypeError("previous_hash must be an exact string")
+            if type(item_hash) is not str:
+                raise TypeError("hash must be an exact string")
+        except (json.JSONDecodeError, KeyError, RecursionError, TypeError, ValueError) as exc:
             raise ValueError(f"malformed entry at line {line_number}: {exc}") from exc
         if seq != expected_seq:
             raise ValueError(f"sequence mismatch at line {line_number}")
         if item_previous != previous_hash:
             raise ValueError(f"previous_hash mismatch at line {line_number}")
-        digest = Chronicle._digest(seq, timestamp, kind, payload, item_previous)
+        try:
+            digest = Chronicle._digest(seq, timestamp, kind, payload, item_previous)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"malformed entry at line {line_number}: {exc}") from exc
         if digest != item_hash:
             raise ValueError(f"hash mismatch at line {line_number}")
         return seq, digest

@@ -23,7 +23,9 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install
-        run: python -m pip install -e '.[test]'
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -e '.[test]'
       - name: Static correctness gates
         run: |
           python -m pip check
@@ -91,7 +93,9 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install sensorimotor dependencies
-        run: python -m pip install -e '.[test,sensorimotor]'
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -e '.[test,sensorimotor]'
       - name: Dependency consistency
         run: python -m pip check
       - name: Known-vulnerability audit
@@ -152,6 +156,7 @@ jobs:
           cache: pip
       - name: Build reproducible wheel and sdist
         run: |
+          python -m pip install --upgrade pip==26.2.1
           python -m pip install build==1.5.0 cyclonedx-bom==7.3.1
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           export SOURCE_DATE_EPOCH
@@ -178,6 +183,7 @@ jobs:
       - name: Test clean wheel install outside checkout
         run: |
           python -m venv /tmp/elia-wheel-env
+          /tmp/elia-wheel-env/bin/python -m pip install --upgrade pip==26.2.1
           /tmp/elia-wheel-env/bin/python -m pip install dist/*.whl
           mkdir -p /tmp/elia-wheel-run
           cd /tmp/elia-wheel-run
@@ -193,6 +199,7 @@ jobs:
       - name: Test clean sdist install outside checkout
         run: |
           python -m venv /tmp/elia-sdist-env
+          /tmp/elia-sdist-env/bin/python -m pip install --upgrade pip==26.2.1
           /tmp/elia-sdist-env/bin/python -m pip install dist/*.tar.gz
           mkdir -p /tmp/elia-sdist-run
           cd /tmp/elia-sdist-run

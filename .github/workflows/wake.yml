@@ -57,7 +57,9 @@ jobs:
           cache: pip
 
       - name: Install wake transport
-        run: python -m pip install -e . 'kaggle==2.2.4'
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -e . 'kaggle==2.2.4'
 
       - name: Restore durable wake witness
         id: restore

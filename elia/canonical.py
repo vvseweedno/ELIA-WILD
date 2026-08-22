@@ -58,12 +58,11 @@ def _validate_json_value(
         active_containers.remove(identity)
 
 
-def canonical_json(value: Any) -> str:
-    """Serialize the strict JSON data model without silent ``str()`` coercion.
+def validate_json_value(value: Any) -> None:
+    """Validate the exact finite JSON data model without serializing it.
 
-    This function is intended for hashes, signatures, idempotency keys and other
-    integrity boundaries. Tuples intentionally share JSON array semantics with lists;
-    unsupported objects, non-string mapping keys, cycles and NaN/Infinity fail closed.
+    Versioned formats whose historical byte encoding cannot change use this entry
+    point before applying their existing deterministic serializer.
     """
 
     _validate_json_value(
@@ -72,6 +71,40 @@ def canonical_json(value: Any) -> str:
         active_containers=set(),
         depth=0,
     )
+
+
+def strict_json_loads(payload: str | bytes | bytearray) -> Any:
+    """Parse strict JSON, rejecting duplicate names and non-finite constants."""
+
+    def reject_constant(token: str) -> None:
+        raise ValueError(f"strict JSON rejects non-finite constant {token}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"strict JSON rejects duplicate object key {key!r}")
+            result[key] = value
+        return result
+
+    value = json.loads(
+        payload,
+        parse_constant=reject_constant,
+        object_pairs_hook=unique_object,
+    )
+    validate_json_value(value)
+    return value
+
+
+def canonical_json(value: Any) -> str:
+    """Serialize the strict JSON data model without silent ``str()`` coercion.
+
+    This function is intended for hashes, signatures, idempotency keys and other
+    integrity boundaries. Tuples intentionally share JSON array semantics with lists;
+    unsupported objects, non-string mapping keys, cycles and NaN/Infinity fail closed.
+    """
+
+    validate_json_value(value)
     return json.dumps(
         value,
         ensure_ascii=False,

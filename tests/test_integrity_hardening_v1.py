@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import socket
 
 import pytest
 
 from elia.body.net import assert_http_url, resolve_http_target
-from elia.chronicle import Chronicle
+from elia.chronicle import GENESIS_HASH, Chronicle
 from elia.config import load_config
 from elia.observations import ObservationStore
 
@@ -41,6 +42,55 @@ def test_chronicle_malformed_tail_is_integrity_failure_not_exception(tmp_path: P
     assert valid is False
     assert error is not None
     assert "malformed entry" in error
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"nonfinite": float("nan")}, "non-finite"),
+        ({"nested": {1: "value"}}, "string object keys"),
+    ],
+)
+def test_chronicle_rejects_ambiguous_integrity_payloads(
+    tmp_path: Path,
+    payload: dict,
+    error: str,
+) -> None:
+    chronicle = Chronicle(tmp_path / "chronicle.jsonl")
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        chronicle.append("INVALID", payload)
+
+    assert not chronicle.path.exists()
+
+
+def test_chronicle_read_rejects_type_coercion_and_duplicate_fields(tmp_path: Path) -> None:
+    chronicle = Chronicle(tmp_path / "chronicle.jsonl")
+    digest = Chronicle._digest(1, "123", "7", {}, GENESIS_HASH)
+    coerced = {
+        "seq": True,
+        "timestamp": 123,
+        "kind": 7,
+        "payload": {},
+        "previous_hash": GENESIS_HASH,
+        "hash": digest,
+    }
+    chronicle.path.write_text(json.dumps(coerced) + "\n", encoding="utf-8")
+
+    valid, error = chronicle.verify()
+    assert valid is False
+    assert error is not None and "seq must be an exact integer" in error
+    with pytest.raises(RuntimeError, match="seq must be an exact integer"):
+        chronicle.head()
+
+    chronicle.path.write_text(
+        '{"seq":1,"seq":1,"timestamp":"t","kind":"K","payload":{},'
+        f'"previous_hash":"{GENESIS_HASH}","hash":"{digest}"}}\n',
+        encoding="utf-8",
+    )
+    valid, error = chronicle.verify()
+    assert valid is False
+    assert error is not None and "duplicate object key" in error
 
 
 def test_public_url_rejects_any_private_resolution(monkeypatch) -> None:

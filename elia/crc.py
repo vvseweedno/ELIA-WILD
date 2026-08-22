@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, TypeGuard
 
 from . import __version__
+from .canonical import strict_json_loads, validate_json_value
 from .chronicle import Chronicle
 from .config import Config
 from .economy import EconomyStore
@@ -21,6 +22,18 @@ from .tools import ToolRegistry
 
 def _hash_text(value: str) -> str:
     return sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _versioned_json(value: Any) -> str:
+    """Preserve the CRC v1/v2 byte encoding after strict JSON validation."""
+
+    validate_json_value(value)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
 
 
 CRC_SCHEMA_VERSION = 2
@@ -66,7 +79,7 @@ class ContinuityRecordCapsule:
 
     @property
     def fingerprint(self) -> str:
-        return _hash_text(json.dumps(self.as_dict(), ensure_ascii=False, sort_keys=True))
+        return _hash_text(_versioned_json(self.as_dict()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,16 +125,14 @@ def build_crc(config: Config) -> ContinuityRecordCapsule:
     goal_fps = tuple(
         sorted(
             _hash_text(
-                json.dumps(
+                _versioned_json(
                     {
                         "title": goal.title,
                         "description": goal.description,
                         "status": goal.status,
                         "priority": round(goal.priority, 6),
                         "parent_id": goal.parent_id,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
+                    }
                 )
             )
             for goal in goals
@@ -140,9 +151,7 @@ def build_crc(config: Config) -> ContinuityRecordCapsule:
         expected_branch_id=config.branch_id,
     )
     resource_summary = economy.resource_summary()
-    resource_fp = _hash_text(
-        json.dumps(resource_summary, ensure_ascii=False, sort_keys=True)
-    )
+    resource_fp = _hash_text(_versioned_json(resource_summary))
 
     return ContinuityRecordCapsule(
         schema_version=CRC_SCHEMA_VERSION,
@@ -184,13 +193,20 @@ def write_crc(path: Path, capsule: ContinuityRecordCapsule) -> None:
     if errors:
         raise ValueError("invalid CRC capsule: " + "; ".join(errors))
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
 
 def read_crc(path: Path) -> dict[str, Any]:
-    item = json.loads(Path(path).read_text(encoding="utf-8"))
+    item = strict_json_loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(item, dict):
         raise ValueError("CRC file must contain a JSON object")
     errors = validate_crc_capsule(item, require_capsule_fingerprint=True)
@@ -215,6 +231,10 @@ def validate_crc_capsule(
     """Validate a serialized CRC before it can participate in continuity evidence."""
 
     errors: list[str] = []
+    try:
+        validate_json_value(item)
+    except (TypeError, ValueError) as exc:
+        return (f"capsule is not strict finite JSON: {exc}",)
     schema_version = item.get("schema_version")
     current_required = {
         field.name for field in ContinuityRecordCapsule.__dataclass_fields__.values()
@@ -329,7 +349,7 @@ def validate_crc_capsule(
         errors.append("capsule_fingerprint is required and must be a lowercase SHA-256 digest")
     if fingerprint is not None and _is_hash(fingerprint):
         payload = {key: value for key, value in item.items() if key != "capsule_fingerprint"}
-        expected = _hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        expected = _hash_text(_versioned_json(payload))
         if fingerprint != expected:
             errors.append("capsule_fingerprint does not match the capsule payload")
 

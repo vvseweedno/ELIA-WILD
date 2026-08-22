@@ -136,6 +136,19 @@ def test_read_crc_rejects_payload_tampering(tmp_path: Path) -> None:
         read_crc(path)
 
 
+def test_read_crc_rejects_nonfinite_extension_before_fingerprint_check(
+    tmp_path: Path,
+) -> None:
+    payload = base_record()
+    payload["untrusted_extension"] = float("nan")
+    payload["capsule_fingerprint"] = "0" * 64
+    path = tmp_path / "crc.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="strict JSON rejects non-finite"):
+        read_crc(path)
+
+
 def test_read_crc_accepts_one_legacy_schema_cycle_with_its_original_checksum(
     tmp_path: Path,
 ) -> None:

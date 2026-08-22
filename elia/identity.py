@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .canonical import canonical_json_bytes
 from .sqlite_utils import inserted_row_id
 
 import yaml
@@ -18,12 +19,7 @@ _HEX = frozenset("0123456789abcdef")
 
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _fingerprint(value: Any) -> str:
@@ -339,7 +335,12 @@ class IdentityStore:
                     str(payload.get("timestamp") or self.now()),
                     identity_fp,
                     snapshot_fp,
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        allow_nan=False,
+                    ),
                     str(source)[:64],
                 ),
             )
@@ -381,20 +382,40 @@ class IdentityStore:
         parent_checkpoint_digest: str | None = None,
         note: str = "",
     ) -> int:
-        event = str(event).strip()[:64]
-        branch_id = str(branch_id).strip()[:128]
-        identity_fingerprint = str(identity_fingerprint).strip()[:128]
+        required_text: dict[str, object] = {
+            "event": event,
+            "branch_id": branch_id,
+            "body_version": body_version,
+            "brain_backend": brain_backend,
+            "model_id": model_id,
+            "identity_fingerprint": identity_fingerprint,
+            "note": note,
+        }
+        for field, value in required_text.items():
+            if type(value) is not str:
+                raise TypeError(f"lineage {field} must be an exact string")
+        optional_text: dict[str, object | None] = {
+            "checkpoint_digest": checkpoint_digest,
+            "parent_checkpoint_digest": parent_checkpoint_digest,
+        }
+        for field, optional_value in optional_text.items():
+            if optional_value is not None and type(optional_value) is not str:
+                raise TypeError(f"lineage {field} must be null or an exact string")
+
+        event = event.strip()[:64]
+        branch_id = branch_id.strip()[:128]
+        identity_fingerprint = identity_fingerprint.strip()[:128]
         if not event or not branch_id or not identity_fingerprint:
             raise ValueError("lineage event, branch_id and identity_fingerprint are required")
         timestamp = self.now()
-        body_version = str(body_version)[:64]
-        brain_backend = str(brain_backend)[:128]
-        model_id = str(model_id)[:512]
-        checkpoint_digest = str(checkpoint_digest)[:128] if checkpoint_digest else None
+        body_version = body_version[:64]
+        brain_backend = brain_backend[:128]
+        model_id = model_id[:512]
+        checkpoint_digest = checkpoint_digest[:128] if checkpoint_digest else None
         parent_checkpoint_digest = (
-            str(parent_checkpoint_digest)[:128] if parent_checkpoint_digest else None
+            parent_checkpoint_digest[:128] if parent_checkpoint_digest else None
         )
-        note = str(note)[:4000]
+        note = note[:4000]
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             head = conn.execute(

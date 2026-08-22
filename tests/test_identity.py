@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from elia.assurance import CriticAssurance, IdentityDriftMonitor
@@ -10,6 +11,11 @@ from elia.identity import IdentityBundle, IdentityStore, build_self_model_snapsh
 from elia.prompting import PromptTemplate
 from elia.skills import SkillRegistry
 from elia.tools import ToolRegistry
+
+
+class StringMasquerade:
+    def __str__(self) -> str:
+        return "coerced"
 
 
 def repo_root() -> Path:
@@ -38,6 +44,27 @@ def test_identity_bundle_fingerprint_is_stable_and_content_addressed(tmp_path: P
     changed_core.write_text(yaml.safe_dump(core, allow_unicode=True, sort_keys=False), encoding="utf-8")
     changed = IdentityBundle.load(changed_core, root / "config" / "continuity_constitution.yaml")
     assert changed.fingerprint != first.fingerprint
+
+
+@pytest.mark.parametrize(
+    ("invalid_field", "error"),
+    [
+        ("nonfinite: .nan", "non-finite"),
+        ("nested:\n  1: value", "string object keys"),
+    ],
+)
+def test_identity_bundle_rejects_ambiguous_yaml_integrity_values(
+    tmp_path: Path,
+    invalid_field: str,
+    error: str,
+) -> None:
+    core = tmp_path / "subject_core.yaml"
+    constitution = tmp_path / "constitution.yaml"
+    core.write_text(f"identity_id: strict-test\n{invalid_field}\n", encoding="utf-8")
+    constitution.write_text("clauses: []\n", encoding="utf-8")
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        IdentityBundle.load(core, constitution)
 
 
 def test_identity_store_persists_self_model_and_lineage(tmp_path: Path) -> None:
@@ -76,6 +103,48 @@ def test_identity_store_persists_self_model_and_lineage(tmp_path: Path) -> None:
     assert head is not None
     assert head.identity_fingerprint == identity.fingerprint
     assert head.branch_id == "main"
+
+
+@pytest.mark.parametrize(
+    ("field", "error"),
+    [
+        (field, f"lineage {field} must be an exact string")
+        for field in (
+            "event",
+            "branch_id",
+            "body_version",
+            "brain_backend",
+            "model_id",
+            "identity_fingerprint",
+            "note",
+        )
+    ]
+    + [
+        (field, f"lineage {field} must be null or an exact string")
+        for field in ("checkpoint_digest", "parent_checkpoint_digest")
+    ],
+)
+def test_identity_lineage_rejects_silent_string_coercion(
+    tmp_path: Path,
+    field: str,
+    error: str,
+) -> None:
+    store = IdentityStore(tmp_path / "memory.sqlite3")
+    arguments = {
+        "event": "boot",
+        "branch_id": "main",
+        "body_version": "test-body",
+        "brain_backend": "mock",
+        "model_id": "model-a",
+        "identity_fingerprint": "a" * 64,
+        "note": "test",
+    }
+    arguments[field] = StringMasquerade()
+
+    with pytest.raises(TypeError, match=error):
+        store.record_lineage(**arguments)
+
+    assert store.lineage(None) == []
 
 
 def test_model_swap_is_not_structural_identity_failure() -> None:
