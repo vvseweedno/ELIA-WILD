@@ -17,8 +17,8 @@ def test_scheduled_wake_is_guarded_bounded_and_secret_scoped() -> None:
     assert "cancel-in-progress: false" in text
     assert "timeout-minutes: 15" in text
     assert "persist-credentials: false" in text
-    assert "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09" in text
-    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in text
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in text
+    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in text
 
     parsed = yaml.safe_load(text)
     heartbeat = parsed["jobs"]["heartbeat"]
@@ -81,7 +81,7 @@ def test_wake_witness_survives_ephemeral_runner_and_never_scheduled_bootstraps()
     assert "${#archive_entries[@]}" in text
     assert "${archive_entries[0]}" in text
     assert "size_in_bytes <= 65536" in text
-    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in text
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in text
     assert "retention-days: 90" in text
     assert "initialize_anchor:" in text
     assert "github.event_name == 'workflow_dispatch'" in text

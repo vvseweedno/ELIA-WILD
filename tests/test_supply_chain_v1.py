@@ -73,7 +73,7 @@ def test_codeql_and_dependency_update_workflows_are_present() -> None:
     assert "sha256sum --check dist/SHA256SUMS" in ci_text
     assert "cyclonedx-bom==7.3.1" in ci_text
     assert "--output-reproducible" in ci_text
-    assert "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" in ci_text
+    assert "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6" in ci_text
     assert "packaged source manifest differs" in ci_text
     assert "Full typed correctness gate" in ci_text
     assert "--warn-unused-ignores" in ci_text

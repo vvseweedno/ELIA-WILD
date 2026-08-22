@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 import uuid
 
 import pytest
 
-from release_tools.finalize_cyclonedx import finalize_cyclonedx
+
+ROOT = Path(__file__).resolve().parents[1]
+FINALIZER = ROOT / "release_tools" / "finalize_cyclonedx.py"
+
+
+def _finalize(path: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(FINALIZER), str(path)],
+        check=check,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_cyclonedx_finalization_is_reproducible(tmp_path: Path) -> None:
@@ -24,14 +37,17 @@ def test_cyclonedx_finalization_is_reproducible(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    first_serial = finalize_cyclonedx(first)
-    second_serial = finalize_cyclonedx(second)
+    _finalize(first)
+    _finalize(second)
+    first_serial = json.loads(first.read_text(encoding="utf-8"))["serialNumber"]
+    second_serial = json.loads(second.read_text(encoding="utf-8"))["serialNumber"]
 
     assert first.read_bytes() == second.read_bytes()
     assert first_serial == second_serial
     assert first_serial.startswith("urn:uuid:")
     assert uuid.UUID(first_serial.removeprefix("urn:uuid:")).version == 5
-    assert finalize_cyclonedx(first) == first_serial
+    _finalize(first)
+    assert json.loads(first.read_text(encoding="utf-8"))["serialNumber"] == first_serial
 
 
 @pytest.mark.parametrize(
@@ -53,8 +69,10 @@ def test_cyclonedx_finalization_rejects_malformed_input(
     document = tmp_path / "invalid.cdx.json"
     document.write_text(payload, encoding="utf-8")
 
-    with pytest.raises(ValueError, match=message):
-        finalize_cyclonedx(document)
+    result = _finalize(document, check=False)
+
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 def test_cyclonedx_finalization_emits_attest_recognition_fields(
@@ -72,7 +90,7 @@ def test_cyclonedx_finalization_emits_attest_recognition_fields(
         encoding="utf-8",
     )
 
-    finalize_cyclonedx(document)
+    _finalize(document)
     result = json.loads(document.read_text(encoding="utf-8"))
 
     assert result["bomFormat"] == "CycloneDX"
