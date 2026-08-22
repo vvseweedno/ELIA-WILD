@@ -21,6 +21,18 @@ hostile root cannot rewrite local evidence, or that the unexecuted live Kaggle/G
 path has already succeeded. The real Qwen/T4 round trip remains the release's
 empirical deployment gate.
 
+## Post-audit licensing and ownership control
+
+After technical consolidation, version `1.7.1a2` replaced the repository's MIT
+terms with the ELIA WILD Source-Available Proprietary License 1.0. The current
+source remains publicly inspectable and installable in unmodified form solely
+for pre-purchase inspection; execution, deployment, modification,
+redistribution and other use require a separate paid written license. This
+change is prospective: it does not purport to revoke rights validly granted with
+earlier versions. Repository-wide `CODEOWNERS` assigns the canonical tree to
+`@vvseweedno`, and the contribution policy rejects unsolicited changes unless a
+prior written contributor agreement exists.
+
 ## Review team
 
 The audit was split across the roles normally involved in an autonomous-agent

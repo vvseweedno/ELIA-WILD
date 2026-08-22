@@ -170,7 +170,7 @@ Before Genesis 1.7.1 should be treated as a completed live deployment, one real 
 6. the external heartbeat restores its independent witness;
 7. a later relay wakes from the persisted state and advances the authenticated checkpoint counter.
 
-Until that happens, `1.7.1a1` is a software release candidate, not evidence of unattended production autonomy.
+Until that happens, `1.7.1a2` is a software release candidate, not evidence of unattended production autonomy.
 
 ## Non-claims
 

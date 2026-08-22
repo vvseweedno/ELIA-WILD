@@ -1,1 +1,2 @@
 include release_tools/normalize_sdist.py
+include CONTRIBUTING.md

@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elia-wild"
-version = "1.7.1a1"
+version = "1.7.1a2"
 description = "Persistent autonomous-identity organism and continuity research runtime"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "LicenseRef-ELIA-WILD-Proprietary-1.0"
+license-files = ["LICENSE", "COMMERCIAL_LICENSING.md"]
 keywords = ["agents", "continuity", "autonomous-systems", "llm", "research"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -28,6 +29,7 @@ dependencies = [
 Homepage = "https://github.com/vvseweedno/ELIA-WILD"
 Repository = "https://github.com/vvseweedno/ELIA-WILD.git"
 Issues = "https://github.com/vvseweedno/ELIA-WILD/issues"
+Commercial-Licensing = "https://github.com/vvseweedno/ELIA-WILD/blob/main/COMMERCIAL_LICENSING.md"
 
 [project.optional-dependencies]
 test = [

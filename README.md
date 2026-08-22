@@ -3,8 +3,8 @@
 [![Genesis CI](https://github.com/vvseweedno/ELIA-WILD/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vvseweedno/ELIA-WILD/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/vvseweedno/ELIA-WILD/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/vvseweedno/ELIA-WILD/actions/workflows/codeql.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
-[![Version 1.7.1a1](https://img.shields.io/badge/version-1.7.1a1-6f42c1.svg)](https://github.com/vvseweedno/ELIA-WILD)
-[![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Version 1.7.1a2](https://img.shields.io/badge/version-1.7.1a2-6f42c1.svg)](https://github.com/vvseweedno/ELIA-WILD)
+[![License: Proprietary](https://img.shields.io/badge/license-proprietary-red.svg)](LICENSE)
 
 **A persistent autonomous digital-organism research runtime with identity,
 causal continuity, bounded embodiment and authority outside the language model.**
@@ -284,6 +284,13 @@ or the same compromised runtime UID can defeat local-only evidence. See
 
 ## Installation
 
+> **License notice:** Public visibility does not make ELIA WILD open-source or
+> free-to-use software. An unmodified copy may be installed for pre-purchase
+> inspection, but running, deploying, modifying or otherwise using the project
+> requires a paid written license. See [`LICENSE`](LICENSE) and
+> [`COMMERCIAL_LICENSING.md`](COMMERCIAL_LICENSING.md). The commands below are
+> operational instructions for licensed users.
+
 ### Requirements
 
 - Linux or another compatible POSIX environment;
@@ -550,7 +557,7 @@ commit used:
   title   = {ELIA WILD: A Persistent Autonomous Digital-Organism Research Runtime},
   author  = {{ELIA WILD contributors}},
   year    = {2026},
-  version = {1.7.1a1},
+  version = {1.7.1a2},
   url     = {https://github.com/vvseweedno/ELIA-WILD},
   note    = {Cite the exact Git commit used in the experiment}
 }
@@ -558,4 +565,12 @@ commit used:
 
 ## License
 
-ELIA WILD is released under the [MIT License](LICENSE).
+ELIA WILD is **publicly viewable but proprietary**. Viewing the canonical
+repository and installing one unmodified copy for pre-purchase inspection are
+permitted. Running, deploying, modifying, redistributing, benchmarking,
+training with or otherwise using the software requires a separate paid written
+license from the owner.
+
+See the binding [ELIA WILD Source-Available Proprietary License](LICENSE) and the
+[commercial-licensing guide](COMMERCIAL_LICENSING.md). Earlier versions validly
+distributed under other terms remain governed by those earlier terms.

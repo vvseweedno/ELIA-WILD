@@ -1,21 +1,141 @@
-MIT License
+ELIA WILD SOURCE-AVAILABLE PROPRIETARY LICENSE
+Version 1.0 — 22 August 2026
 
-Copyright (c) 2026 vvseweedno
+Copyright (c) 2026 vvseweedno. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+IMPORTANT: ELIA WILD IS PUBLICLY VIEWABLE, BUT IT IS NOT OPEN-SOURCE OR
+FREE-TO-USE SOFTWARE. INSTALLATION DOES NOT GRANT A RIGHT TO OPERATE THE
 SOFTWARE.
+
+1. DEFINITIONS
+
+"Licensor" means the copyright holder identified above.
+
+"Software" means ELIA WILD and every source-code, configuration,
+documentation, model-integration, data-schema, test, workflow and packaged
+artifact distributed with this license, except for third-party components
+expressly identified as such.
+
+"Install" means downloading and copying an unmodified copy of the Software to
+a device solely so that its contents and installation requirements can be
+inspected before a commercial licensing decision. Installation does not
+include executing the ELIA WILD runtime or using any of its functionality.
+
+"Use" includes, without limitation, executing, operating, deploying, hosting,
+integrating, testing functionality, benchmarking, researching with, training
+with, adapting, modifying or deriving value from the Software or any part of
+it.
+
+"Commercial License" means a separate written agreement issued by the
+Licensor, specifying the permitted use and the applicable fee.
+
+2. LIMITED PERMISSION
+
+Subject to full compliance with this license, the Licensor permits you only to:
+
+(a) view and inspect the Software in the Licensor's canonical public
+    repository; and
+
+(b) download and Install one unmodified copy solely to evaluate whether to
+    acquire a Commercial License.
+
+You may make one unmodified archival backup only when strictly necessary for
+the permitted Installation. No other rights are granted by implication,
+estoppel or otherwise.
+
+3. PAID LICENSE REQUIRED FOR USE
+
+You must obtain a Commercial License from the Licensor before any Use of the
+Software. This requirement applies equally to commercial, personal,
+educational, academic, research, governmental, charitable and other
+non-profit purposes. Public availability, cloning, downloading, Installation,
+possession of a copy, or payment made without a written agreement does not
+grant a right to Use the Software.
+
+4. RESTRICTIONS
+
+Without a Commercial License that expressly permits the relevant activity,
+you must not, and must not enable any third party to:
+
+(a) execute, operate, deploy, host or expose the Software or its functionality;
+
+(b) modify, adapt, translate, patch, merge or create derivative works from the
+    Software;
+
+(c) copy the Software except as expressly allowed in Section 2;
+
+(d) publish, distribute, mirror, sublicense, sell, rent, lease, transfer or
+    otherwise provide the Software or access to it;
+
+(e) use the Software to provide a service, agent, API, hosted environment,
+    managed offering or output-producing system for any person;
+
+(f) use the Software or its outputs for training, fine-tuning, distillation,
+    evaluation, benchmarking, dataset creation or competing product
+    development;
+
+(g) remove or obscure copyright, attribution, provenance or license notices;
+    or
+
+(h) represent the Software as open source, freely licensed or endorsed by the
+    Licensor.
+
+Any platform rights automatically required by GitHub's terms apply only to the
+minimum extent required for GitHub to host and display the canonical
+repository. They do not grant a right to Use, modify or distribute the
+Software outside that mandatory scope.
+
+5. COMMERCIAL LICENSING
+
+To request a Commercial License, contact the repository owner through
+https://github.com/vvseweedno. A Commercial License is effective only when its
+scope, term and fee are confirmed in writing by the Licensor. The Licensor may
+grant or refuse a license at the Licensor's discretion.
+
+6. OWNERSHIP
+
+The Software is licensed, not sold. The Licensor retains all title, copyright,
+intellectual-property rights and other rights in the Software. No permission
+is granted to use ELIA WILD names, logos or marks.
+
+7. THIRD-PARTY MATERIALS
+
+Third-party packages, services and other materials are governed by their own
+licenses and terms. This license neither restricts rights independently
+granted by those third parties nor grants rights that the Licensor does not
+own. A Commercial License for ELIA WILD does not replace licenses required for
+third-party materials.
+
+8. PRIOR RELEASES
+
+This license applies to versions of the Software distributed with this license.
+It does not purport to revoke a license validly granted with an earlier version
+of the Software. Earlier copies remain governed by the terms distributed with
+those copies.
+
+9. TERMINATION
+
+Any permission under Section 2 terminates automatically and immediately upon
+breach. On termination, you must stop all activity involving the Software and
+delete every copy in your possession or control, except where retention is
+required by law. Sections 3 through 12 survive termination.
+
+10. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY OR SECURITY.
+
+11. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR WILL NOT BE LIABLE FOR ANY
+CLAIM, LOSS, DAMAGE OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ARISING FROM OR RELATED TO THE SOFTWARE OR THIS LICENSE.
+
+12. GENERAL
+
+If any provision is unenforceable, it will be limited to the minimum extent
+necessary and the remaining provisions will remain effective. A waiver must be
+in writing and applies only to the specific instance stated. This license is
+the entire agreement for the limited permission in Section 2 and may be
+superseded only by a written Commercial License from the Licensor.
