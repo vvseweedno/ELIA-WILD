@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
+import math
+from pathlib import Path
 import re
+import sqlite3
 from typing import Any, Iterable
 
 from .memory import MemoryRecord, MemoryStore
@@ -38,9 +42,114 @@ class RecallEngine:
     def __init__(self, memory: MemoryStore):
         self.memory = memory
 
-    def _all_candidates(self, limit: int = 512) -> list[MemoryRecord]:
-        # Use MemoryStore's stable parser while bounding CPU/context work.
-        return self.memory.recent(max(1, min(int(limit), 5000)))
+    @staticmethod
+    def _record(row: sqlite3.Row) -> MemoryRecord | None:
+        try:
+            metadata = json.loads(str(row["metadata_json"]) or "{}")
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        try:
+            importance = float(row["importance"])
+        except (TypeError, ValueError):
+            return None
+        return MemoryRecord(
+            id=int(row["id"]),
+            timestamp=str(row["timestamp"]),
+            kind=str(row["kind"]),
+            content=str(row["content"]),
+            importance=importance,
+            source=str(row["source"]),
+            metadata=metadata,
+        )
+
+    def _query_records(
+        self,
+        where: str,
+        params: tuple[Any, ...],
+        *,
+        order_by: str,
+        limit: int,
+    ) -> list[MemoryRecord]:
+        database = Path(self.memory.path)
+        with sqlite3.connect(database, timeout=30.0) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, timestamp, kind, content, importance, source, metadata_json "
+                f"FROM memories WHERE {where} ORDER BY {order_by} LIMIT ?",
+                (*params, int(limit)),
+            ).fetchall()
+        return [record for row in rows if (record := self._record(row)) is not None]
+
+    def _all_candidates(
+        self,
+        limit: int = 512,
+        *,
+        query_tokens: set[str] | None = None,
+    ) -> list[MemoryRecord]:
+        """Build a bounded stratified pool rather than one floodable recency window."""
+
+        bound = max(16, min(int(limit), 5000))
+        pools: list[list[MemoryRecord]] = [self.memory.recent(bound)]
+
+        # Reserve a pool for privileged/corroborated provenance. This query is
+        # independent of how many newer brain hypotheses exist, closing the 513-item
+        # recency-flood counterexample while keeping returned CPU/context bounded.
+        trusted_classes = (
+            "protected_identity",
+            "verified_fact",
+            "causal_evidence",
+            "corroborated_memory",
+        )
+        trusted_where = (
+            "source IN ('continuity_kernel','verification_kernel','owner_control',"
+            "'runtime','resource_ingress_registry','work_port_registry') OR "
+            "(json_valid(metadata_json) AND "
+            "json_extract(metadata_json, '$.trust_class') IN (?, ?, ?, ?))"
+        )
+        pools.append(
+            self._query_records(
+                trusted_where,
+                trusted_classes,
+                order_by="id DESC",
+                limit=bound,
+            )
+        )
+        pools.append(
+            self._query_records(
+                "1=1",
+                (),
+                order_by="importance DESC, id DESC",
+                limit=max(16, bound // 4),
+            )
+        )
+
+        tokens = sorted(query_tokens or set(), key=lambda value: (-len(value), value))[:8]
+        if tokens:
+            per_token = max(8, bound // len(tokens))
+            lexical: list[MemoryRecord] = []
+            for token in tokens:
+                escaped = (
+                    token.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                lexical.extend(
+                    self._query_records(
+                        "content LIKE ? ESCAPE '\\'",
+                        (f"%{escaped}%",),
+                        order_by="importance DESC, id DESC",
+                        limit=per_token,
+                    )
+                )
+            pools.append(lexical)
+
+        by_id: dict[int, MemoryRecord] = {}
+        for pool in pools:
+            for record in pool:
+                by_id[record.id] = record
+        return list(by_id.values())
 
     def recall(
         self,
@@ -49,17 +158,23 @@ class RecallEngine:
         limit: int = 16,
         candidate_limit: int = 512,
     ) -> list[dict[str, Any]]:
-        candidates = self._all_candidates(candidate_limit)
         query_tokens = _tokens(" ".join(str(item) for item in queries))
+        candidates = self._all_candidates(candidate_limit, query_tokens=query_tokens)
         if not candidates:
             return []
 
-        max_id = max(record.id for record in candidates)
+        with sqlite3.connect(Path(self.memory.path), timeout=30.0) as conn:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM memories").fetchone()
+        max_id = int(row[0]) if row else max(record.id for record in candidates)
         scored: list[tuple[float, MemoryRecord, dict[str, float]]] = []
         for record in candidates:
             age = max_id - record.id
             recency = 1.0 / (1.0 + age / 12.0)
-            importance = max(0.0, min(1.0, record.importance))
+            importance = (
+                max(0.0, min(1.0, record.importance))
+                if math.isfinite(record.importance)
+                else 0.0
+            )
             trust = memory_trust_score(record)
             record_tokens = _tokens(record.content)
             lexical = (
@@ -95,15 +210,29 @@ class RecallEngine:
         # model-authored hypotheses cannot impersonate privileged `self`/`lesson` kinds
         # because MemoryTrustGate stores them as `brain_hypothesis`.
         selected: list[tuple[float, MemoryRecord, dict[str, float]]] = []
+        selected_ids: set[int] = set()
+
+        trusted_relevant = [
+            item
+            for item in scored
+            if item[2]["trust"] >= 0.75
+            and (not query_tokens or item[2]["lexical"] > 0.0 or item[2]["importance"] >= 0.8)
+        ]
+        trusted_quota = min(len(trusted_relevant), max(1, int(limit) // 4))
+        for item in trusted_relevant[:trusted_quota]:
+            selected.append(item)
+            selected_ids.add(item[1].id)
+
         seen_kinds: set[str] = set()
+        seen_kinds.update(item[1].kind for item in selected)
         for item in scored:
-            if item[1].kind not in seen_kinds:
+            if item[1].id not in selected_ids and item[1].kind not in seen_kinds:
                 selected.append(item)
+                selected_ids.add(item[1].id)
                 seen_kinds.add(item[1].kind)
             if len(selected) >= max(1, int(limit)):
                 break
         if len(selected) < max(1, int(limit)):
-            selected_ids = {item[1].id for item in selected}
             for item in scored:
                 if item[1].id in selected_ids:
                     continue

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from elia.organism import OrganismManifest, default_manifest_path
+from elia.organism import OrganismManifest
 
 
 EPISTEMIC_REQUIRED = (

@@ -1,20 +1,39 @@
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("mcp")
 from mcp.server import MCPServer
+from nacl.signing import SigningKey
 
 from elia.economy import EconomyStore
 from elia.observations import ObservationStore
 from elia.resource_ecology import ResourceEcologyStore
-from elia.resource_ingress import ResourceIngressRegistry
+from elia.resource_ingress import ResourceIngressRegistry, _canonical
+from elia.resource_ingress_hardened import AttestedResourceIngressRegistry
 
 
 VERIFY_ENV = "ELIA_TEST_RESOURCE_VERIFIER_KEY"
 VERIFY_KEY = "0123456789abcdef0123456789abcdef"
+PROVIDER_VERIFY_ENV = "ELIA_TEST_RESOURCE_PROVIDER_VERIFY_KEY"
+PROVIDER_SIGNING_KEY = SigningKey(bytes(reversed(range(32))))
+
+
+ARGUMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "work_item_id": {"type": ["integer", "null"]},
+        "asset": {"type": "string", "enum": ["cash"]},
+        "unit": {"type": "string", "enum": ["USD", "RUB"]},
+    },
+    "required": ["work_item_id", "asset", "unit"],
+    "additionalProperties": False,
+}
 
 
 def _config() -> dict:
@@ -27,6 +46,7 @@ def _config() -> dict:
                         "enabled": True,
                         "allow_tool_calls": True,
                         "allowed_tools": ["observe_credit"],
+                        "tool_argument_schemas": {"observe_credit": ARGUMENT_SCHEMA},
                         "allowed_resources": [],
                         "timeout_seconds": 10,
                     }
@@ -45,6 +65,10 @@ def _config() -> dict:
                     "asset": "cash",
                     "unit": "USD",
                     "kind": "income",
+                    "expected_provider": "test-bank",
+                    "expected_account_binding": "acct-sha256:abc",
+                    "provider_verify_key_env": PROVIDER_VERIFY_ENV,
+                    "max_attestation_age_seconds": 3600,
                 }
             },
         },
@@ -61,12 +85,33 @@ def _server(state: dict) -> MCPServer:
         assert unit == "USD"
         if not state.get("observed", True):
             return {"observed": False}
-        return {
+        claim = {
             "observed": True,
             "external_event_id": state.get("external_event_id", "bank-event-001"),
+            "provider_event_id": state.get("external_event_id", "bank-event-001"),
+            "provider": "test-bank",
+            "account_binding": "acct-sha256:abc",
+            "settlement_status": "settled",
+            "asset": asset,
+            "unit": unit,
+            "kind": "income",
             "amount": state.get("amount", 75.0),
+            "settled_at": datetime.now(timezone.utc).isoformat(),
+            "work_item_id": work_item_id,
             "evidence": state.get("evidence", "Provider ledger shows settled 75 USD credit."),
         }
+        signed = {key: value for key, value in claim.items() if key != "observed"}
+        claim["attestation_signature"] = base64.b64encode(
+            PROVIDER_SIGNING_KEY.sign(
+                json.dumps(
+                    signed,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).signature
+        ).decode("ascii")
+        return claim
 
     return server
 
@@ -145,7 +190,11 @@ def test_independent_verifier_realizes_accepted_work_and_changes_balance_once(
     work_id = _accepted_work(state_dir)
     remote = {"calls": 0, "external_event_id": "settlement-abc", "amount": 75.0}
     server = _server(remote)
-    registry = ResourceIngressRegistry(
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    registry = AttestedResourceIngressRegistry(
         state_dir,
         _config(),
         mcp_target_overrides={"bank": server},
@@ -185,7 +234,11 @@ def test_replayed_external_id_with_changed_claim_fails_closed(monkeypatch, tmp_p
     state_dir = tmp_path / ".elia"
     remote = {"calls": 0, "external_event_id": "same-id", "amount": 25.0, "evidence": "25 USD"}
     server = _server(remote)
-    registry = ResourceIngressRegistry(
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    registry = AttestedResourceIngressRegistry(
         state_dir,
         _config(),
         mcp_target_overrides={"bank": server},
@@ -206,7 +259,11 @@ def test_unobserved_verifier_result_does_not_create_resource(monkeypatch, tmp_pa
     monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
     state_dir = tmp_path / ".elia"
     remote = {"calls": 0, "observed": False}
-    registry = ResourceIngressRegistry(
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    registry = AttestedResourceIngressRegistry(
         state_dir,
         _config(),
         mcp_target_overrides={"bank": _server(remote)},
@@ -227,7 +284,11 @@ def test_verifier_signing_key_cannot_be_delegated_to_mcp_transport(
         "Authorization": VERIFY_ENV
     }
     remote = {"calls": 0}
-    registry = ResourceIngressRegistry(
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    registry = AttestedResourceIngressRegistry(
         state_dir,
         config,
         mcp_target_overrides={"bank": _server(remote)},
@@ -245,7 +306,11 @@ def test_linked_ingress_requires_exact_accepted_work_resource_key(monkeypatch, t
     work_id = _accepted_work(state_dir)
     config = _config()
     config["resource_ingress"]["verifiers"]["bank_usd"]["unit"] = "RUB"
-    registry = ResourceIngressRegistry(
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    registry = AttestedResourceIngressRegistry(
         state_dir,
         config,
         mcp_target_overrides={"bank": _server({"calls": 0})},
@@ -257,3 +322,40 @@ def test_linked_ingress_requires_exact_accepted_work_resource_key(monkeypatch, t
     assert result.ok is False
     assert "does not match accepted work resource profile" in str(result.error)
     assert EconomyStore(state_dir / "memory.sqlite3").verified_balance("cash", "RUB") == 0
+
+
+def test_resource_ingress_canonical_json_is_order_stable_and_strict() -> None:
+    assert _canonical({"a": 1, "nested": {"x": 2, "y": 3}}) == _canonical(
+        {"nested": {"y": 3, "x": 2}, "a": 1}
+    )
+
+    class Stringifiable:
+        def __str__(self) -> str:
+            return "ambiguous"
+
+    for invalid in ({"amount": float("nan")}, {"value": Stringifiable()}):
+        with pytest.raises(ValueError):
+            _canonical(invalid)
+
+
+def test_legacy_resource_ingress_never_claims_provider_authentication(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    remote = {"calls": 0}
+    registry = ResourceIngressRegistry(
+        tmp_path / ".elia",
+        _config(),
+        mcp_target_overrides={"bank": _server(remote)},
+    )
+    assert registry.enabled is False
+    assert registry.catalog()["check_resource_ingress"]["readiness"] == (
+        "provider_authentication_required"
+    )
+    result = registry.execute("check_resource_ingress", {"verifier": "bank_usd"})
+    assert result.ok is False
+    assert remote["calls"] == 0

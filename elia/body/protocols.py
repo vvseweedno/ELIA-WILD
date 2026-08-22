@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from .net import pinned_http_request
-from .types import BodyCapability, BodyResult
+from .types import BodyCapability, BodyResult, bounded_json_value, validate_json_schema
 
 
 class JSONRPCBody:
@@ -28,7 +28,9 @@ class JSONRPCBody:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.get("enabled", False)) and bool(self.endpoints())
+        return bool(self.config.get("enabled", False)) and any(
+            bool(item.get("method_param_schemas")) for item in self.endpoints().values()
+        )
 
     def capabilities(self) -> list[BodyCapability]:
         return [
@@ -68,6 +70,13 @@ class JSONRPCBody:
         allowed = {str(value) for value in item.get("allowed_methods") or []}
         if not method or method not in allowed:
             return BodyResult(False, "jsonrpc_call", error=f"JSON-RPC method is not allow-listed: {method!r}")
+        schemas = item.get("method_param_schemas") or {}
+        if not isinstance(schemas, dict) or method not in schemas:
+            return BodyResult(
+                False,
+                "jsonrpc_call",
+                error=f"JSON-RPC method has no configured parameter schema: {method!r}",
+            )
         url = str(item.get("url", "")).strip()
         try:
             timeout = max(0.5, min(float(item.get("timeout_seconds", 20.0)), 120.0))
@@ -80,11 +89,16 @@ class JSONRPCBody:
                 min(int(item.get("max_response_bytes", 1_000_000)), 8_000_000),
             )
             request_id = next(self._ids)
+            scoped_params = validate_json_schema(
+                params if params is not None else {},
+                schemas[method],
+                field=f"JSON-RPC params for {method}",
+            )
             payload = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
-                "params": params if params is not None else {},
+                "params": scoped_params,
             }
             request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             response = pinned_http_request(
@@ -101,7 +115,17 @@ class JSONRPCBody:
                 raise RuntimeError(f"JSON-RPC HTTP status {response.status_code}")
             if response.truncated:
                 raise ValueError("JSON-RPC response exceeded configured size limit")
-            body = json.loads(response.content.decode(response.encoding or "utf-8", errors="strict"))
+            body = json.loads(
+                response.content.decode(response.encoding or "utf-8", errors="strict"),
+                parse_constant=lambda token: (_ for _ in ()).throw(
+                    ValueError(f"non-finite JSON-RPC number is forbidden: {token}")
+                ),
+            )
+            body = bounded_json_value(
+                body,
+                field="JSON-RPC response",
+                max_bytes=max_response_bytes,
+            )
             if not isinstance(body, dict) or body.get("jsonrpc") != "2.0" or body.get("id") != request_id:
                 raise ValueError("invalid JSON-RPC 2.0 response envelope")
             if body.get("error") is not None:

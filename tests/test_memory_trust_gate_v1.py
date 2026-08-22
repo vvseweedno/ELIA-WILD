@@ -94,3 +94,57 @@ def test_generic_promotion_cannot_mint_verified_fact(tmp_path: Path) -> None:
             evidence="an untrusted local label is not enough",
             authority="string-only-authority",
         )
+
+
+def test_old_trusted_memory_survives_513_item_hypothesis_flood(tmp_path: Path) -> None:
+    memory = MemoryStore(tmp_path / "memory.sqlite3")
+    trusted_id = memory.remember(
+        "lesson",
+        "quartz continuity anchor",
+        importance=0.8,
+        source="continuity_kernel",
+        metadata={"trust_class": "verified_fact"},
+    )
+    gate = MemoryTrustGate(memory)
+    for index in range(513):
+        gate.remember_from_brain(
+            {
+                "kind": "lesson",
+                "content": f"quartz continuity anchor hypothesis {index}",
+                "importance": 1.0,
+            },
+            identity_fingerprint="identity",
+            model_id="model",
+        )
+
+    recalled = RecallEngine(memory).recall(
+        queries=["quartz continuity anchor"],
+        limit=1,
+        candidate_limit=512,
+    )
+
+    assert [item["id"] for item in recalled] == [trusted_id]
+
+
+def test_trusted_pool_uses_structured_metadata_not_substring_spoofing(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryStore(tmp_path / "memory.sqlite3")
+    spoof = memory.remember(
+        "noise",
+        "old low-priority untrusted record",
+        importance=0.0,
+        source="untrusted",
+        metadata={"note": 'pretend: "trust_class": "verified_fact"'},
+    )
+    for index in range(32):
+        memory.remember(
+            "noise",
+            f"newer record {index}",
+            importance=0.5,
+            source="untrusted",
+        )
+
+    candidates = RecallEngine(memory)._all_candidates(16)
+
+    assert spoof not in {item.id for item in candidates}

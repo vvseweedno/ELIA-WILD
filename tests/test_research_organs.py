@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 
-from elia.research.decay import DecaySchedule, SILVER_RATIO_CONJUGATE
+import pytest
+
+from elia.research.decay import DecaySchedule, SILVER_RATIO_CONJUGATE, apply_decay
 from elia.research.memory import (
     AffineRecurrence,
     FractalMemory,
-    associative_prefix,
+    ScrollMemory,
     build_memory_backend,
     holo_scan,
     lru_scan,
@@ -81,6 +83,46 @@ def test_ouroboros_reference_uses_explicit_decay() -> None:
     injected = ouroboros_inject(1.0, 2.0, depth=0, schedule=DecaySchedule("half"), strength=0.5)
     assert injected == 1.5
     assert 0.0 < surprisal_from_token_loss(1.0) < 1.0
+
+
+def test_decay_is_cumulative_and_monotone_through_depth() -> None:
+    schedule = DecaySchedule("half")
+    assert [schedule.attenuation(depth) for depth in range(4)] == [0.5, 0.25, 0.125, 0.0625]
+    assert apply_decay([1.0] * 4, schedule) == [0.5, 0.25, 0.125, 0.0625]
+    assert ouroboros_inject(0.0, 1.0, depth=3, schedule=schedule) == 0.0625
+
+
+@pytest.mark.parametrize("invalid", [-1.0, float("nan"), float("inf")])
+def test_surprisal_gate_rejects_invalid_token_nll(invalid: float) -> None:
+    with pytest.raises(ValueError, match="token NLL"):
+        surprisal_from_token_loss(invalid)
+
+
+def test_recurrent_scan_rejects_silent_zip_truncation() -> None:
+    with pytest.raises(ValueError, match="equal length"):
+        lru_scan([1.0, 2.0], [0.5])
+
+
+def test_memory_reference_backends_reject_nonfinite_state_and_invalid_gates() -> None:
+    with pytest.raises(ValueError, match="scroll memory value"):
+        ScrollMemory().step(float("nan"))
+    with pytest.raises(ValueError, match="initial scan state"):
+        lru_scan([1.0], [0.5], initial=float("inf"))
+    with pytest.raises(ValueError, match=r"within \[0, 1\]"):
+        lru_scan([1.0], [1.1])
+    with pytest.raises(ValueError, match="state length"):
+        FractalMemory(levels=2, _level_state=[0.0])
+
+
+@pytest.mark.parametrize("backend", [ScrollMemory(), FractalMemory()])
+def test_real_memory_backends_reject_nonreal_complex_values(backend) -> None:
+    with pytest.raises(ValueError, match="real-valued"):
+        backend.step(1.0 + 1.0j)
+
+
+def test_learned_decay_rejects_out_of_range_retention() -> None:
+    with pytest.raises(ValueError, match=r"within \[0, 1\]"):
+        DecaySchedule("learned", rho=1.1).coefficient()
 
 
 def test_omega_reference_components_are_bounded_and_shared_weight() -> None:

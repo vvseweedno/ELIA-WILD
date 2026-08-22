@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 
 TOKEN_RE = re.compile(r"\w+", re.UNICODE)

@@ -12,10 +12,12 @@ import time
 from typing import Any
 
 from .body.mcp import MCPBody
+from .body.types import bounded_json_value
 from .causal import CausalMemoryStore
 from .economy import EconomyStore
 from .observations import ObservationStore
 from .resource_ecology import ResourceEcologyStore
+from .sqlite_utils import inserted_row_id
 from .state_bus import OrganismStateBus
 from .tools import Capability, ToolResult
 from .verification import VerificationRegistry
@@ -26,12 +28,19 @@ def _now() -> str:
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(
+    bounded = bounded_json_value(
         value,
+        field="resource ingress value",
+        max_bytes=512_000,
+        max_depth=12,
+        max_items=4096,
+    )
+    return json.dumps(
+        bounded,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-        default=str,
+        allow_nan=False,
     )
 
 
@@ -226,8 +235,9 @@ class ResourceIngressStore:
                     int(work_item_id) if work_item_id is not None else None,
                 ),
             )
+            ingress_id = inserted_row_id(cur, operation="reserve resource ingress")
             row = conn.execute(
-                "SELECT * FROM resource_ingress_events WHERE id=?", (int(cur.lastrowid),)
+                "SELECT * FROM resource_ingress_events WHERE id=?", (ingress_id,)
             ).fetchone()
         if row is None:
             raise RuntimeError("ingress reservation disappeared after insert")
@@ -317,8 +327,13 @@ class ResourceIngressRegistry:
                 raise ValueError(f"resource verifier {name!r} has no {field}")
         return item
 
-    @staticmethod
-    def _machine_object(result: ToolResult) -> dict[str, Any]:
+    @property
+    def provider_authentication_ready(self) -> bool:
+        """Legacy ingress cannot upgrade self-asserted remote JSON to verified value."""
+
+        return False
+
+    def _machine_object(self, result: ToolResult) -> dict[str, Any]:
         if not result.ok or not isinstance(result.data, dict):
             raise RuntimeError(result.error or "resource verifier MCP call failed")
         item = result.data.get("structured_content")
@@ -347,13 +362,20 @@ class ResourceIngressRegistry:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.get("enabled", False)) and bool(self.verifiers()) and self.mcp.enabled
+        return (
+            bool(self.config.get("enabled", False))
+            and bool(self.verifiers())
+            and self.mcp.enabled
+            and self.provider_authentication_ready
+        )
 
     def _readiness(self) -> str:
         if not bool(self.config.get("enabled", False)):
             return "disabled"
         if not self.verifiers():
             return "no_configured_verifiers"
+        if not self.provider_authentication_ready:
+            return "provider_authentication_required"
         if not self.mcp.installed:
             return "mcp_v2_not_installed"
         if not self.mcp.enabled:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+import math
 import sqlite3
 
 import pytest
@@ -23,6 +24,15 @@ AUTHORITY = "test:kernel"
 
 def _registry() -> VerificationRegistry:
     return VerificationRegistry({AUTHORITY: KEY})
+
+
+def test_receipt_claim_requires_finite_json_not_stringified_objects() -> None:
+    registry = _registry()
+
+    with pytest.raises(ValueError, match="non-finite"):
+        registry.issue(AUTHORITY, claim={"amount": math.nan}, evidence="ledger")
+    with pytest.raises(TypeError, match="non-JSON value"):
+        registry.issue(AUTHORITY, claim={"opaque": object()}, evidence="ledger")
 
 
 def test_receipt_consumption_rolls_back_with_failed_domain_transaction(tmp_path: Path) -> None:

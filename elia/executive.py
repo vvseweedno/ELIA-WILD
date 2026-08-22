@@ -9,6 +9,10 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Literal
 
+from .agency import NEED_REGISTRY
+from .canonical import canonical_json
+from .sqlite_utils import inserted_row_id
+
 
 ExecutiveMode = Literal["halt", "hibernate", "maintenance", "resource", "mission", "observe"]
 CognitiveTier = Literal["none", "low", "normal", "deep"]
@@ -122,21 +126,17 @@ class ExecutiveController:
     """
 
     RESOURCE_NEEDS = {
-        "resource_runway",
-        "resource_acquisition",
-        "opportunity_review",
-        "opportunity_discovery",
-        "compute_survival",
-        "compute_conservation",
-        "uncovered_obligation",
+        name
+        for name, spec in NEED_REGISTRY.items()
+        if spec.category in {"resource", "compute"}
     }
-    HARD_STOP_NEEDS = {"continuity_integrity", "identity_drift"}
+    HARD_STOP_NEEDS = {
+        name for name, spec in NEED_REGISTRY.items() if spec.hard_stop
+    }
     REPAIR_NEEDS = {
-        "runtime_reliability",
-        "capability_repair",
-        "state_reconciliation",
-        "checkpoint_integrity",
-        "storage_pressure",
+        name
+        for name, spec in NEED_REGISTRY.items()
+        if spec.category in {"maintenance", "epistemic"}
     }
 
     def __init__(self, policy: ExecutivePolicy | None = None):
@@ -157,7 +157,7 @@ class ExecutiveController:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "")).strip()
-            if not name:
+            if not name or name not in NEED_REGISTRY:
                 continue
             severity = max(0.0, min(1.0, cls._finite(item.get("severity"))))
             candidates.append(
@@ -440,7 +440,7 @@ class ExecutiveStore:
     @staticmethod
     def context_digest(context: dict[str, Any]) -> str:
         public = {key: value for key, value in context.items() if not str(key).startswith("_")}
-        raw = json.dumps(public, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        raw = canonical_json(public)
         return sha256(raw.encode("utf-8")).hexdigest()
 
     def record(self, plan: ExecutivePlan, context: dict[str, Any]) -> int:
@@ -475,7 +475,7 @@ class ExecutiveStore:
                     json.dumps(plan.reasons, ensure_ascii=False),
                 ),
             )
-            return int(cur.lastrowid)
+            return inserted_row_id(cur, operation="executive plan insert")
 
     def resolve(
         self,

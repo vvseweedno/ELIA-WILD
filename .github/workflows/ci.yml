@@ -27,14 +27,25 @@ jobs:
       - name: Static correctness gates
         run: |
           python -m pip check
-          python -m compileall -q elia tests
-          ruff check elia tests
+          python -m compileall -q elia scripts runtime/kaggle/runner_template.py tests
+          ruff check elia scripts runtime/kaggle/runner_template.py tests
+      - name: Full typed correctness gate
+        run: |
+          python -m mypy \
+            --ignore-missing-imports \
+            --check-untyped-defs \
+            --warn-unused-ignores \
+            elia scripts
       - name: Known-vulnerability audit
         run: python -m pip_audit
+      - name: High-severity static security gate
+        run: python -m bandit -q -lll -r elia scripts
       - name: Test
         run: pytest -q --junitxml=pytest-report.xml
-      - name: ELIA AgentBench autonomy falsification gate
-        run: python -m elia.agentbench --json
+      - name: Deterministic invariant regression suite
+        run: |
+          python -m elia.agentbench --json
+          python -O -m elia.agentbench --json
       - name: Upload pytest report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -56,7 +67,15 @@ jobs:
           ELIA_STATE_DIR=.elia-smoke elia-supervisor --dry-run
       - name: Reference research smoke
         run: |
-          python -c "from elia.research.bench import run_reference_cognitive_stress as r; x=r(); assert x['needle']==1.0 and x['scrambled_pattern']==1.0 and all(i['finite'] for i in x['memory_backends'])"
+          python - <<'PY'
+          from elia.research.bench import run_reference_cognitive_stress
+
+          report = run_reference_cognitive_stress()
+          if report["needle"] != 1.0 or report["scrambled_pattern"] != 1.0:
+              raise RuntimeError(f"reference cognitive stress invariant failed: {report}")
+          if not all(item["finite"] for item in report["memory_backends"]):
+              raise RuntimeError(f"non-finite research memory result: {report}")
+          PY
 
   sensorimotor:
     runs-on: ubuntu-latest
@@ -116,6 +135,11 @@ jobs:
   release-artifacts:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -126,14 +150,31 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - name: Build wheel and sdist
+      - name: Build reproducible wheel and sdist
         run: |
-          python -m pip install build==1.5.0
-          python -m build
+          python -m pip install build==1.5.0 cyclonedx-bom==7.3.1
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
+
+          for candidate in a b; do
+            output="$RUNNER_TEMP/elia-dist-$candidate"
+            mkdir -p "$output"
+            python -m build --outdir "$output"
+            python release_tools/normalize_sdist.py "$output"/*.tar.gz
+          done
+
+          cmp "$RUNNER_TEMP"/elia-dist-a/*.whl "$RUNNER_TEMP"/elia-dist-b/*.whl
+          cmp "$RUNNER_TEMP"/elia-dist-a/*.tar.gz "$RUNNER_TEMP"/elia-dist-b/*.tar.gz
+          mkdir -p dist
+          cp "$RUNNER_TEMP"/elia-dist-a/*.whl "$RUNNER_TEMP"/elia-dist-a/*.tar.gz dist/
+          git rev-parse HEAD > dist/SOURCE_COMMIT
+          test "$(tr -d '\n' < dist/SOURCE_COMMIT)" = "$GITHUB_SHA"
       - name: Capture checkout fingerprints
         run: |
           python -m pip install .
           ELIA_STATE_DIR=/tmp/elia-checkout-state elia-doctor > /tmp/checkout-doctor.json
+          python -m elia.agentbench --json > /tmp/checkout-agentbench.json
       - name: Test clean wheel install outside checkout
         run: |
           python -m venv /tmp/elia-wheel-env
@@ -146,6 +187,9 @@ jobs:
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-wild --status
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-control status
           ELIA_STATE_DIR=/tmp/elia-wheel-state /tmp/elia-wheel-env/bin/elia-supervisor --dry-run
+          /tmp/elia-wheel-env/bin/elia-kaggle-wake --help
+          /tmp/elia-wheel-env/bin/elia-kaggle-bootstrap --help
+          /tmp/elia-wheel-env/bin/python -m elia.agentbench --json > /tmp/wheel-agentbench.json
       - name: Test clean sdist install outside checkout
         run: |
           python -m venv /tmp/elia-sdist-env
@@ -158,6 +202,9 @@ jobs:
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-wild --status
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-control status
           ELIA_STATE_DIR=/tmp/elia-sdist-state /tmp/elia-sdist-env/bin/elia-supervisor --dry-run
+          /tmp/elia-sdist-env/bin/elia-kaggle-wake --help
+          /tmp/elia-sdist-env/bin/elia-kaggle-bootstrap --help
+          /tmp/elia-sdist-env/bin/python -m elia.agentbench --json > /tmp/sdist-agentbench.json
       - name: Compare canonical fingerprints
         run: |
           python - <<'PY'
@@ -175,10 +222,54 @@ jobs:
           expected_identity = reports['checkout']['identity']['fingerprint']
           expected_manifest = reports['checkout']['organism']['manifest_fingerprint']
           for name, report in reports.items():
-              assert report['healthy'] is True, (name, report)
-              assert report['identity']['fingerprint'] == expected_identity, name
-              assert report['organism']['manifest_fingerprint'] == expected_manifest, name
+              if report['healthy'] is not True:
+                  raise RuntimeError(f'{name} doctor is unhealthy: {report}')
+              if report['identity']['fingerprint'] != expected_identity:
+                  raise RuntimeError(f'{name} identity fingerprint differs')
+              if report['organism']['manifest_fingerprint'] != expected_manifest:
+                  raise RuntimeError(f'{name} organism fingerprint differs')
+
+          benches = {
+              name: json.loads(Path(path).read_text())
+              for name, path in {
+                  'checkout': '/tmp/checkout-agentbench.json',
+                  'wheel': '/tmp/wheel-agentbench.json',
+                  'sdist': '/tmp/sdist-agentbench.json',
+              }.items()
+          }
+          expected_source = benches['checkout']['run_manifest']['source_manifest_sha256']
+          for name, report in benches.items():
+              if report['all_passed'] is not True:
+                  raise RuntimeError(f'{name} packaged invariant suite failed: {report}')
+              actual_source = report['run_manifest']['source_manifest_sha256']
+              if actual_source != expected_source:
+                  raise RuntimeError(f'{name} packaged source manifest differs')
           PY
+      - name: Generate release SBOM and checksums
+        run: |
+          cyclonedx-py environment /tmp/elia-wheel-env/bin/python \
+            --pyproject pyproject.toml \
+            --mc-type application \
+            --spec-version 1.6 \
+            --output-reproducible \
+            --output-format JSON \
+            --output-file dist/elia-wild.cdx.json
+          python -m json.tool dist/elia-wild.cdx.json > /dev/null
+          sha256sum dist/*.whl dist/*.tar.gz dist/*.json dist/SOURCE_COMMIT > dist/SHA256SUMS
+          sha256sum --check dist/SHA256SUMS
+      - name: Attest release provenance
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Attest release SBOM
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: dist/*.whl
+          sbom-path: dist/elia-wild.cdx.json
       - name: Upload release artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

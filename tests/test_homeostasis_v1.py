@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import namedtuple
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from elia.homeostasis import HomeostasisEngine
@@ -87,3 +88,36 @@ def test_storage_pressure_is_deterministic(monkeypatch, tmp_path: Path) -> None:
     signal = next(item for item in snapshot.signals if item.name == "storage_survival")
     assert snapshot.mode == "critical"
     assert signal.severity == 0.98
+
+
+def test_resource_pressure_uses_cumulative_essential_deadline_not_first_bill_flag() -> None:
+    checked = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    signals = HomeostasisEngine._resource_pressure(
+        {
+            "checked_at": checked.isoformat(),
+            "bottleneck": None,
+            "resources": [
+                {
+                    "asset": "cash",
+                    "unit": "USD",
+                    "next_due_covered": True,
+                    "first_uncovered_essential_due_at": (
+                        checked + timedelta(days=2)
+                    ).isoformat(),
+                    "first_uncovered_essential_cumulative_amount": 110.0,
+                    "first_uncovered_essential_shortfall": 10.0,
+                }
+            ],
+            "upcoming_verified_obligations": [],
+        }
+    )
+    signal = next(
+        item for item in signals if item.name == "uncovered_essential_obligation"
+    )
+    assert signal.severity == 0.92
+    assert (
+        signal.evidence["cashflow_projection"][
+            "first_uncovered_essential_shortfall"
+        ]
+        == 10.0
+    )

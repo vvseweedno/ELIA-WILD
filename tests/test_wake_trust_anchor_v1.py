@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,14 @@ def store(path: Path) -> WakeTrustAnchorStore:
         identity_name="ELIA",
         state_dataset=DATASET,
     )
+
+
+def _advance_anchor(path: str, digest: str, queue) -> None:
+    try:
+        accepted = store(Path(path)).advance(counter=2, digest=digest)
+        queue.put(("ok", accepted.digest))
+    except Exception as exc:  # pragma: no cover - asserted via child result.
+        queue.put(("error", type(exc).__name__))
 
 
 def test_anchor_requires_explicit_trusted_initialization(tmp_path: Path) -> None:
@@ -73,6 +82,35 @@ def test_anchor_advances_only_through_explicit_trusted_forward_acceptance(
     assert advanced.counter == 2
     assert anchor.verify(counter=2, digest="b" * 64) == advanced
     assert anchor.accept(counter=2, digest="b" * 64) == advanced
+
+
+def test_anchor_rejects_generation_gap(tmp_path: Path) -> None:
+    anchor = store(tmp_path / "anchor.json")
+    anchor.initialize(counter=1, digest="a" * 64)
+    with pytest.raises(WakeTrustAnchorError, match="one authenticated generation"):
+        anchor.advance(counter=3, digest="c" * 64)
+
+
+def test_concurrent_anchor_advance_is_compare_and_swap(tmp_path: Path) -> None:
+    path = tmp_path / "anchor.json"
+    store(path).initialize(counter=1, digest="a" * 64)
+    context = multiprocessing.get_context("fork")
+    queue = context.Queue()
+    processes = [
+        context.Process(target=_advance_anchor, args=(str(path), digest, queue))
+        for digest in ("b" * 64, "c" * 64)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=3)
+        assert process.exitcode == 0
+    results = [queue.get(timeout=1), queue.get(timeout=1)]
+    assert sorted(item[0] for item in results) == ["error", "ok"]
+    current = store(path).read()
+    assert current is not None
+    assert current.counter == 2
+    assert current.digest == next(item[1] for item in results if item[0] == "ok")
 
 
 def test_anchor_tampering_is_fail_closed(tmp_path: Path) -> None:

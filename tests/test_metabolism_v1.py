@@ -328,3 +328,90 @@ def test_due_advance_and_deactivation_require_signed_receipts(tmp_path: Path) ->
         verification_receipt=deactivate_receipt,
     )
     assert inactive.active is False
+
+
+def test_cumulative_cashflow_detects_later_essential_shortfall(tmp_path: Path) -> None:
+    db = tmp_path / "memory.sqlite3"
+    registry = _registry()
+    economy = EconomyStore(db, verification_registry=registry)
+    obligations = MetabolismStore(db, verification_registry=registry)
+    _verified_balance(economy, asset="cash", unit="USD", amount=100)
+    _verified_obligation(
+        obligations,
+        name="Optional annual service",
+        asset="cash",
+        unit="USD",
+        amount=80,
+        cadence_seconds=100 * SECONDS_PER_DAY,
+        due_days=1,
+        essential=False,
+    )
+    _verified_obligation(
+        obligations,
+        name="Essential hosting",
+        asset="cash",
+        unit="USD",
+        amount=30,
+        cadence_seconds=100 * SECONDS_PER_DAY,
+        due_days=2,
+        essential=True,
+    )
+
+    item = MetabolismEngine(db, weekly_gpu_budget_hours=30).resource_runway(
+        now=NOW,
+        projection_horizon_days=7,
+    )[0]
+
+    assert item.next_due_covered is True
+    assert item.first_uncovered_essential_due_at == (NOW + timedelta(days=2)).isoformat()
+    assert item.first_uncovered_essential_cumulative_amount == pytest.approx(110.0)
+    assert item.first_uncovered_essential_shortfall == pytest.approx(10.0)
+
+
+def test_cashflow_projection_is_invariant_to_obligation_insert_order(tmp_path: Path) -> None:
+    results = []
+    for reverse in (False, True):
+        db = tmp_path / f"order-{reverse}.sqlite3"
+        registry = _registry()
+        economy = EconomyStore(db, verification_registry=registry)
+        obligations = MetabolismStore(db, verification_registry=registry)
+        _verified_balance(economy, asset="cash", unit="USD", amount=10)
+        specs = [("A", 6.0), ("B", 6.0)]
+        if reverse:
+            specs.reverse()
+        for name, amount in specs:
+            _verified_obligation(
+                obligations,
+                name=name,
+                asset="cash",
+                unit="USD",
+                amount=amount,
+                cadence_seconds=100 * SECONDS_PER_DAY,
+                due_days=1,
+                essential=True,
+            )
+        results.append(
+            MetabolismEngine(db, weekly_gpu_budget_hours=30).resource_runway(
+                now=NOW,
+                projection_horizon_days=2,
+            )[0]
+        )
+    assert results[0].first_uncovered_essential_due_at == results[1].first_uncovered_essential_due_at
+    assert results[0].first_uncovered_essential_shortfall == results[1].first_uncovered_essential_shortfall
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_compute_budget_rejects_nonfinite_values(tmp_path: Path, invalid: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        MetabolismEngine(tmp_path / "memory.sqlite3", weekly_gpu_budget_hours=invalid)
+
+
+def test_compute_energy_discloses_proxy_accounting_scope(tmp_path: Path) -> None:
+    db = tmp_path / "memory.sqlite3"
+    memory = MemoryStore(db)
+    memory.add_runtime_seconds(3600)
+    memory.add_brain_seconds(7200)
+    energy = MetabolismEngine(db, weekly_gpu_budget_hours=10).compute_energy(now=NOW)
+    assert energy.used == pytest.approx(2.0)
+    assert energy.measurement_complete is False
+    assert "actual_gpu_device_residency" in energy.unmetered_components

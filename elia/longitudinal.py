@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import sqlite3
 from typing import Any
+
+from .sqlite_utils import inserted_row_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +17,7 @@ class ContinuityObservation:
     id: int
     timestamp: str
     crc_fingerprint: str
+    semantic_state_fingerprint: str
     architecture_fingerprint: str
     identity_fingerprint: str
     branch_id: str
@@ -34,11 +39,12 @@ class ContinuityObservation:
 
 
 class LongitudinalContinuityStore:
-    """Checkpointed long-horizon evidence for continuity claims.
+    """Checkpointed long-horizon evidence for software-continuity invariants.
 
     Each materially new CRC/architecture state becomes one observation. Repeated
     supervisor heartbeats over an unchanged body/state are deduplicated so the series
-    measures transitions rather than polling frequency.
+    measures transitions rather than polling frequency. These records do not measure
+    subjective identity or behavioral equivalence across substrates.
     """
 
     def __init__(self, path: Path):
@@ -79,6 +85,17 @@ class LongitudinalContinuityStore:
                     ON continuity_observations(healthy, status, id ASC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(continuity_observations)"
+                ).fetchall()
+            }
+            if "semantic_state_fingerprint" not in columns:
+                conn.execute(
+                    "ALTER TABLE continuity_observations "
+                    "ADD COLUMN semantic_state_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def _row(row: sqlite3.Row) -> ContinuityObservation:
@@ -86,6 +103,7 @@ class LongitudinalContinuityStore:
             id=int(row["id"]),
             timestamp=str(row["timestamp"]),
             crc_fingerprint=str(row["crc_fingerprint"]),
+            semantic_state_fingerprint=str(row["semantic_state_fingerprint"]),
             architecture_fingerprint=str(row["architecture_fingerprint"]),
             identity_fingerprint=str(row["identity_fingerprint"]),
             branch_id=str(row["branch_id"]),
@@ -99,6 +117,44 @@ class LongitudinalContinuityStore:
             critical_failures=tuple(json.loads(row["critical_failures_json"])),
             warnings=tuple(json.loads(row["warnings_json"])),
         )
+
+    @staticmethod
+    def _semantic_fingerprint(
+        *,
+        capsule: dict[str, Any],
+        architecture_fingerprint: str,
+        status: str,
+        score: float,
+        healthy: bool,
+        critical: tuple[str, ...],
+        warnings: tuple[str, ...],
+    ) -> str:
+        # `created_at` and its derived capsule_fingerprint change on every poll even
+        # when the represented state does not. Everything else is material evidence.
+        capsule_state = {
+            key: value
+            for key, value in capsule.items()
+            if key not in {"created_at", "capsule_fingerprint"}
+        }
+        payload = {
+            "capsule_state": capsule_state,
+            "architecture_fingerprint": architecture_fingerprint,
+            "comparison": {
+                "status": status,
+                "score": score,
+                "critical_failures": list(critical),
+                "warnings": list(warnings),
+            },
+            "healthy": bool(healthy),
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return sha256(serialized.encode("utf-8")).hexdigest()
 
     def latest(self) -> ContinuityObservation | None:
         with self._connect() as conn:
@@ -121,17 +177,22 @@ class LongitudinalContinuityStore:
             raise ValueError("longitudinal observation requires CRC and architecture fingerprints")
         status = str((comparison or {}).get("status", "baseline"))
         score = float((comparison or {}).get("score", 1.0))
+        if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+            raise ValueError("longitudinal continuity score must be finite and within [0, 1]")
         critical = tuple(str(item) for item in ((comparison or {}).get("critical_failures") or []))
         warnings = tuple(str(item) for item in ((comparison or {}).get("warnings") or []))
+        semantic_fp = self._semantic_fingerprint(
+            capsule=capsule,
+            architecture_fingerprint=architecture_fp,
+            status=status,
+            score=score,
+            healthy=healthy,
+            critical=critical,
+            warnings=warnings,
+        )
 
         previous = self.latest()
-        if (
-            previous
-            and previous.crc_fingerprint == crc_fp
-            and previous.architecture_fingerprint == architecture_fp
-            and previous.status == status
-            and previous.healthy == bool(healthy)
-        ):
+        if previous and previous.semantic_state_fingerprint == semantic_fp:
             return previous
 
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -139,15 +200,17 @@ class LongitudinalContinuityStore:
             cur = conn.execute(
                 """
                 INSERT INTO continuity_observations(
-                    timestamp, crc_fingerprint, architecture_fingerprint,
+                    timestamp, crc_fingerprint, semantic_state_fingerprint,
+                    architecture_fingerprint,
                     identity_fingerprint, branch_id, body_version, brain_backend,
                     model_id, chronicle_seq, status, score, healthy,
                     critical_failures_json, warnings_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
                     crc_fp,
+                    semantic_fp,
                     architecture_fp,
                     str(capsule.get("identity_fingerprint", "")),
                     str(capsule.get("branch_id", "")),
@@ -162,7 +225,9 @@ class LongitudinalContinuityStore:
                     json.dumps(warnings, ensure_ascii=False),
                 ),
             )
-            observation_id = int(cur.lastrowid)
+            observation_id = inserted_row_id(
+                cur, operation="longitudinal observation insert"
+            )
         item = self.get(observation_id)
         if item is None:
             raise RuntimeError("continuity observation disappeared after insert")
@@ -198,6 +263,8 @@ class LongitudinalContinuityStore:
                 "first_observed_at": None,
                 "last_observed_at": None,
                 "falsification_events": [],
+                "evidence_scope": "software_continuity_invariants_only",
+                "behavioral_identity_evaluated": False,
             }
         healthy_fraction = sum(1 for item in items if item.healthy) / len(items)
         broken = [item for item in items if item.status == "broken" or not item.healthy]
@@ -230,4 +297,6 @@ class LongitudinalContinuityStore:
                 }
                 for item in broken[-20:]
             ],
+            "evidence_scope": "software_continuity_invariants_only",
+            "behavioral_identity_evaluated": False,
         }

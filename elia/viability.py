@@ -127,7 +127,7 @@ def _contract(organ: OrganSpec) -> ViabilityContract:
         runtime_path = f"ELIARuntime.mro:{RUNTIME_ANCESTRY[organ.id]}"
     if runtime_path is None:
         runtime_path = (
-            organ.path
+            organ.path or "<missing artifact path>"
             if organ.kind == "artifact"
             else f"{organ.module}.{organ.symbol or '<module>'}"
         )

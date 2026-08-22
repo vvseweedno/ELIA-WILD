@@ -216,4 +216,5 @@ organs:
     authority: none
     role: >-
       Runs deterministic adversarial memory/effect/authority scenarios and a 64-generation
-      process-restart commitment test as a release falsification baseline.
+      persistent-store reopen commitment regression as a release invariant baseline. It is
+      not a benchmark of autonomy or real-world competence.

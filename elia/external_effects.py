@@ -9,18 +9,28 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from .body.types import bounded_json_value
+from .sqlite_utils import inserted_row_id
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(
+    bounded = bounded_json_value(
         value,
+        field="external effect value",
+        max_bytes=512_000,
+        max_depth=12,
+        max_items=4096,
+    )
+    return json.dumps(
+        bounded,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-        default=str,
+        allow_nan=False,
     )
 
 
@@ -28,8 +38,35 @@ def _digest(value: Any) -> str:
     return sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+# Every action that can cross a host/process/network trust boundary. Owner kill,
+# revocation and delegation leases apply to this complete set, including nominal reads:
+# HTTP GET and browser navigation are observable by remote systems and browser pages may
+# execute active content.
+EXTERNAL_IO_ACTIONS = frozenset(
+    {
+        "http_get",
+        "browser_navigate",
+        "browser_click",
+        "browser_fill",
+        "process_run",
+        "mcp_discover",
+        "mcp_call",
+        "mcp_read_resource",
+        "jsonrpc_call",
+        "submit_work",
+        "check_work_outcome",
+        "reconcile_work_submission",
+        "check_resource_ingress",
+    }
+)
+
+# The durable ambiguity ledger is narrower than the egress gate. These operations can
+# plausibly mutate remote state; process death after send must therefore block a blind
+# retry. Read-designated protocols still require owner authorization through the set
+# above but do not create permanently unreconcilable intents on an ordinary read error.
 EXTERNAL_EFFECT_ACTIONS = frozenset(
     {
+        "browser_navigate",
         "browser_click",
         "browser_fill",
         "process_run",
@@ -219,9 +256,10 @@ class ExternalEffectLedger:
                     timestamp,
                 ),
             )
+            intent_id = inserted_row_id(cur, operation="prepare external effect")
             row = conn.execute(
                 "SELECT * FROM external_effect_intents WHERE id=?",
-                (int(cur.lastrowid),),
+                (intent_id,),
             ).fetchone()
         if row is None:
             raise ExternalEffectError("external effect intent disappeared after prepare")

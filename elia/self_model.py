@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .sqlite_utils import inserted_row_id
+
 
 @dataclass(frozen=True, slots=True)
 class SelfHypothesis:
@@ -146,7 +148,7 @@ class SelfHypothesisStore:
                     str(source)[:64],
                 ),
             )
-            hypothesis_id = int(cur.lastrowid)
+            hypothesis_id = inserted_row_id(cur, operation="self hypothesis insert")
             conn.execute(
                 """
                 INSERT INTO self_hypothesis_events(

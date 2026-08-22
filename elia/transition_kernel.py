@@ -3,18 +3,159 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
+from importlib import import_module
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
-from typing import Any, Iterator
+import stat
+import threading
+import time
+from types import ModuleType
+from typing import Any, BinaryIO, Iterator, Literal
+from uuid import uuid4
 
 from .chronicle import Chronicle, ChronicleCheckpoint
 
+
+MAX_WORKSPACE_MEMBERS = 4096
+MAX_WORKSPACE_FILE_BYTES = 256 * 1024 * 1024
+MAX_WORKSPACE_TOTAL_BYTES = 768 * 1024 * 1024
+
+fcntl: ModuleType | None = None
 try:  # Linux is the production target.
-    import fcntl  # type: ignore
+    fcntl = import_module("fcntl")
 except ImportError:  # pragma: no cover
-    fcntl = None
+    pass
+
+
+class StateWriterLockTimeout(RuntimeError):
+    """A second process could not obtain the organism-wide mutation lease in time."""
+
+
+_writer_local = threading.local()
+
+
+def _thread_writer_depths() -> dict[str, int]:
+    """Per-thread reentrancy registry, reset defensively after ``fork()``."""
+
+    pid = os.getpid()
+    if getattr(_writer_local, "pid", None) != pid:
+        _writer_local.pid = pid
+        _writer_local.depths = {}
+    return _writer_local.depths
+
+
+def state_writer_lock_path(state_dir: Path) -> Path:
+    """Return a lock path that survives atomic replacement of ``state_dir`` itself."""
+
+    resolved = Path(state_dir).resolve()
+    return resolved.parent / f".{resolved.name}.writer.lock"
+
+
+def fsync_directory(path: Path) -> None:
+    """Durably publish directory-entry changes on the Linux production target."""
+
+    descriptor = os.open(Path(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+class StateWriterLock:
+    """Cross-process serialization for accepted transitions and checkpoint mutation.
+
+    The lock deliberately lives beside the state directory, not inside it. Checkpoint
+    restore atomically replaces the state directory, so an in-tree inode would allow a
+    pre-restore writer and a post-restore writer to hold two different "exclusive" locks.
+    """
+
+    def __init__(self, state_dir: Path, *, timeout_seconds: float = 30.0) -> None:
+        self.state_dir = Path(state_dir).resolve()
+        self.path = state_writer_lock_path(self.state_dir)
+        self.timeout_seconds = max(0.0, float(timeout_seconds))
+        self._handle: BinaryIO | None = None
+        self._reentrant = False
+
+    def acquire(self) -> None:
+        if self._handle is not None or self._reentrant:
+            raise RuntimeError("organism writer lock is already held by this object")
+        depths = _thread_writer_depths()
+        key = str(self.path)
+        if depths.get(key, 0) > 0:
+            depths[key] += 1
+            self._reentrant = True
+            return
+        if fcntl is None:  # pragma: no cover - Linux is the production contract.
+            raise RuntimeError("cross-process organism writer locking requires fcntl")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise StateWriterLockTimeout(
+                            f"organism writer lock remained busy for {self.timeout_seconds:.3f}s: "
+                            f"{self.path}"
+                        ) from exc
+                    time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+            self._handle = handle
+            depths[key] = 1
+        except Exception:
+            handle.close()
+            raise
+
+    def release(self) -> None:
+        depths = _thread_writer_depths()
+        key = str(self.path)
+        if self._reentrant:
+            depth = depths.get(key, 0)
+            if depth < 2:
+                raise RuntimeError("organism writer reentrancy depth is inconsistent")
+            depths[key] = depth - 1
+            self._reentrant = False
+            return
+        handle = self._handle
+        if handle is None:
+            return
+        if depths.get(key, 0) != 1:
+            raise RuntimeError(
+                "outer organism writer lock cannot be released before nested leases"
+            )
+        if fcntl is None:  # pragma: no cover - defensive optimized-mode invariant.
+            raise RuntimeError("cannot release organism writer lock without fcntl")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        self._handle = None
+        depths.pop(key, None)
+        handle.close()
+
+    def __enter__(self) -> "StateWriterLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
+        self.release()
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,39 +216,39 @@ class AcceptedTransitionGuard:
         self.chronicle = chronicle
         self.root = self.state_dir / "transition-kernel"
         self.backup_path = self.root / "state-before.sqlite3"
+        self.workspace_backup_path = self.root / "workspace-before"
+        self.safety_path = self.root / "rollback-safety.json"
         self.journal_path = self.root / "active.json"
-        self.lock_path = self.root / "transition.lock"
-        self._lock_handle = None
+        self.lock_path = state_writer_lock_path(self.state_dir)
+        self._writer_lock: StateWriterLock | None = None
         self._checkpoint: ChronicleCheckpoint | None = None
+        self._workspace_existed = False
         self._accepted = False
         self._entered = False
 
     @contextmanager
     def _exclusive_lock(self) -> Iterator[None]:
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+b") as handle:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with StateWriterLock(self.state_dir):
+            yield
 
     def _acquire(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        handle = self.lock_path.open("a+b")
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        self._lock_handle = handle
+        lock = StateWriterLock(self.state_dir)
+        lock.acquire()
+        try:
+            root_existed = self.root.exists()
+            self.root.mkdir(parents=True, exist_ok=True)
+            if not root_existed:
+                fsync_directory(self.state_dir)
+            self._writer_lock = lock
+        except Exception:
+            lock.release()
+            raise
 
     def _release(self) -> None:
-        handle = self._lock_handle
-        self._lock_handle = None
-        if handle is not None:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            handle.close()
+        lock = self._writer_lock
+        self._writer_lock = None
+        if lock is not None:
+            lock.release()
 
     @staticmethod
     def _sqlite_backup(source: Path, destination: Path) -> None:
@@ -119,9 +260,18 @@ class AcceptedTransitionGuard:
             src.execute("PRAGMA busy_timeout=30000")
             dst.execute("PRAGMA busy_timeout=30000")
             src.backup(dst)
+            dst.commit()
+            dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            dst.execute("PRAGMA journal_mode=DELETE")
+            dst.commit()
             check = dst.execute("PRAGMA integrity_check").fetchone()
             if check is None or str(check[0]).lower() != "ok":
                 raise RuntimeError("transition snapshot failed SQLite integrity_check")
+        for suffix in ("-wal", "-shm"):
+            destination.with_name(destination.name + suffix).unlink(missing_ok=True)
+        with destination.open("rb") as handle:
+            os.fsync(handle.fileno())
+        fsync_directory(destination.parent)
 
     @staticmethod
     def _sqlite_restore(source: Path, destination: Path) -> None:
@@ -136,6 +286,344 @@ class AcceptedTransitionGuard:
             check = dst.execute("PRAGMA integrity_check").fetchone()
             if check is None or str(check[0]).lower() != "ok":
                 raise RuntimeError("restored transition snapshot failed SQLite integrity_check")
+            dst.execute("PRAGMA wal_checkpoint(FULL)")
+        for candidate in (
+            destination,
+            destination.with_name(destination.name + "-wal"),
+            destination.with_name(destination.name + "-shm"),
+        ):
+            if candidate.is_file():
+                with candidate.open("rb") as handle:
+                    os.fsync(handle.fileno())
+        fsync_directory(destination.parent)
+
+    @staticmethod
+    def _remove_tree(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            shutil.rmtree(path)
+
+    @staticmethod
+    def _stat_signature(item: os.stat_result) -> tuple[int, ...]:
+        """Fields that must remain stable while an accepted snapshot is captured."""
+
+        return (
+            int(item.st_dev),
+            int(item.st_ino),
+            int(item.st_mode),
+            int(item.st_nlink),
+            int(item.st_size),
+            int(item.st_mtime_ns),
+            int(item.st_ctime_ns),
+        )
+
+    @classmethod
+    def _inventory_workspace_fd(
+        cls,
+        root_fd: int,
+    ) -> tuple[
+        dict[str, tuple[str, int, int, int, str]],
+        dict[str, tuple[int, ...]],
+    ]:
+        """Build a stable, bounded, no-follow workspace inventory before copying.
+
+        A transition snapshot is a rollback authority, so silently dereferencing links,
+        copying special files, or expanding a hard-linked inode is not acceptable. The
+        complete inventory is collected before the destination directory is created;
+        known oversize workspaces therefore fail without duplicating their contents.
+        """
+
+        semantic: dict[str, tuple[str, int, int, int, str]] = {}
+        signatures: dict[str, tuple[int, ...]] = {}
+        members = 0
+        total_bytes = 0
+
+        def scan(directory_fd: int, relative: Path) -> None:
+            nonlocal members, total_bytes
+            before_directory = os.fstat(directory_fd)
+            relative_name = relative.as_posix() if relative.parts else "."
+            signatures[relative_name] = cls._stat_signature(before_directory)
+            semantic[relative_name] = (
+                "directory",
+                stat.S_IMODE(before_directory.st_mode),
+                0,
+                int(before_directory.st_mtime_ns),
+                "",
+            )
+            for name in sorted(os.listdir(directory_fd)):
+                child_relative = relative / name
+                child_name = child_relative.as_posix()
+                item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                members += 1
+                if members > MAX_WORKSPACE_MEMBERS:
+                    raise RuntimeError(
+                        "workspace exceeds the accepted-state member limit "
+                        f"({MAX_WORKSPACE_MEMBERS})"
+                    )
+                if stat.S_ISLNK(item.st_mode):
+                    raise RuntimeError(
+                        "workspace symlink cannot cross the accepted-state boundary: "
+                        f"{child_name}"
+                    )
+                signature = cls._stat_signature(item)
+                signatures[child_name] = signature
+                if stat.S_ISDIR(item.st_mode):
+                    child_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        if cls._stat_signature(os.fstat(child_fd)) != signature:
+                            raise RuntimeError(
+                                f"workspace directory changed during snapshot preflight: {child_name}"
+                            )
+                        scan(child_fd, child_relative)
+                        if cls._stat_signature(os.fstat(child_fd)) != signature:
+                            raise RuntimeError(
+                                f"workspace directory changed during snapshot preflight: {child_name}"
+                            )
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not stat.S_ISREG(item.st_mode):
+                    raise RuntimeError(
+                        "workspace special file cannot cross the accepted-state boundary: "
+                        f"{child_name}"
+                    )
+                if item.st_nlink != 1:
+                    raise RuntimeError(
+                        "workspace hard-linked file cannot cross the accepted-state boundary: "
+                        f"{child_name}"
+                    )
+                size = int(item.st_size)
+                if size > MAX_WORKSPACE_FILE_BYTES:
+                    raise RuntimeError(
+                        "workspace file exceeds the accepted-state size limit: "
+                        f"{child_name} ({size} bytes)"
+                    )
+                total_bytes += size
+                if total_bytes > MAX_WORKSPACE_TOTAL_BYTES:
+                    raise RuntimeError(
+                        "workspace exceeds the accepted-state total byte limit "
+                        f"({MAX_WORKSPACE_TOTAL_BYTES})"
+                    )
+                source_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    if cls._stat_signature(os.fstat(source_fd)) != signature:
+                        raise RuntimeError(
+                            f"workspace file changed during snapshot preflight: {child_name}"
+                        )
+                    digest = sha256()
+                    bytes_read = 0
+                    while True:
+                        chunk = os.read(source_fd, 1024 * 1024)
+                        if not chunk:
+                            break
+                        bytes_read += len(chunk)
+                        if bytes_read > size:
+                            raise RuntimeError(
+                                f"workspace file grew during snapshot preflight: {child_name}"
+                            )
+                        digest.update(chunk)
+                    if bytes_read != size or cls._stat_signature(os.fstat(source_fd)) != signature:
+                        raise RuntimeError(
+                            f"workspace file changed during snapshot preflight: {child_name}"
+                        )
+                finally:
+                    os.close(source_fd)
+                semantic[child_name] = (
+                    "file",
+                    stat.S_IMODE(item.st_mode),
+                    size,
+                    int(item.st_mtime_ns),
+                    digest.hexdigest(),
+                )
+            if cls._stat_signature(os.fstat(directory_fd)) != cls._stat_signature(
+                before_directory
+            ):
+                raise RuntimeError(
+                    f"workspace directory changed during snapshot preflight: {relative_name}"
+                )
+
+        scan(root_fd, Path())
+        return semantic, signatures
+
+    @classmethod
+    def _copy_tree_durable(cls, source: Path, destination: Path) -> None:
+        source = Path(source)
+        destination = Path(destination)
+        if source.is_symlink():
+            raise RuntimeError(f"workspace snapshot source is not a real directory: {source}")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            root_fd = os.open(source, flags)
+        except OSError as exc:
+            raise RuntimeError(
+                f"workspace snapshot source is not a real directory: {source}"
+            ) from exc
+        destination_created = False
+        try:
+            expected, signatures = cls._inventory_workspace_fd(root_fd)
+            cls._remove_tree(destination)
+            root_stat = os.fstat(root_fd)
+            destination.mkdir(parents=True, mode=0o700)
+            destination_created = True
+            copied_total = 0
+
+            def copy_directory(directory_fd: int, target: Path, relative: Path) -> None:
+                nonlocal copied_total
+                directory_name = relative.as_posix() if relative.parts else "."
+                if cls._stat_signature(os.fstat(directory_fd)) != signatures[directory_name]:
+                    raise RuntimeError(
+                        f"workspace directory changed while snapshotting: {directory_name}"
+                    )
+                for name in sorted(os.listdir(directory_fd)):
+                    child_relative = relative / name
+                    child_name = child_relative.as_posix()
+                    item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if cls._stat_signature(item) != signatures.get(child_name):
+                        raise RuntimeError(
+                            f"workspace entry changed while snapshotting: {child_name}"
+                        )
+                    child_target = target / name
+                    if stat.S_ISDIR(item.st_mode):
+                        child_target.mkdir(mode=0o700)
+                        child_fd = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        try:
+                            copy_directory(child_fd, child_target, child_relative)
+                        finally:
+                            os.close(child_fd)
+                        os.chmod(child_target, stat.S_IMODE(item.st_mode))
+                        os.utime(
+                            child_target,
+                            ns=(int(item.st_atime_ns), int(item.st_mtime_ns)),
+                            follow_symlinks=False,
+                        )
+                        fsync_directory(child_target)
+                        continue
+                    if not stat.S_ISREG(item.st_mode) or item.st_nlink != 1:
+                        raise RuntimeError(
+                            f"workspace entry changed to an unsafe type: {child_name}"
+                        )
+                    source_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        if cls._stat_signature(os.fstat(source_fd)) != signatures[child_name]:
+                            raise RuntimeError(
+                                f"workspace file changed while snapshotting: {child_name}"
+                            )
+                        digest = sha256()
+                        file_bytes = 0
+                        with child_target.open("xb") as output:
+                            os.chmod(child_target, 0o600)
+                            while True:
+                                chunk = os.read(source_fd, 1024 * 1024)
+                                if not chunk:
+                                    break
+                                file_bytes += len(chunk)
+                                copied_total += len(chunk)
+                                if (
+                                    file_bytes > MAX_WORKSPACE_FILE_BYTES
+                                    or copied_total > MAX_WORKSPACE_TOTAL_BYTES
+                                ):
+                                    raise RuntimeError(
+                                        "workspace changed beyond accepted-state byte limits "
+                                        f"while snapshotting: {child_name}"
+                                    )
+                                output.write(chunk)
+                                digest.update(chunk)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        expected_file = expected[child_name]
+                        if (
+                            file_bytes != expected_file[2]
+                            or digest.hexdigest() != expected_file[4]
+                            or cls._stat_signature(os.fstat(source_fd))
+                            != signatures[child_name]
+                        ):
+                            raise RuntimeError(
+                                f"workspace file changed while snapshotting: {child_name}"
+                            )
+                    finally:
+                        os.close(source_fd)
+                    os.chmod(child_target, stat.S_IMODE(item.st_mode))
+                    os.utime(
+                        child_target,
+                        ns=(int(item.st_atime_ns), int(item.st_mtime_ns)),
+                        follow_symlinks=False,
+                    )
+                if cls._stat_signature(os.fstat(directory_fd)) != signatures[directory_name]:
+                    raise RuntimeError(
+                        f"workspace directory changed while snapshotting: {directory_name}"
+                    )
+
+            copy_directory(root_fd, destination, Path())
+            os.chmod(destination, stat.S_IMODE(root_stat.st_mode))
+            os.utime(
+                destination,
+                ns=(int(root_stat.st_atime_ns), int(root_stat.st_mtime_ns)),
+                follow_symlinks=False,
+            )
+            fsync_directory(destination)
+        except Exception:
+            if destination_created:
+                cls._remove_tree(destination)
+                fsync_directory(destination.parent)
+            raise
+        finally:
+            os.close(root_fd)
+
+    def _snapshot_workspace(self) -> None:
+        workspace = self.state_dir / "workspace"
+        self._remove_tree(self.workspace_backup_path)
+        if workspace.is_symlink():
+            raise RuntimeError(
+                "workspace snapshot source is not a real directory: " + str(workspace)
+            )
+        self._workspace_existed = workspace.exists()
+        if not self._workspace_existed:
+            return
+        self._copy_tree_durable(workspace, self.workspace_backup_path)
+        fsync_directory(self.root)
+
+    def _restore_workspace(self) -> None:
+        workspace = self.state_dir / "workspace"
+        token = uuid4().hex
+        staging = self.state_dir / f".workspace-restore-{token}"
+        quarantine = self.state_dir / f".workspace-rolled-back-{token}"
+        self._remove_tree(staging)
+        try:
+            if self._workspace_existed:
+                if not self.workspace_backup_path.is_dir():
+                    raise RuntimeError("accepted transition workspace snapshot is missing")
+                self._copy_tree_durable(self.workspace_backup_path, staging)
+            if workspace.exists() or workspace.is_symlink():
+                os.replace(workspace, quarantine)
+                fsync_directory(self.state_dir)
+            if self._workspace_existed:
+                os.replace(staging, workspace)
+                fsync_directory(self.state_dir)
+            self._remove_tree(quarantine)
+            fsync_directory(self.state_dir)
+        except Exception:
+            self._remove_tree(staging)
+            if quarantine.exists() and not workspace.exists():
+                os.replace(quarantine, workspace)
+                fsync_directory(self.state_dir)
+            raise
 
     @staticmethod
     def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -347,18 +835,51 @@ class AcceptedTransitionGuard:
         temp = self.journal_path.with_suffix(".tmp")
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         with temp.open("w", encoding="utf-8") as handle:
+            os.chmod(temp, 0o600)
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, self.journal_path)
-        try:
-            directory_fd = os.open(self.root, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            pass
+        fsync_directory(self.root)
+
+    def _atomic_write_safety(self, state: dict[str, list[dict[str, Any]]]) -> None:
+        payload = {
+            "schema_version": self.JOURNAL_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "state": state,
+        }
+        temp = self.safety_path.with_name(
+            f".{self.safety_path.name}.{uuid4().hex}.tmp"
+        )
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+        with temp.open("w", encoding="utf-8") as handle:
+            os.chmod(temp, 0o600)
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, self.safety_path)
+        fsync_directory(self.root)
+
+    def _read_safety(self) -> dict[str, list[dict[str, Any]]] | None:
+        if not self.safety_path.is_file():
+            return None
+        payload = json.loads(self.safety_path.read_text(encoding="utf-8"))
+        if int(payload.get("schema_version", 0)) != self.JOURNAL_VERSION:
+            raise RuntimeError("unsupported rollback safety journal schema")
+        state = payload.get("state")
+        if not isinstance(state, dict):
+            raise RuntimeError("rollback safety journal has no state object")
+        return {
+            str(table): list(rows) if isinstance(rows, list) else []
+            for table, rows in state.items()
+        }
+
+    @staticmethod
+    def _durable_unlink(path: Path) -> None:
+        existed = path.exists() or path.is_symlink()
+        path.unlink(missing_ok=True)
+        if existed:
+            fsync_directory(path.parent)
 
     def _journal_payload(self) -> dict[str, Any]:
         if self._checkpoint is None:
@@ -368,6 +889,8 @@ class AcceptedTransitionGuard:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "database": str(self.database),
             "backup": str(self.backup_path),
+            "workspace_backup": str(self.workspace_backup_path),
+            "workspace_existed": self._workspace_existed,
             "chronicle": self._checkpoint.as_dict(),
             "status": "prepared",
         }
@@ -383,12 +906,24 @@ class AcceptedTransitionGuard:
                 )
             if not self.database.is_file():
                 raise RuntimeError("organism state database does not exist")
+            self.safety_path.unlink(missing_ok=True)
             self._sqlite_backup(self.database, self.backup_path)
             self._checkpoint = self.chronicle.checkpoint()
+            if self.chronicle.path.is_file():
+                with self.chronicle.path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+            fsync_directory(self.chronicle.path.parent)
+            self._snapshot_workspace()
             self._atomic_write_journal(self._journal_payload())
             self._entered = True
             return self
         except Exception:
+            if not self.journal_path.exists():
+                self.backup_path.unlink(missing_ok=True)
+                self._remove_tree(self.workspace_backup_path)
+                self.safety_path.unlink(missing_ok=True)
+                if self.root.exists():
+                    fsync_directory(self.root)
             self._release()
             raise
 
@@ -404,7 +939,10 @@ class AcceptedTransitionGuard:
         valid, error = self.chronicle.verify()
         if not valid:
             raise RuntimeError(f"cannot accept transition: Chronicle invalid: {error}")
-        assert self._checkpoint is not None
+        if self._checkpoint is None:
+            raise RuntimeError(
+                "cannot accept transition: Chronicle checkpoint invariant is missing"
+            )
         anchor_ok, anchor_error = self.chronicle.contains_anchor(
             self._checkpoint.seq, self._checkpoint.hash
         )
@@ -412,10 +950,13 @@ class AcceptedTransitionGuard:
             raise RuntimeError(
                 "cannot accept transition: prior Chronicle head is no longer an ancestor: "
                 + str(anchor_error)
-            )
+                )
         self._accepted = True
-        self.journal_path.unlink(missing_ok=True)
+        self._durable_unlink(self.journal_path)
         self.backup_path.unlink(missing_ok=True)
+        self._remove_tree(self.workspace_backup_path)
+        self.safety_path.unlink(missing_ok=True)
+        fsync_directory(self.root)
 
     def rollback(self, reason: str) -> TransitionRecovery:
         if not self._entered:
@@ -425,14 +966,21 @@ class AcceptedTransitionGuard:
     def _rollback_locked(self, reason: str) -> TransitionRecovery:
         if self._checkpoint is None:
             raise RuntimeError("transition rollback has no Chronicle checkpoint")
-        safety = self._export_external_safety_state(self.database)
-        accepted_before = self._export_external_safety_state(self.backup_path)
-        self._quarantine_rolled_back_effects(safety, accepted_before)
+        safety = self._read_safety()
+        if safety is None:
+            safety = self._export_external_safety_state(self.database)
+            accepted_before = self._export_external_safety_state(self.backup_path)
+            self._quarantine_rolled_back_effects(safety, accepted_before)
+            self._atomic_write_safety(safety)
         self._sqlite_restore(self.backup_path, self.database)
         self.chronicle.restore_checkpoint(self._checkpoint)
+        self._restore_workspace()
         self._restore_external_safety_state(self.database, safety)
-        self.journal_path.unlink(missing_ok=True)
+        self._durable_unlink(self.journal_path)
         self.backup_path.unlink(missing_ok=True)
+        self._remove_tree(self.workspace_backup_path)
+        self.safety_path.unlink(missing_ok=True)
+        fsync_directory(self.root)
         return TransitionRecovery(
             recovered=True,
             reason=str(reason)[:4000],
@@ -448,7 +996,7 @@ class AcceptedTransitionGuard:
             preserved_resource_ingress=len(safety.get("resource_ingress_events", [])),
         )
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         try:
             if exc is not None or not self._accepted:
                 self._rollback_locked(
@@ -460,12 +1008,21 @@ class AcceptedTransitionGuard:
         return False
 
     @classmethod
-    def recover_incomplete(cls, state_dir: Path, chronicle: Chronicle) -> TransitionRecovery:
+    def recover_incomplete(
+        cls,
+        state_dir: Path,
+        chronicle: Chronicle,
+        *,
+        lock_held: bool = False,
+    ) -> TransitionRecovery:
         """Recover a process-killed transition before normal boot mutates state."""
         guard = cls(state_dir, chronicle)
-        with guard._exclusive_lock():
+
+        def recover_locked() -> TransitionRecovery:
             if not guard.journal_path.is_file():
                 guard.backup_path.unlink(missing_ok=True)
+                guard._remove_tree(guard.workspace_backup_path)
+                guard.safety_path.unlink(missing_ok=True)
                 return TransitionRecovery(False, "no interrupted accepted transition")
             payload = json.loads(guard.journal_path.read_text(encoding="utf-8"))
             if int(payload.get("schema_version", 0)) != cls.JOURNAL_VERSION:
@@ -476,4 +1033,10 @@ class AcceptedTransitionGuard:
                 hash=str(cp["hash"]),
                 byte_size=int(cp["byte_size"]),
             )
+            guard._workspace_existed = bool(payload.get("workspace_existed", False))
             return guard._rollback_locked("recovered interrupted production transition before boot")
+
+        if lock_held:
+            return recover_locked()
+        with guard._exclusive_lock():
+            return recover_locked()

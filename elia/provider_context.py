@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any, cast
+from urllib.parse import urlsplit
 
-from .redaction import scrub_secrets
+from .redaction import fingerprint, redact_action_record, scrub_secrets
 
 _PUBLIC_CONTEXT_KEYS = frozenset(
     {
@@ -58,6 +59,7 @@ _SENSOR_FIELDS = (
     "success",
     "summary",
     "payload_sha256",
+    "data_classification",
     "provenance",
 )
 
@@ -70,15 +72,142 @@ def _sensor_metadata(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         item = {key: deepcopy(raw[key]) for key in _SENSOR_FIELDS if key in raw}
+        if "summary" in item:
+            item["summary_fingerprint"] = fingerprint(item.pop("summary"))
         provenance = item.get("provenance")
         if isinstance(provenance, dict):
             item["provenance"] = {
                 str(key): deepcopy(val)
                 for key, val in provenance.items()
-                if str(key).lower() not in {"payload", "content", "body", "raw", "secret", "token"}
+                if str(key).lower()
+                in {
+                    "authority",
+                    "arguments_fingerprint",
+                    "capability",
+                    "data_classification",
+                    "verifier",
+                }
             }
         result.append(item)
     return result
+
+
+def _memory_metadata(value: Any) -> list[dict[str, Any]]:
+    """Expose retrieval coordinates, never unclassified durable memory text."""
+
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for raw in value[:64]:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            key: deepcopy(raw.get(key))
+            for key in (
+                "id", "timestamp", "kind", "importance", "source", "score",
+                "trust_class", "trust_score",
+            )
+            if key in raw
+        }
+        if "content" in raw:
+            item["content_fingerprint"] = fingerprint(raw.get("content"))
+        result.append(item)
+    return result
+
+
+def _self_model_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result = {
+        key: deepcopy(value.get(key))
+        for key in (
+            "identity_id", "identity_fingerprint", "body_version", "brain_backend",
+            "model_id", "lifecycle_state", "degraded_capabilities", "needs",
+            "homeostasis_mode",
+        )
+        if key in value
+    }
+    for field in ("commitments", "uncertainties", "narrative"):
+        if field in value:
+            raw = value.get(field)
+            result[f"{field}_fingerprint"] = fingerprint(raw)
+            result[f"{field}_count"] = len(raw) if isinstance(raw, (list, dict)) else int(bool(raw))
+    return result
+
+
+def _self_hypotheses_metadata(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for raw in value[:32]:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            key: deepcopy(raw.get(key))
+            for key in ("id", "domain", "confidence", "status", "source", "created_at", "updated_at")
+            if key in raw
+        }
+        for field in ("proposition", "evidence"):
+            if field in raw:
+                item[f"{field}_fingerprint"] = fingerprint(raw.get(field))
+        result.append(item)
+    return result
+
+
+def _world_model_metadata(value: Any) -> dict[str, Any]:
+    """Keep belief coordinates/status; omit arbitrary object/evidence content."""
+
+    if not isinstance(value, dict):
+        return {}
+    beliefs: list[dict[str, Any]] = []
+    for raw in list(value.get("beliefs") or [])[:64]:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            key: deepcopy(raw.get(key))
+            for key in (
+                "id", "created_at", "updated_at", "domain", "subject", "predicate",
+                "status", "confidence", "source", "fingerprint", "supersedes_id",
+            )
+            if key in raw
+        }
+        for field in ("object", "evidence"):
+            if field in raw:
+                item[f"{field}_fingerprint"] = fingerprint(raw.get(field))
+        beliefs.append(item)
+    contradictions: list[dict[str, Any]] = []
+    for raw in list(value.get("contradictions") or [])[:32]:
+        if not isinstance(raw, dict):
+            continue
+        contradictions.append(
+            {
+                key: deepcopy(raw.get(key))
+                for key in (
+                    "id", "belief_id", "other_belief_id", "status", "confidence",
+                    "subject", "predicate",
+                )
+                if key in raw
+            }
+        )
+    return {
+        "beliefs": beliefs,
+        "contradictions": contradictions,
+        "epistemic_rule": str(value.get("epistemic_rule", ""))[:2000],
+    }
+
+
+def _active_goals_metadata(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {
+            key: deepcopy(raw.get(key))
+            for key in ("id", "title", "priority", "status", "source", "parent_id", "created_at", "updated_at")
+            if key in raw
+        }
+        for raw in value[:32]
+        if isinstance(raw, dict)
+    ]
 
 
 def _agency_metadata(value: Any) -> dict[str, Any]:
@@ -103,7 +232,6 @@ def _agency_metadata(value: Any) -> dict[str, Any]:
             for key in (
                 "id",
                 "title",
-                "description",
                 "priority",
                 "status",
                 "source",
@@ -145,8 +273,14 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
     for raw in list(value.get("candidates") or [])[:16]:
         if not isinstance(raw, dict):
             continue
-        opportunity = raw.get("opportunity") if isinstance(raw.get("opportunity"), dict) else {}
-        profile = raw.get("resource_profile") if isinstance(raw.get("resource_profile"), dict) else {}
+        opportunity_value = raw.get("opportunity")
+        opportunity: dict[str, Any] = (
+            opportunity_value if isinstance(opportunity_value, dict) else {}
+        )
+        profile_value = raw.get("resource_profile")
+        profile: dict[str, Any] = (
+            profile_value if isinstance(profile_value, dict) else {}
+        )
         work_items = []
         for work in list(raw.get("work_items") or [])[:8]:
             if not isinstance(work, dict):
@@ -160,13 +294,11 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
                         "status",
                         "objective",
                         "estimated_gpu_hours",
-                        "artifact_path",
-                        "submission_observation_id",
-                        "resource_event_id",
                     )
                     if key in work
                 }
             )
+        source = _source_url_metadata(opportunity.get("source_url"))
         candidates.append(
             {
                 "opportunity": {
@@ -175,7 +307,6 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
                         "id",
                         "title",
                         "kind",
-                        "source_url",
                         "estimated_value",
                         "estimated_cost_value",
                         "unit",
@@ -187,7 +318,8 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
                         "value_per_gpu_hour",
                     )
                     if key in opportunity
-                },
+                }
+                | source,
                 "resource_profile": {
                     key: deepcopy(profile.get(key))
                     for key in (
@@ -224,15 +356,33 @@ def _resource_ecology_metadata(value: Any) -> dict[str, Any]:
                     "status",
                     "objective",
                     "estimated_gpu_hours",
-                    "artifact_path",
-                    "submission_observation_id",
-                    "resource_event_id",
                 )
                 if key in work
             }
         )
     result["active_work"] = active_work
     result["unprofiled_opportunity_count"] = len(value.get("unprofiled_opportunities") or [])
+    return result
+
+
+def _source_url_metadata(value: Any) -> dict[str, str]:
+    """Expose only origin plus an opaque fingerprint, never URL path/query/credentials."""
+
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    text = value.strip()
+    result = {"source_url_fingerprint": fingerprint(text)}
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return result
+        host = parsed.hostname.lower()
+        host_display = f"[{host}]" if ":" in host else host
+        default_port = 443 if parsed.scheme.lower() == "https" else 80
+        port_suffix = f":{parsed.port}" if parsed.port and parsed.port != default_port else ""
+        result["source_origin"] = f"{parsed.scheme.lower()}://{host_display}{port_suffix}"
+    except (TypeError, ValueError):
+        pass
     return result
 
 
@@ -257,14 +407,11 @@ def _work_port_metadata(value: Any) -> dict[str, Any]:
             {
                 key: deepcopy(raw.get(key))
                 for key in (
-                    "id",
                     "work_item_id",
                     "port_name",
                     "submitted_at",
                     "updated_at",
-                    "submission_observation_id",
                     "remote_status",
-                    "last_outcome_observation_id",
                 )
                 if key in raw
             }
@@ -314,22 +461,15 @@ def _epistemic_metadata(value: Any) -> dict[str, Any]:
     for raw in list(value.get("packets") or [])[:12]:
         if not isinstance(raw, dict):
             continue
-        packets.append(
-            {
-                key: deepcopy(raw.get(key))
-                for key in (
-                    "id",
-                    "organ_id",
-                    "claim",
-                    "evidence",
-                    "counterexample",
-                    "falsifier",
-                    "uncertainty",
-                    "confidence",
-                )
-                if key in raw
-            }
-        )
+        item = {
+            key: deepcopy(raw.get(key))
+            for key in ("id", "organ_id", "confidence")
+            if key in raw
+        }
+        for field in ("claim", "evidence", "counterexample", "falsifier", "uncertainty"):
+            if field in raw:
+                item[f"{field}_fingerprint"] = fingerprint(raw.get(field))
+        packets.append(item)
     if packets:
         result["packets"] = packets
 
@@ -337,16 +477,16 @@ def _epistemic_metadata(value: Any) -> dict[str, Any]:
     if isinstance(adjudication, dict):
         result["adjudication"] = {
             key: deepcopy(adjudication.get(key))
-            for key in (
-                "synthesis",
-                "selected_packet_ids",
-                "confidence",
-                "disagreements",
-                "falsification_tests",
-                "recommended_focus",
-            )
+            for key in ("selected_packet_ids", "confidence")
             if key in adjudication
         }
+        for field in (
+            "synthesis", "disagreements", "falsification_tests", "recommended_focus"
+        ):
+            if field in adjudication:
+                result["adjudication"][f"{field}_fingerprint"] = fingerprint(
+                    adjudication.get(field)
+                )
 
     organs = []
     for raw in list(value.get("organs") or [])[:12]:
@@ -394,6 +534,24 @@ def provider_context(context: dict[str, Any]) -> dict[str, Any]:
             continue
         if name == "sensorium":
             public[name] = _sensor_metadata(value)
+            continue
+        if name in {"recent_memory", "chronological_recent_memory"}:
+            public[name] = _memory_metadata(value)
+            continue
+        if name == "self_model":
+            public[name] = _self_model_metadata(value)
+            continue
+        if name == "self_hypotheses":
+            public[name] = _self_hypotheses_metadata(value)
+            continue
+        if name == "world_model":
+            public[name] = _world_model_metadata(value)
+            continue
+        if name == "active_goals":
+            public[name] = _active_goals_metadata(value)
+            continue
+        if name == "last_action":
+            public[name] = redact_action_record(value)
             continue
         if name == "agency":
             public[name] = _agency_metadata(value)

@@ -7,15 +7,19 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .checkpoint import recover_interrupted_restore
 from .chronicle import Chronicle
 from .config import Config, load_config
 from .crc import build_crc, compare_crc, read_crc, write_crc
-from .identity import IdentityBundle
+from .identity import IdentityBundle, IdentityStore
 from .longitudinal import LongitudinalContinuityStore
 from .memory import MemoryStore
 from .organism import OrganismManifest, default_manifest_path
 from .research.registry import maturity_summary
-from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
+from .transition_kernel import (
+    AcceptedTransitionGuard,
+    StateWriterLock,
+)
 from .viability import run_deep_viability
 
 
@@ -28,6 +32,7 @@ class VitalSignsReport:
     continuity_comparison: dict[str, Any] | None
     longitudinal: dict[str, Any]
     research_maturity: dict[str, list[str]]
+    checkpoint_restore_recovered: bool
     transition_recovery: dict[str, Any] | None
     deep_viability: dict[str, Any] | None
     last_healthy_crc_path: str
@@ -56,13 +61,23 @@ class VitalSigns:
 
     def __init__(self, config: Config, *, manifest_path: Path | None = None):
         self.config = config
-        self.chronicle = Chronicle(config.runtime.state_dir / "chronicle.jsonl")
-        self.transition_recovery: TransitionRecovery = (
-            AcceptedTransitionGuard.recover_incomplete(
-                config.runtime.state_dir,
-                self.chronicle,
+        state_dir = config.runtime.state_dir
+        # A checkpoint restore can replace the complete state directory. Recover that
+        # publication first, while holding the same out-of-tree writer inode used by
+        # checkpoint and accepted-transition mutation. In particular, do not construct
+        # Chronicle/Memory/longitudinal stores first: their constructors may recreate a
+        # missing in-tree directory and make restore recovery observe a false target.
+        with StateWriterLock(state_dir):
+            self.checkpoint_restore_recovered = recover_interrupted_restore(
+                state_dir,
+                lock_held=True,
             )
-        )
+            self.chronicle = Chronicle(state_dir / "chronicle.jsonl")
+            self.transition_recovery = AcceptedTransitionGuard.recover_incomplete(
+                state_dir,
+                self.chronicle,
+                lock_held=True,
+            )
         # load_config may have observed dirty branch meta before recovery. Reconcile the
         # mutable in-memory Config to the restored accepted branch before CRC/vitals.
         memory = MemoryStore(config.runtime.state_dir / "memory.sqlite3")
@@ -81,6 +96,7 @@ class VitalSigns:
         self.longitudinal = LongitudinalContinuityStore(
             config.runtime.state_dir / "memory.sqlite3"
         )
+        self.identity_store = IdentityStore(config.runtime.state_dir / "memory.sqlite3")
 
     def _persist_report(self, report: VitalSignsReport) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -105,15 +121,33 @@ class VitalSigns:
         comparison_dict: dict[str, Any] | None = None
         continuity_healthy = capsule.chronicle_valid
         if self.last_healthy_crc_path.is_file():
-            previous = read_crc(self.last_healthy_crc_path)
-            comparison = compare_crc(
-                previous,
-                capsule_dict,
-                chronicle=self.chronicle,
-                require_ancestry=True,
-            )
-            comparison_dict = comparison.as_dict()
-            continuity_healthy = continuity_healthy and comparison.status != "broken"
+            try:
+                previous = read_crc(self.last_healthy_crc_path)
+                comparison = compare_crc(
+                    previous,
+                    capsule_dict,
+                    chronicle=self.chronicle,
+                    require_ancestry=True,
+                    lineage_store=self.identity_store,
+                    require_lineage_ancestry=True,
+                )
+                comparison_dict = comparison.as_dict()
+                continuity_healthy = continuity_healthy and comparison.status != "broken"
+            except (OSError, ValueError) as exc:
+                # A malformed/tampered baseline is continuity failure evidence, not a
+                # reason for the supervisor health check itself to crash.
+                comparison_dict = {
+                    "status": "broken",
+                    "score": 0.0,
+                    "critical_failures": [
+                        f"last healthy CRC failed validation: {type(exc).__name__}: {str(exc)[:1000]}"
+                    ],
+                    "warnings": [],
+                    "preserved": [],
+                    "changed": [],
+                    "evidence_scope": "software_continuity_invariants_only",
+                }
+                continuity_healthy = False
 
         viability_dict: dict[str, Any] | None = None
         viability_healthy = True
@@ -147,6 +181,7 @@ class VitalSigns:
             continuity_comparison=comparison_dict,
             longitudinal=self.longitudinal.summary(),
             research_maturity=maturity_summary(),
+            checkpoint_restore_recovered=self.checkpoint_restore_recovered,
             transition_recovery=(
                 self.transition_recovery.as_dict()
                 if self.transition_recovery.recovered

@@ -167,3 +167,56 @@ def test_success_resets_consecutive_failure_streak(tmp_path: Path) -> None:
     health = memory.capability_health("write_workspace")
     assert health["consecutive_failures"] == 0
     assert memory.capability_degraded("write_workspace") is False
+
+
+def test_workspace_reads_never_follow_symlink_components(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("outside-secret", encoding="utf-8")
+    registry = ToolRegistry(workspace)
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    (workspace / "final-link.txt").symlink_to(outside / "private.txt")
+
+    nested = registry.execute("read_workspace", {"path": "escape/private.txt"})
+    final = registry.execute("read_workspace", {"path": "final-link.txt"})
+    listing = registry.execute("list_workspace")
+
+    assert nested.ok is False
+    assert final.ok is False
+    assert listing.ok is True
+    assert "escape/private.txt" not in listing.data["files"]
+    assert "final-link.txt" not in listing.data["files"]
+
+
+def test_workspace_write_atomically_replaces_link_not_its_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must-survive", encoding="utf-8")
+    registry = ToolRegistry(workspace)
+    link = workspace / "result.txt"
+    link.symlink_to(outside)
+
+    written = registry.execute(
+        "write_workspace",
+        {"path": "result.txt", "content": "workspace-value"},
+    )
+
+    assert written.ok is True
+    assert outside.read_text(encoding="utf-8") == "must-survive"
+    assert link.is_symlink() is False
+    assert link.read_text(encoding="utf-8") == "workspace-value"
+
+
+def test_tool_registry_rejects_non_json_arguments_before_transaction(tmp_path: Path) -> None:
+    registry = ToolRegistry(tmp_path / "workspace")
+
+    class Stringifiable:
+        def __str__(self) -> str:
+            return "ambiguous"
+
+    for invalid in ({"value": float("nan")}, {"value": Stringifiable()}):
+        result = registry.execute("noop", invalid)
+        assert result.ok is False
+        assert "Invalid tool arguments" in str(result.error)
+    assert registry.state_bus.incomplete(16) == []

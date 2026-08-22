@@ -4,12 +4,13 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
 
-WAKE_CONFIG = __ELIA_WAKE_CONFIG__
+WAKE_CONFIG = __ELIA_WAKE_CONFIG__  # noqa: F821 - replaced by the trusted relay
 WORKING = Path("/kaggle/working")
 INPUT = Path("/kaggle/input")
 REPO_DIR = WORKING / "elia-wild-src"
@@ -104,6 +105,12 @@ def main() -> None:
     repo_url = str(WAKE_CONFIG["repo_url"])
     repo_ref = str(WAKE_CONFIG["repo_ref"])
     max_cycles = max(1, min(int(WAKE_CONFIG.get("max_cycles", 8)), 64))
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", launch_nonce):
+        raise RuntimeError("launch nonce must be exactly 32 hexadecimal characters")
+    if not re.fullmatch(r"[0-9a-f]{64}", source_digest):
+        raise RuntimeError("source digest must be exactly 64 lowercase hex characters")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", repo_ref):
+        raise RuntimeError("repo ref must be an immutable 40-hex Git commit SHA")
 
     source_checkpoint = locate_unique(INPUT, "elia-genesis.eliacp")
     assert_encrypted_checkpoint(source_checkpoint)
@@ -117,6 +124,9 @@ def main() -> None:
     run(["git", "clone", "--no-checkout", repo_url, str(REPO_DIR)])
     run(["git", "fetch", "--depth=1", "origin", repo_ref], cwd=REPO_DIR)
     run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=REPO_DIR)
+    checked_out = run(["git", "rev-parse", "HEAD"], cwd=REPO_DIR).stdout.strip()
+    if checked_out.lower() != repo_ref.lower():
+        raise RuntimeError("detached checkout does not match the launcher-approved commit")
     run([sys.executable, "-m", "pip", "install", "-e", f"{REPO_DIR}[gpu]"])
 
     auth_secret, encryption_secret = continuity_secrets()
@@ -161,7 +171,7 @@ def main() -> None:
     )
     preflight_item = parse_json_output(preflight.stdout)
     mode = str(preflight_item.get("mode", "unknown"))
-    if mode == "halt":
+    if mode in {"halt", "owner_halt"}:
         raise RuntimeError(f"ELIA preflight halted: {preflight_item.get('reason')}")
     if mode != "wake":
         shutil.copy2(source_checkpoint, OUTPUT_CHECKPOINT)

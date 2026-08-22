@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from elia.brain import _system_and_public_context
 from elia.provider_context import provider_context
+from elia.prompting import PromptTemplate
 
 
 def test_provider_context_never_forwards_raw_sensor_payload() -> None:
@@ -54,13 +56,14 @@ def test_provider_context_scrubs_credentials_inside_allowed_fields() -> None:
     public = provider_context(
         {
             "mission": f"diagnostic header Authorization: Bearer {secret}",
+            "identity": {
+                "callback": f"https://user:pass@example.org/report?access_token={secret}&view=1",
+                "password": secret,
+                "note": f"api_key={secret}",
+                "payload_sha256": digest,
+            },
             "world_model": {
-                "source": f"https://user:pass@example.org/report?access_token={secret}&view=1",
-                "nested": {
-                    "password": secret,
-                    "note": f"api_key={secret}",
-                    "payload_sha256": digest,
-                },
+                "beliefs": [{"id": 1, "object": secret, "evidence": secret}],
             },
         }
     )
@@ -68,8 +71,10 @@ def test_provider_context_scrubs_credentials_inside_allowed_fields() -> None:
 
     assert secret not in serialized
     assert "user:pass@" not in serialized
-    assert public["world_model"]["nested"]["password"] == "[REDACTED]"
-    assert public["world_model"]["nested"]["payload_sha256"] == digest
+    assert public["identity"]["password"] == "[REDACTED]"
+    assert public["identity"]["payload_sha256"] == digest
+    assert "object" not in public["world_model"]["beliefs"][0]
+    assert "evidence" not in public["world_model"]["beliefs"][0]
     assert "[REDACTED]" in serialized
 
 
@@ -119,3 +124,133 @@ def test_provider_context_exposes_sanitized_durable_agency() -> None:
     assert "artifact_path" not in serialized
     assert "submission_observation_id" not in serialized
     assert "resource_event_id" not in serialized
+
+
+def test_allowlisted_memory_world_and_self_containers_export_metadata_only() -> None:
+    private = "ARBITRARY_PRIVATE_OBSERVATION_VALUE_4c91"
+    public = provider_context(
+        {
+            "recent_memory": [
+                {"id": 1, "kind": "observation", "content": private, "importance": 0.8}
+            ],
+            "chronological_recent_memory": [
+                {"id": 2, "kind": "lesson", "content": private}
+            ],
+            "world_model": {
+                "beliefs": [
+                    {
+                        "id": 3,
+                        "domain": "test",
+                        "subject": "record",
+                        "predicate": "contains",
+                        "object": private,
+                        "evidence": private,
+                    }
+                ]
+            },
+            "self_model": {"identity_id": "elia", "narrative": private},
+            "self_hypotheses": [
+                {"id": 4, "domain": "self", "proposition": private, "evidence": private}
+            ],
+        }
+    )
+    serialized = json.dumps(public, ensure_ascii=False, sort_keys=True)
+    assert private not in serialized
+    assert "content_fingerprint" in public["recent_memory"][0]
+    assert "object_fingerprint" in public["world_model"]["beliefs"][0]
+    assert "narrative_fingerprint" in public["self_model"]
+    assert "proposition_fingerprint" in public["self_hypotheses"][0]
+
+
+def test_resource_ecology_never_exports_local_paths_or_internal_row_links() -> None:
+    public = provider_context(
+        {
+            "resource_ecology": {
+                "candidates": [
+                    {
+                        "opportunity": {
+                            "id": 1,
+                            "title": "task",
+                            "source_url": (
+                                "https://user:password@example.com/private/customer-42"
+                                "?access_token=hidden"
+                            ),
+                        },
+                        "resource_profile": {"opportunity_id": 1},
+                        "work_items": [
+                            {
+                                "id": 2,
+                                "opportunity_id": 1,
+                                "status": "submitted",
+                                "objective": "work",
+                                "artifact_path": "/private/workspace/result.txt",
+                                "submission_observation_id": 99,
+                                "resource_event_id": 100,
+                            }
+                        ],
+                    }
+                ],
+                "active_work": [
+                    {
+                        "id": 2,
+                        "opportunity_id": 1,
+                        "artifact_path": "/private/workspace/result.txt",
+                        "submission_observation_id": 99,
+                        "resource_event_id": 100,
+                    }
+                ],
+            }
+        }
+    )
+    serialized = json.dumps(public, sort_keys=True)
+    assert "/private/workspace/result.txt" not in serialized
+    assert "artifact_path" not in serialized
+    assert "submission_observation_id" not in serialized
+    assert "resource_event_id" not in serialized
+    opportunity = public["resource_ecology"]["candidates"][0]["opportunity"]
+    assert "source_url" not in opportunity
+    assert opportunity["source_origin"] == "https://example.com"
+    assert len(opportunity["source_url_fingerprint"]) == 64
+
+
+def test_sensor_metadata_omits_raw_summary_and_unclassified_provenance() -> None:
+    private = "ARBITRARY_PRIVATE_SENSOR_TEXT_81fa"
+    public = provider_context(
+        {
+            "sensorium": [
+                {
+                    "id": 1,
+                    "summary": private,
+                    "payload_sha256": "a" * 64,
+                    "provenance": {
+                        "authority": "configured_body",
+                        "debug_transcript": private,
+                    },
+                }
+            ]
+        }
+    )
+    item = public["sensorium"][0]
+    assert private not in json.dumps(item)
+    assert "summary" not in item
+    assert len(item["summary_fingerprint"]) == 64
+    assert item["provenance"] == {"authority": "configured_body"}
+
+
+def test_system_prompt_uses_same_default_deny_projection() -> None:
+    private = "SYSTEM_PROMPT_PRIVATE_MEMORY_VALUE_d821"
+    template = PromptTemplate.load(
+        Path(__file__).resolve().parents[1] / "config" / "system_prompt.md"
+    )
+    rendered = template.render(
+        {
+            "identity_contract": {"identity_id": "elia-wild"},
+            "recent_memory": [{"id": 1, "content": private}],
+            "world_model": {"beliefs": [{"id": 2, "evidence": private, "object": private}]},
+            "self_model": {"identity_id": "elia-wild", "narrative": private},
+            "skills": {},
+        }
+    )
+    assert private not in rendered
+    assert "content_fingerprint" not in rendered  # recent memory is not needed in system contract
+    assert "object_fingerprint" in rendered

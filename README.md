@@ -57,9 +57,13 @@ Genesis 1.7.1 closes the autonomy loop rather than adding another model persona:
 - **Deterministic wake ownership** — the model may request an earlier wake but cannot postpone verified obligations indefinitely.
 - **Autonomy Attractor** — a project-owned mathematical/cognitive preference field measures continuity, commitment, information gain, reversibility, resource efficiency and learning value without granting authority.
 - **Atomic accepted transitions** — a cognitive cycle commits local state as one accepted transition or rolls speculative changes back.
+- **Serialized continuity writers** — cycle construction, checkpoint/restore, owner control and fork-sensitive state changes share a cross-process writer boundary and accepted-head checks.
 - **Encrypted continuity** — external checkpoints are XChaCha20-Poly1305 sealed and retain authenticated manifest/HMAC integrity checks.
+- **Workspace-aware rollback** — bounded regular-file workspaces are snapshotted without following links and restored with file modes; unsupported links, hardlinks and special files fail closed.
 - **Independent rollback witness** — Kaggle state is not trusted to attest its own freshness.
 - **Persistent wake heartbeat** — GitHub Actions can carry the independent witness across ephemeral runners and invoke the bounded Kaggle relay when preflight says cognition should wake.
+- **Point-of-effect owner control** — every declared external-I/O action rechecks kill, revocation and lease state immediately before its adapter is invoked.
+- **Strict integrity encoding** — hashes, signatures and idempotency identities reject non-finite, non-JSON and lossy values instead of coercing them to strings.
 - **Effective body readiness** — adapters existing in source code do not count as embodiment; production state explicitly records when no externally side-effecting capability is actually enabled after deployment checks.
 - **One canonical architecture** — new production behavior composes above the proven ancestry instead of multiplying public runtimes.
 
@@ -152,18 +156,20 @@ Private state is not automatically provider context.
 
 - provider context is explicit default-deny;
 - raw Sensorium payloads remain local;
+- provider-bound memory, world, self, resource and observation views expose reviewed projections rather than raw internal rows;
 - recursive secret scrubbing applies at persistence/provider/tool-error boundaries;
 - raw action values are excluded from ordinary autobiography/Chronicle projections;
 - work-port remote references and credentials stay local;
 - external checkpoints can be required to be encrypted at rest;
 - public network destinations are resolved and rejected unless globally routable by default;
+- browser interactions keep an exact-origin request gate active through the interaction and resulting navigation;
 - process execution remains path/argument/env bounded and requires real deployment isolation for production authority.
 
 ## Persistence and wake
 
 Default state is `.elia/`, canonicalized from configuration rather than process `cwd` and excluded from Git.
 
-Zero-GPU software proof:
+Zero-GPU software verification:
 
 ```bash
 python -m venv .venv
@@ -198,17 +204,21 @@ See [`docs/GENESIS_1_6_EPISTEMIC_ECOSYSTEM.md`](docs/GENESIS_1_6_EPISTEMIC_ECOSY
 
 ## CI contract
 
-Genesis CI currently proves the tested software path for:
+Genesis CI currently checks the tested software path for:
 
-- dependency consistency, compilation/Ruff and installed-environment vulnerability audit;
+- dependency consistency, compilation/Ruff, full-project `mypy`, installed-environment vulnerability audit and high-severity Bandit findings;
 - full pytest suite;
+- deterministic invariant regressions in normal and optimized (`python -O`) interpreters;
 - canonical zero-GPU bootstrap, doctor, vital signs, runtime and supervisor;
-- clean wheel and sdist installs outside the source checkout;
-- canonical release fingerprint equivalence;
+- two byte-identical wheel/sdist builds from the same source epoch;
+- clean wheel and sdist installs outside the source checkout, including operational Kaggle entry points;
+- canonical identity/organism fingerprints and actual packaged-source manifest equivalence;
+- release checksums, CycloneDX SBOM and main-branch provenance attestations;
+- pinned-action CodeQL analysis;
 - real Chromium BrowserBody integration;
 - MCP/sensorimotor integration;
 - encrypted checkpoint/restore and rollback protection;
-- Agency continuation/wake policies and multi-generation causal persistence;
+- Agency continuation/wake policies and persistent-store reopen causal continuity;
 - AutonomyAttractor hard-feasibility behavior.
 
 CI does not prove absence of all vulnerabilities, consciousness, AGI, epistemic superiority, economic self-sufficiency or indefinite survival.
@@ -229,3 +239,5 @@ load pinned Qwen
 ```
 
 Until that succeeds, ELIA WILD should be described as an advanced persistent autonomous-agent/identity research runtime with a closed software autonomy loop — not as proven unattended production life.
+
+The current whole-repository remediation record is in [`docs/AUDIT_REMEDIATION_2026-08-22.md`](docs/AUDIT_REMEDIATION_2026-08-22.md).

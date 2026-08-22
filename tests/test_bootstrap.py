@@ -52,7 +52,11 @@ def test_bootstrap_creates_authenticated_encrypted_private_state_bundle(
     assert checkpoint.read_bytes().startswith(ENVELOPE_MAGIC)
     assert transport_file is not None
     digest = read_digest(digest_file)
-    transport = read_transport_state(transport_file)
+    transport = read_transport_state(
+        transport_file,
+        key=KEY,
+        require_auth=True,
+    )
     assert transport.last_success_digest == digest
     assert transport.last_success_counter == 1
     assert transport.pending_launch_nonce is None

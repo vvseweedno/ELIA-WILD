@@ -5,7 +5,7 @@ from math import isfinite
 from typing import Any, Iterable
 
 from .decay import DecaySchedule
-from .memory import FractalMemory, ScrollMemory, build_memory_backend
+from .memory import FractalMemory, MemoryBackend, ScrollMemory, build_memory_backend
 from .stress import generation_stability, multiset_pattern_retention, needle_score
 
 
@@ -37,6 +37,7 @@ def run_memory_backend_ablation(
     sequence = list(values) if values is not None else [1.0] + [0.0] * 31
     results: list[MemoryBackendAblation] = []
     for name in ("scroll", "fractal", "lru_scan", "holo_scan"):
+        backend: MemoryBackend
         if name == "scroll":
             backend = ScrollMemory(capacity=128)
         elif name == "fractal":
@@ -49,10 +50,7 @@ def run_memory_backend_ablation(
             backend = build_memory_backend(name)
         outputs: list[float] = []
         for value in sequence:
-            if name == "fractal":
-                output = backend.step(value, gate=1.0)  # type: ignore[arg-type]
-            else:
-                output = backend.step(value, gate=gate)
+            output = backend.step(value, gate=1.0 if name == "fractal" else gate)
             outputs.append(_as_real(output))
         final = backend.state()
         finite = all(isfinite(item) for item in outputs)

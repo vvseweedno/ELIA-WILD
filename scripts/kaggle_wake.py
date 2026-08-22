@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,7 @@ from typing import Any
 from elia.checkpoint import CheckpointManager
 from elia.config import load_config
 from elia.lifecycle import evaluate_preflight
+from elia.paths import data_root
 from elia.wake_anchor import WakeTrustAnchorStore, default_anchor_path
 from elia.wake_transport import (
     CHECKPOINT_NAME,
@@ -25,6 +27,7 @@ from elia.wake_transport import (
     launch_suppressed,
     locate_state_bundle,
     mark_failure,
+    mark_operator_reset,
     mark_pending,
     mark_success,
     parse_dataset_status,
@@ -42,11 +45,16 @@ FAILURE_THRESHOLD = 3
 PENDING_TIMEOUT_SECONDS = 8 * 3600
 DATASET_READY_TIMEOUT_SECONDS = 180
 DATASET_POLL_SECONDS = 5
+EXIT_PREFLIGHT_HALT = 2
+EXIT_DEGRADED = 3
+EXIT_TRANSPORT_FAILURE = 4
+EXIT_CIRCUIT_OPEN = 5
 
 _CONTINUITY_ENV = (
     "ELIA_CHECKPOINT_KEY",
     "ELIA_CHECKPOINT_ENCRYPTION_KEY",
     "ELIA_CHECKPOINT_REQUIRE_ENCRYPTION",
+    "ELIA_WAKE_RESET_AUTH",
 )
 
 
@@ -152,11 +160,18 @@ def dataset_upload_dir(
     digest: str,
     transport: TransportState,
     destination: Path,
+    *,
+    transport_key: bytes | str,
 ) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copy2(checkpoint, destination / CHECKPOINT_NAME)
     write_digest(destination / DIGEST_NAME, digest)
-    write_transport_state(destination / TRANSPORT_NAME, transport)
+    write_transport_state(
+        destination / TRANSPORT_NAME,
+        transport,
+        key=transport_key,
+        require_auth=True,
+    )
     command(
         ["kaggle", "datasets", "metadata", dataset, "--path", str(destination)]
     )
@@ -173,10 +188,18 @@ def version_state_dataset(
     *,
     message: str,
     root: Path,
+    transport_key: bytes | str,
 ) -> None:
     upload = root / "dataset-upload"
     shutil.rmtree(upload, ignore_errors=True)
-    dataset_upload_dir(dataset, checkpoint, digest, transport, upload)
+    dataset_upload_dir(
+        dataset,
+        checkpoint,
+        digest,
+        transport,
+        upload,
+        transport_key=transport_key,
+    )
     command(
         [
             "kaggle",
@@ -320,6 +343,7 @@ def accept_completed_output(
         accepted,
         message=f"ELIA relay accepted encrypted checkpoint {output_info.counter}",
         root=root,
+        transport_key=key,
     )
     # The Dataset is now durable. Advance the separately persisted witness only after
     # all output validation has succeeded. If witness persistence later fails, the next
@@ -347,6 +371,8 @@ def prepare_kernel(
     repo_ref: str,
     max_cycles: int,
 ) -> Path:
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", repo_ref):
+        raise ValueError("repo_ref must be an immutable 40-hex Git commit SHA")
     shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True)
     template = (repo_root / "runtime" / "kaggle" / "runner_template.py").read_text(
@@ -389,7 +415,19 @@ def parse_args() -> argparse.Namespace:
         "--accelerator",
         default=os.getenv("ELIA_KAGGLE_ACCELERATOR", "") or "NvidiaTeslaT4",
     )
-    parser.add_argument("--repo-ref", default=os.getenv("ELIA_REPO_REF", "main"))
+    parser.add_argument("--repo-ref", default=os.getenv("ELIA_REPO_REF", ""))
+    parser.add_argument(
+        "--reset-circuit",
+        action="store_true",
+        default=os.getenv("ELIA_WAKE_RESET_CIRCUIT", "").strip().lower()
+        in {"1", "true", "yes", "on"},
+        help="Clear a suppressed launch circuit after authenticated operator diagnosis",
+    )
+    parser.add_argument(
+        "--reset-reason",
+        default=os.getenv("ELIA_WAKE_RESET_REASON", ""),
+        help="Incident/change reference recorded by hash in transport state",
+    )
     parser.add_argument(
         "--trust-anchor",
         default=str(default_anchor_path()),
@@ -425,8 +463,8 @@ def main() -> int:
     os.environ["ELIA_CHECKPOINT_REQUIRE_ENCRYPTION"] = "1"
     kernel_timeout = max(600, min(int(args.kernel_timeout_seconds), 7200))
 
-    repo_root = Path(__file__).resolve().parents[1]
-    config = load_config(repo_root / args.config)
+    asset_root = data_root()
+    config = load_config(args.config)
     trust_anchor = WakeTrustAnchorStore(
         Path(args.trust_anchor),
         key=key.encode("utf-8"),
@@ -441,7 +479,9 @@ def main() -> int:
         )
         source_digest = read_digest(source_digest_path)
         transport = read_transport_state(
-            transport_path or (root / "missing-transport.json")
+            transport_path or (root / "missing-transport.json"),
+            key=key,
+            require_auth=True,
         )
         _, source_info = inspect_restore(
             checkpoint=source_checkpoint,
@@ -465,6 +505,40 @@ def main() -> int:
             consecutive_kernel_failures=transport.consecutive_kernel_failures,
             encrypted_checkpoint=True,
         )
+
+        if args.reset_circuit:
+            reset_auth = require_env("ELIA_WAKE_RESET_AUTH")
+            if len(reset_auth) < 32:
+                raise RuntimeError("ELIA_WAKE_RESET_AUTH must contain at least 32 characters")
+            reset_reason = str(args.reset_reason).strip()
+            if len(reset_reason) < 8:
+                raise RuntimeError("--reset-reason must contain at least 8 characters")
+            evidence = json.dumps(
+                {
+                    "reason": reset_reason,
+                    "actor": os.getenv("GITHUB_ACTOR", "local-operator"),
+                    "run_id": os.getenv("GITHUB_RUN_ID", "local"),
+                    "ref": os.getenv("GITHUB_REF", "local"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            reset = mark_operator_reset(transport, evidence=evidence)
+            version_state_dataset(
+                args.state_dataset,
+                source_checkpoint,
+                source_digest,
+                reset,
+                message=f"ELIA operator circuit reset {reset.operator_reset_count}",
+                root=root,
+                transport_key=key,
+            )
+            print_event(
+                "operator_circuit_reset",
+                reset_count=reset.operator_reset_count,
+                evidence_sha256=reset.last_operator_reset_evidence_sha256,
+            )
+            return 0
 
         if transport.pending_launch_nonce:
             status, raw_status = kernel_status(args.kernel)
@@ -497,13 +571,14 @@ def main() -> int:
                         failed,
                         message="ELIA relay rejected invalid kernel output",
                         root=root,
+                        transport_key=key,
                     )
                     print_event(
                         "relay_rejected",
                         error=str(exc),
                         failures=failed.consecutive_kernel_failures,
                     )
-                    return 0
+                    return EXIT_TRANSPORT_FAILURE
                 _, source_info = inspect_restore(
                     checkpoint=source_checkpoint,
                     digest=source_digest,
@@ -522,17 +597,18 @@ def main() -> int:
                     failed,
                     message=f"ELIA kernel failure {failed.consecutive_kernel_failures}",
                     root=root,
+                    transport_key=key,
                 )
                 print_event(
                     "kernel_failure_recorded",
                     failures=failed.consecutive_kernel_failures,
                 )
-                return 0
+                return EXIT_TRANSPORT_FAILURE
             else:
                 age = pending_age_seconds(transport)
                 if age is None or age < PENDING_TIMEOUT_SECONDS:
                     print_event("pending_status_unknown", age_seconds=age)
-                    return 0
+                    return EXIT_DEGRADED
                 failed = mark_failure(
                     transport,
                     "pending launch exceeded transport timeout",
@@ -545,12 +621,13 @@ def main() -> int:
                     failed,
                     message=f"ELIA pending launch timeout {failed.consecutive_kernel_failures}",
                     root=root,
+                    transport_key=key,
                 )
                 print_event(
                     "pending_timeout_recorded",
                     failures=failed.consecutive_kernel_failures,
                 )
-                return 0
+                return EXIT_TRANSPORT_FAILURE
 
         if launch_suppressed(transport, FAILURE_THRESHOLD):
             print_event(
@@ -561,7 +638,7 @@ def main() -> int:
                     "more GPU launches"
                 ),
             )
-            return 0
+            return EXIT_CIRCUIT_OPEN
 
         inspect_restore(
             checkpoint=source_checkpoint,
@@ -575,28 +652,32 @@ def main() -> int:
             config.runtime.weekly_gpu_budget_hours,
         )
         print_event("preflight", **preflight.as_dict())
-        if preflight.mode == "halt":
-            return 2
+        if preflight.mode in {"halt", "owner_halt"}:
+            return EXIT_PREFLIGHT_HALT
         if preflight.mode != "wake":
             return 0
 
         pending = mark_pending(transport)
+        pending_nonce = pending.pending_launch_nonce
+        if not pending_nonce:
+            raise RuntimeError("transport failed to create a pending launch nonce")
         version_state_dataset(
             args.state_dataset,
             source_checkpoint,
             source_digest,
             pending,
-            message=f"ELIA wake pending {pending.pending_launch_nonce[:12]}",
+            message=f"ELIA wake pending {pending_nonce[:12]}",
             root=root,
+            transport_key=key,
         )
         kernel_dir = prepare_kernel(
-            repo_root=repo_root,
+            repo_root=asset_root,
             destination=root / "kernel",
             kernel_id=args.kernel,
             state_dataset=args.state_dataset,
             accelerator=args.accelerator,
             source_digest=source_digest,
-            nonce=pending.pending_launch_nonce or "",
+            nonce=pending_nonce,
             repo_ref=args.repo_ref,
             max_cycles=max(1, min(args.max_cycles, 64)),
         )
@@ -625,13 +706,14 @@ def main() -> int:
                 failed,
                 message=f"ELIA launch push failure {failed.consecutive_kernel_failures}",
                 root=root,
+                transport_key=key,
             )
             print_event(
                 "kernel_push_failed",
                 error=str(exc),
                 failures=failed.consecutive_kernel_failures,
             )
-            return 0
+            return EXIT_TRANSPORT_FAILURE
 
         print_event(
             "kernel_launched",

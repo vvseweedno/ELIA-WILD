@@ -77,3 +77,24 @@ def test_successful_external_effect_is_terminal_and_new_intent_is_distinct(tmp_p
     second = ledger.prepare("jsonrpc_call", args)
     assert second.effect_id != first.effect_id
     assert second.idempotency_key != first.idempotency_key
+
+
+def test_external_effect_argument_fingerprint_is_canonical_by_key_order(
+    tmp_path: Path,
+) -> None:
+    ledger = ExternalEffectLedger(tmp_path / "memory.sqlite3")
+    first = ledger.prepare("mcp_call", {"server": "x", "arguments": {"a": 1, "b": 2}})
+    second = ledger.prepare("mcp_call", {"arguments": {"b": 2, "a": 1}, "server": "x"})
+    assert second.effect_id == first.effect_id
+    assert second.arguments_sha256 == first.arguments_sha256
+
+
+@pytest.mark.parametrize("invalid", [{"x": float("nan")}, {"x": object()}])
+def test_external_effect_rejects_noncanonical_arguments_before_intent(
+    tmp_path: Path,
+    invalid,
+) -> None:
+    ledger = ExternalEffectLedger(tmp_path / "memory.sqlite3")
+    with pytest.raises(ValueError):
+        ledger.prepare("mcp_call", invalid)
+    assert ledger.recent() == []

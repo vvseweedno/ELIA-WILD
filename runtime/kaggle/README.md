@@ -56,7 +56,7 @@ For the controlled notebook, attach the two ELIA continuity secrets in Kaggle **
 
 Use `runtime/kaggle/ELIA_WILD_Genesis.ipynb` with Internet and a supported NVIDIA GPU enabled. The notebook is fail-closed and performs:
 
-1. clone the pinned consolidation branch;
+1. require `ELIA_REPO_REF` to be an immutable 40-hex commit SHA and check it out detached;
 2. require and validate both continuity secrets;
 3. restore one attached encrypted ELIA state bundle, or create fresh Genesis state;
 4. run `elia-doctor`, `elia-vitals`, Chronicle verification, status and supervisor dry-run before model loading;
@@ -104,6 +104,7 @@ Required repository **Secrets**:
 KAGGLE_API_TOKEN
 ELIA_CHECKPOINT_KEY
 ELIA_CHECKPOINT_ENCRYPTION_KEY
+ELIA_WAKE_RESET_AUTH             # independent random value, at least 32 characters
 ```
 
 Required/expected repository **Variables**:
@@ -120,7 +121,8 @@ ELIA_WAKE_MAX_CYCLES=8                  # optional bounded override
 Each heartbeat:
 
 1. checks out the exact source revision;
-2. restores the latest independent witness from a prior immutable Actions artifact;
+2. restores the latest independent witness emitted by this workflow on the default
+   branch of this repository;
 3. refuses scheduled operation if no trusted witness exists;
 4. exposes ELIA/Kaggle secrets only to the relay step, not checkout/install steps;
 5. downloads and verifies encrypted Kaggle state against the independent witness;
@@ -129,7 +131,8 @@ Each heartbeat:
 8. if wake is required, records pending intent before pushing the Kaggle kernel;
 9. on a later heartbeat, accepts completed output only when nonce/digests/counters/encryption agree;
 10. advances the Dataset first and the independent witness only after durable acceptance;
-11. uploads the new witness as the next immutable Actions artifact.
+11. uploads the witness as a 90-day immutable Actions artifact even when a later relay
+    operation fails, then propagates the relay failure to the workflow result.
 
 The external witness is intentionally separate from the state Dataset. If the witness is missing, stale, tampered with or disagrees with the Dataset, the relay fails closed. Availability is sacrificed rather than allowing the potentially replayed Dataset to declare itself current.
 
@@ -145,10 +148,18 @@ The external witness is intentionally separate from the state Dataset. If the wi
 - requires output checkpoint metadata to match the relay report;
 - requires cognition-started runs to advance the authenticated checkpoint counter;
 - records bounded failures and suppresses repeated launches after the failure threshold;
+- authenticates pending/failure/reset transport state and refuses unsigned legacy state;
+- returns non-zero status for rejected output, unknown/failed transport, push failure or
+  an open circuit instead of reporting a false-green heartbeat;
 - versions private state only after verification;
 - advances the independent witness only after the new Dataset version is durable.
 
 The Kaggle CLI child does not receive ELIA continuity keys. The remote kernel reads continuity secrets from its private Kaggle Secrets attachment.
+
+After three consecutive failures the circuit remains open. Diagnose the incident, then
+run `workflow_dispatch` on the default branch with `reset_circuit=true` and a concrete
+`reset_reason`. The reset requires `ELIA_WAKE_RESET_AUTH`, refuses to clear a pending
+launch, and stores a timestamped reset count plus a hash of the operator evidence.
 
 ## Hibernation
 

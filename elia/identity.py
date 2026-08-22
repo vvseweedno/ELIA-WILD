@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .sqlite_utils import inserted_row_id
+
 import yaml
 
 
@@ -341,7 +343,7 @@ class IdentityStore:
                     str(source)[:64],
                 ),
             )
-            return int(cur.lastrowid), snapshot_fp
+            return inserted_row_id(cur, operation="identity snapshot insert"), snapshot_fp
 
     def latest_self_model(self) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -437,7 +439,7 @@ class IdentityStore:
                     event_hash,
                 ),
             )
-            return int(cur.lastrowid)
+            return inserted_row_id(cur, operation="lineage event insert")
 
     @staticmethod
     def _lineage_event(row: sqlite3.Row) -> LineageEvent:

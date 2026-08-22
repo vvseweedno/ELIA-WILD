@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timezone
+import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 pytest.importorskip("mcp")
 from mcp.server import MCPServer
+from nacl.signing import SigningKey
 
 from elia.economy import EconomyStore
 from elia.observations import ObservationStore
@@ -15,6 +20,20 @@ from elia.resource_ingress_hardened import AttestedResourceIngressRegistry
 
 VERIFY_ENV = "ELIA_TEST_ATTESTED_RESOURCE_KEY"
 VERIFY_KEY = "0123456789abcdef0123456789abcdef"
+PROVIDER_VERIFY_ENV = "ELIA_TEST_PROVIDER_VERIFY_KEY"
+PROVIDER_SIGNING_KEY = SigningKey(bytes(range(32)))
+
+
+ARGUMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "work_item_id": {"type": ["integer", "null"]},
+        "asset": {"type": "string", "enum": ["cash"]},
+        "unit": {"type": "string", "enum": ["USD"]},
+    },
+    "required": ["work_item_id", "asset", "unit"],
+    "additionalProperties": False,
+}
 
 
 def _config() -> dict:
@@ -27,6 +46,7 @@ def _config() -> dict:
                         "enabled": True,
                         "allow_tool_calls": True,
                         "allowed_tools": ["observe_credit"],
+                        "tool_argument_schemas": {"observe_credit": ARGUMENT_SCHEMA},
                         "allowed_resources": [],
                     }
                 },
@@ -47,6 +67,10 @@ def _config() -> dict:
                     "min_amount": 1,
                     "max_amount": 1000,
                     "target_amount_tolerance": 0,
+                    "expected_provider": "test-bank",
+                    "expected_account_binding": "acct-sha256:abc",
+                    "provider_verify_key_env": PROVIDER_VERIFY_ENV,
+                    "max_attestation_age_seconds": 3600,
                 }
             },
         },
@@ -58,17 +82,41 @@ def _server(state: dict) -> MCPServer:
 
     @server.tool()
     def observe_credit(work_item_id: int | None, asset: str, unit: str) -> dict:
+        state["calls"] = int(state.get("calls", 0)) + 1
         event_id = str(state.get("event_id", "bank-event-1"))
-        return {
+        claim = {
             "observed": True,
             "external_event_id": event_id,
             "provider_event_id": state.get("provider_event_id", event_id),
             "provider": state.get("provider", "test-bank"),
             "account_binding": state.get("account_binding", "acct-sha256:abc"),
             "settlement_status": state.get("settlement_status", "settled"),
+            "asset": asset,
+            "unit": unit,
+            "kind": "income",
             "amount": state.get("amount", 75.0),
+            "settled_at": state.get(
+                "settled_at", datetime.now(timezone.utc).isoformat()
+            ),
+            "work_item_id": work_item_id,
             "evidence": state.get("evidence", "provider-native ledger record"),
         }
+        signed = {key: value for key, value in claim.items() if key != "observed"}
+        claim["attestation_signature"] = base64.b64encode(
+            PROVIDER_SIGNING_KEY.sign(
+                json.dumps(
+                    signed,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).signature
+        ).decode("ascii")
+        if state.get("corrupt_signature"):
+            claim["attestation_signature"] = base64.b64encode(b"x" * 64).decode("ascii")
+        if state.get("omit_signature"):
+            claim.pop("attestation_signature", None)
+        return claim
 
     return server
 
@@ -132,6 +180,10 @@ def _accepted_work(state_dir: Path) -> int:
 
 def test_attested_ingress_requires_final_provider_settlement(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
     state_dir = tmp_path / ".elia"
     state = {"settlement_status": "pending"}
     registry = AttestedResourceIngressRegistry(
@@ -146,6 +198,10 @@ def test_attested_ingress_requires_final_provider_settlement(monkeypatch, tmp_pa
 
 def test_attested_ingress_binds_provider_event_identity(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
     state_dir = tmp_path / ".elia"
     state = {"event_id": "evt-1", "provider_event_id": "evt-2"}
     registry = AttestedResourceIngressRegistry(
@@ -159,6 +215,10 @@ def test_attested_ingress_binds_provider_event_identity(monkeypatch, tmp_path: P
 
 def test_linked_settlement_must_match_target_amount(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
     state_dir = tmp_path / ".elia"
     work_id = _accepted_work(state_dir)
     state = {"amount": 750.0}
@@ -173,3 +233,60 @@ def test_linked_settlement_must_match_target_amount(monkeypatch, tmp_path: Path)
     assert result.ok is False
     assert "target amount" in str(result.error)
     assert EconomyStore(state_dir / "memory.sqlite3").verified_balance("cash", "USD") == 0
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_error"),
+    [
+        ({"provider": "other-bank"}, "provider identity"),
+        ({"account_binding": "acct-sha256:other"}, "account binding"),
+        ({"omit_signature": True}, "requires attestation_signature"),
+        ({"corrupt_signature": True}, "signature verification failed"),
+        (
+            {"settled_at": "2000-01-01T00:00:00+00:00"},
+            "freshness window",
+        ),
+    ],
+)
+def test_attested_ingress_rejects_untrusted_or_stale_claim_before_value_ledger(
+    monkeypatch,
+    tmp_path: Path,
+    state: dict,
+    expected_error: str,
+) -> None:
+    monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
+    monkeypatch.setenv(
+        PROVIDER_VERIFY_ENV,
+        base64.b64encode(bytes(PROVIDER_SIGNING_KEY.verify_key)).decode("ascii"),
+    )
+    state_dir = tmp_path / ".elia"
+    registry = AttestedResourceIngressRegistry(
+        state_dir, _config(), mcp_target_overrides={"bank": _server(state)}
+    )
+
+    result = registry.execute("check_resource_ingress", {"verifier": "bank_usd"})
+    assert result.ok is False
+    assert expected_error in str(result.error)
+    assert EconomyStore(state_dir / "memory.sqlite3").verified_balance("cash", "USD") == 0
+    with sqlite3.connect(state_dir / "memory.sqlite3") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM resource_ingress_events").fetchone()[0] == 0
+
+
+def test_attested_ingress_missing_provider_key_is_disabled_before_remote_call(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(VERIFY_ENV, VERIFY_KEY)
+    monkeypatch.delenv(PROVIDER_VERIFY_ENV, raising=False)
+    state = {"calls": 0}
+    state_dir = tmp_path / ".elia"
+    registry = AttestedResourceIngressRegistry(
+        state_dir, _config(), mcp_target_overrides={"bank": _server(state)}
+    )
+
+    assert registry.enabled is False
+    assert registry.catalog()["check_resource_ingress"]["readiness"] == (
+        "provider_authentication_required"
+    )
+    result = registry.execute("check_resource_ingress", {"verifier": "bank_usd"})
+    assert result.ok is False
+    assert state["calls"] == 0

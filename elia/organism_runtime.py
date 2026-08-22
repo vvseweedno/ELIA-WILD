@@ -6,18 +6,13 @@ import json
 from typing import Any
 
 from . import __version__
+from .canonical import canonical_json
 from .homeostasis import HomeostasisEngine
 from .runtime import EliaRuntime as GenesisRuntime
 
 
 def _fingerprint(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
+    payload = canonical_json(value)
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -45,6 +40,7 @@ class OrganismRuntime(GenesisRuntime):
     WORLD_CONTEXT_LIMIT = 24
     SENSORIUM_CONTEXT_LIMIT = 8
     CAUSAL_CONTEXT_LIMIT = 12
+    _active_cycle_transaction_id: str | None = None
 
     def _boot(self) -> None:
         super()._boot()

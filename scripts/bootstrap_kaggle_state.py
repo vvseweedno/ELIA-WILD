@@ -88,8 +88,7 @@ def main() -> None:
             "ELIA_CHECKPOINT_ENCRYPTION_KEY must be set to a base64-encoded 32-byte key"
         )
 
-    repo_root = Path(__file__).resolve().parents[1]
-    config = load_config(repo_root / args.config)
+    config = load_config(args.config)
     identity = IdentityBundle.load(
         config.subject_core_path,
         config.continuity_constitution_path,
@@ -196,7 +195,12 @@ def main() -> None:
 
     write_digest(output / DIGEST_NAME, info.digest)
     transport = mark_success(TransportState(), info.digest, info.counter)
-    write_transport_state(output / TRANSPORT_NAME, transport)
+    write_transport_state(
+        output / TRANSPORT_NAME,
+        transport,
+        key=key,
+        require_auth=True,
+    )
     anchor_path = Path(args.trust_anchor).expanduser().resolve()
     anchor = WakeTrustAnchorStore(
         anchor_path,

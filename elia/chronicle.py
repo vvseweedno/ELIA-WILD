@@ -4,17 +4,20 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from importlib import import_module
 from pathlib import Path
 import json
 import os
+from types import ModuleType
 from typing import Any, Iterator
 
 from .redaction import redact_action_record
 
+fcntl: ModuleType | None = None
 try:  # Linux is the production/runtime target; keep import optional for tooling portability.
-    import fcntl  # type: ignore
+    fcntl = import_module("fcntl")
 except ImportError:  # pragma: no cover - non-POSIX fallback has no cross-process guarantee.
-    fcntl = None
+    pass
 
 
 GENESIS_HASH = "0" * 64

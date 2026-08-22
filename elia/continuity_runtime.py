@@ -8,17 +8,21 @@ from typing import Any
 from .agency import AgencyKernel
 from .attractor import AutonomyAttractor
 from .autonomy import derive_needs
+from .brain import Decision
+from .checkpoint import recover_interrupted_restore
 from .epistemic_runtime import EpistemicOrganismRuntime
 from .external_effects import (
     EXTERNAL_EFFECT_ACTIONS,
+    EXTERNAL_IO_ACTIONS,
     ExternalEffectIndeterminate,
     ExternalEffectLedger,
 )
 from .memory_trust import MemoryTrustGate
+from .memory import GoalRecord
 from .owner_control import OwnerControl, OwnerControlError, OwnerMandate
 from .pipeline import CanonicalRuntimePipeline, RuntimeStage
 from .tools import ToolResult
-from .transition_kernel import AcceptedTransitionGuard, TransitionRecovery
+from .transition_kernel import AcceptedTransitionGuard, StateWriterLock, TransitionRecovery
 
 
 class ELIARuntime(EpistemicOrganismRuntime):
@@ -39,11 +43,38 @@ class ELIARuntime(EpistemicOrganismRuntime):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._transition_recovery: TransitionRecovery | None = None
         self._last_agency_wake_policy: dict[str, Any] | None = None
+        self._pre_action_agency: dict[str, Any] = {}
+        self._pre_action_capability_catalog: dict[str, Any] = {}
+        self._pending_attractor_candidate: dict[str, Any] | None = None
+        self._pending_attractor_evaluation: Any | None = None
+        self._pending_assurance_accepted: bool | None = None
+        self._constructor_writer_lock_held = False
         config = args[0] if args else kwargs.get("config")
         if config is None:
             raise TypeError("ELIARuntime requires Config as the first argument")
 
-        database = config.runtime.state_dir / "memory.sqlite3"
+        state_dir = config.runtime.state_dir
+        # Recovery and *all* durable construction share one writer lease. Releasing it
+        # after recovery but before the super-chain boots would let another process
+        # atomically replace the state directory underneath already-opened stores.
+        with StateWriterLock(state_dir):
+            self._constructor_writer_lock_held = True
+            try:
+                recover_interrupted_restore(state_dir, lock_held=True)
+                self._initialize_under_writer_lock(config, *args, **kwargs)
+            finally:
+                self._constructor_writer_lock_held = False
+
+    def _initialize_under_writer_lock(
+        self,
+        config: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Construct every durable dependency while the state writer is held."""
+
+        state_dir = config.runtime.state_dir
+        database = state_dir / "memory.sqlite3"
         self.attractor = AutonomyAttractor.load(
             config.system_prompt_path.with_name("autonomy_attractor.md")
         )
@@ -109,6 +140,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
         recovery = AcceptedTransitionGuard.recover_incomplete(
             self.config.runtime.state_dir,
             self.chronicle,
+            lock_held=self._constructor_writer_lock_held,
         )
         self._transition_recovery = recovery
         super()._boot()
@@ -188,10 +220,18 @@ class ELIARuntime(EpistemicOrganismRuntime):
 
     def _state_components(self) -> dict[str, Any]:
         components = super()._state_components()
-        capabilities = components.get("capabilities")
-        catalog = capabilities.get("catalog") if isinstance(capabilities, dict) else None
-        if not isinstance(catalog, dict):
+        capabilities_value = components.get("capabilities")
+        if not isinstance(capabilities_value, dict):
             return components
+        capabilities: dict[str, Any] = capabilities_value
+        catalog_value = capabilities.get("catalog")
+        if not isinstance(catalog_value, dict):
+            return components
+        catalog: dict[str, dict[str, Any]] = {
+            str(name): raw
+            for name, raw in catalog_value.items()
+            if isinstance(raw, dict)
+        }
 
         if self.resource_ingress is not None:
             catalog.update(self.resource_ingress.catalog())
@@ -201,7 +241,7 @@ class ELIARuntime(EpistemicOrganismRuntime):
         for name, raw in catalog.items():
             if not isinstance(raw, dict):
                 continue
-            if name in EXTERNAL_EFFECT_ACTIONS:
+            if name in EXTERNAL_IO_ACTIONS:
                 raw["requires_owner_lease"] = bool(owner.get("external_lease_required"))
                 raw["delegation_revoked"] = bool(owner.get("delegation_revoked"))
             if name in approval_required:
@@ -226,35 +266,52 @@ class ELIARuntime(EpistemicOrganismRuntime):
             if isinstance(item, dict)
         }
         if "body_readiness" not in names:
-            chronicle = components.get("chronicle") or {}
+            chronicle_value = components.get("chronicle")
+            chronicle: dict[str, Any] = (
+                chronicle_value if isinstance(chronicle_value, dict) else {}
+            )
+            resources_value = components.get("resources")
+            budget: dict[str, float]
+            if isinstance(resources_value, dict):
+                try:
+                    budget = {
+                        str(key): float(raw)
+                        for key, raw in resources_value.items()
+                    }
+                except (TypeError, ValueError):
+                    budget = self.budget()
+            else:
+                budget = self.budget()
+            goals_value = components.get("goals")
+            active_goals = (
+                [goal for goal in goals_value if isinstance(goal, GoalRecord)]
+                if isinstance(goals_value, list)
+                else self.memory.active_goals(16)
+            )
+            health_value = capabilities.get("health")
+            capability_health: dict[str, dict[str, Any]] = (
+                {
+                    str(name): raw
+                    for name, raw in health_value.items()
+                    if isinstance(raw, dict)
+                }
+                if isinstance(health_value, dict)
+                else {}
+            )
+            economy_value = components.get("economy")
+            economy: dict[str, Any] = (
+                economy_value
+                if isinstance(economy_value, dict)
+                else self.economy.snapshot(16)
+            )
             additional = derive_needs(
                 self.memory,
-                chronicle_valid=bool(
-                    chronicle.get("valid", False)
-                    if isinstance(chronicle, dict)
-                    else False
-                ),
-                budget=(
-                    components.get("resources")
-                    if isinstance(components.get("resources"), dict)
-                    else self.budget()
-                ),
-                active_goals=(
-                    components.get("goals")
-                    if isinstance(components.get("goals"), list)
-                    else self.memory.active_goals(16)
-                ),
-                capability_health=(
-                    capabilities.get("health")
-                    if isinstance(capabilities.get("health"), dict)
-                    else {}
-                ),
+                chronicle_valid=bool(chronicle.get("valid", False)),
+                budget=budget,
+                active_goals=active_goals,
+                capability_health=capability_health,
                 capability_catalog=catalog,
-                economy=(
-                    components.get("economy")
-                    if isinstance(components.get("economy"), dict)
-                    else self.economy.snapshot(16)
-                ),
+                economy=economy,
             )
             body_need = next(
                 (need.as_dict() for need in additional if need.name == "body_readiness"),
@@ -331,11 +388,24 @@ class ELIARuntime(EpistemicOrganismRuntime):
         args: dict[str, Any],
         next_action,
     ) -> ToolResult:
-        if name not in EXTERNAL_EFFECT_ACTIONS:
+        if name not in EXTERNAL_IO_ACTIONS:
+            capability = self._pre_action_capability_catalog.get(name)
+            self._evaluate_pre_action_candidate(
+                name,
+                args,
+                authority_accepted=bool(
+                    isinstance(capability, dict) and capability.get("enabled") is True
+                ),
+            )
             return next_action(name, args)
         try:
             self.owner_control.assert_external_authorized(name, args)
         except OwnerControlError as exc:
+            self._evaluate_pre_action_candidate(
+                name,
+                args,
+                authority_accepted=False,
+            )
             self.memory.record_capability_event(
                 name,
                 ok=False,
@@ -343,7 +413,98 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 error=str(exc),
             )
             return ToolResult(False, name, data={"owner_controlled": True}, error=str(exc))
+        self._evaluate_pre_action_candidate(
+            name,
+            args,
+            authority_accepted=True,
+        )
         return next_action(name, args)
+
+    @staticmethod
+    def _canonical_action_args(value: Any) -> str:
+        try:
+            return json.dumps(
+                value if isinstance(value, dict) else {},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("action arguments are not finite canonical JSON") from exc
+
+    def _evaluate_pre_action_candidate(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        authority_accepted: bool,
+    ) -> None:
+        """Bind one evaluation to the exact action crossing the pipeline.
+
+        This hook runs in the first pipeline stage, after owner/delegation preflight for
+        external I/O and before any body, network, process or resource call.
+        """
+
+        pending = self._pending_attractor_candidate
+        if not isinstance(pending, dict):
+            raise RuntimeError("pre-action Attractor candidate was not prepared")
+        if (
+            str(pending.get("action_name", "")) != str(name)
+            or self._canonical_action_args(pending.get("action_args"))
+            != self._canonical_action_args(args)
+        ):
+            raise RuntimeError("pre-action candidate does not match selected action")
+        candidate = {
+            **pending,
+            "authority_accepted": authority_accepted is True,
+        }
+        evaluations = self.attractor.evaluate_pre_action_candidates(
+            [candidate],
+            agency=self._pre_action_agency,
+            capability_catalog=self._pre_action_capability_catalog,
+        )
+        if len(evaluations) != 1:
+            raise RuntimeError("Attractor did not return the selected pre-action candidate")
+        selected = evaluations[0]
+        expected = self.attractor.evaluate(
+            action_name=str(candidate["action_name"]),
+            action_args=dict(candidate.get("action_args") or {}),
+            prediction=dict(candidate.get("prediction") or {}),
+            agency=self._pre_action_agency,
+            capability_catalog=self._pre_action_capability_catalog,
+            assurance_accepted=candidate.get("assurance_accepted") is True,
+            authority_accepted=candidate.get("authority_accepted") is True,
+            evaluation_phase="pre_action",
+        )
+        if (
+            selected.action_name != str(name)
+            or not selected.decision_fingerprint
+            or selected.decision_fingerprint != expected.decision_fingerprint
+        ):
+            raise RuntimeError("Attractor selected-decision fingerprint mismatch")
+        self._pending_attractor_evaluation = selected
+
+    def _assert_point_of_effect_authorized(self, name: str) -> None:
+        """Re-check non-model owner state immediately before crossing the boundary.
+
+        The earlier owner stage may consume an exact one-time approval. This second
+        check deliberately does not consume approval again; it re-evaluates kill,
+        revocation and lease state after any durable intent preparation.
+        """
+
+        self.owner_control.assert_runtime_allowed()
+        state = self.owner_control.snapshot()
+        if bool(state.get("delegation_revoked")):
+            raise OwnerControlError(
+                f"external delegation was revoked before point of effect: {name}"
+            )
+        if bool(state.get("external_lease_required")) and not bool(
+            state.get("lease_active")
+        ):
+            raise OwnerControlError(
+                f"external delegation lease expired before point of effect: {name}"
+            )
 
     def _resource_ingress_action_stage(
         self,
@@ -355,6 +516,10 @@ class ELIARuntime(EpistemicOrganismRuntime):
             return next_action(name, args)
         if self.resource_ingress is None:
             return ToolResult(False, name, error="resource ingress is not configured")
+        try:
+            self._assert_point_of_effect_authorized(name)
+        except OwnerControlError as exc:
+            return ToolResult(False, name, data={"owner_controlled": True}, error=str(exc))
         started = time.monotonic()
         result = self.resource_ingress.execute(name, args)
         self.memory.record_capability_event(
@@ -373,6 +538,16 @@ class ELIARuntime(EpistemicOrganismRuntime):
         next_action,
     ) -> ToolResult:
         if name not in EXTERNAL_EFFECT_ACTIONS:
+            if name in EXTERNAL_IO_ACTIONS:
+                try:
+                    self._assert_point_of_effect_authorized(name)
+                except OwnerControlError as exc:
+                    return ToolResult(
+                        False,
+                        name,
+                        data={"owner_controlled": True},
+                        error=str(exc),
+                    )
             return next_action(name, args)
 
         unresolved = self.external_effects.unresolved_for(name, args)
@@ -412,7 +587,26 @@ class ELIARuntime(EpistemicOrganismRuntime):
 
         self.external_effects.mark_sending(intent.effect_id)
         try:
+            self._assert_point_of_effect_authorized(name)
             result = next_action(name, args)
+        except OwnerControlError as exc:
+            closed = self.external_effects.record_result(
+                intent.effect_id,
+                ok=False,
+                result={"owner_controlled": True, "error": str(exc)},
+                no_effect_proven=True,
+            )
+            return ToolResult(
+                False,
+                name,
+                data={
+                    "owner_controlled": True,
+                    "external_effect_id": intent.effect_id,
+                    "external_effect_status": closed.status,
+                    "suppressed": True,
+                },
+                error=str(exc),
+            )
         except BaseException as exc:
             self.external_effects.mark_indeterminate(
                 intent.effect_id,
@@ -461,6 +655,25 @@ class ELIARuntime(EpistemicOrganismRuntime):
                 ids.append(memory_id)
         return ids
 
+    def _safe_decision_after_rejection(
+        self,
+        original: Decision,
+        assurance: dict[str, Any],
+    ) -> Decision:
+        self._pending_assurance_accepted = False
+        return super()._safe_decision_after_rejection(original, assurance)
+
+    def _record_forecast(self, decision: Any) -> int:
+        self._pending_attractor_candidate = {
+            "action_name": str(getattr(decision, "action_name", "")),
+            "action_args": dict(getattr(decision, "action_args", {}) or {}),
+            "prediction": dict(getattr(decision, "prediction", {}) or {}),
+            # The rejection branch above explicitly sets False. Reaching this hook
+            # without that branch means CriticAssurance accepted the selected decision.
+            "assurance_accepted": self._pending_assurance_accepted is not False,
+        }
+        return super()._record_forecast(decision)
+
     def _execute_action(self, name: str, args: dict[str, Any]) -> ToolResult:
         return self.pipeline.execute(name, args, super()._execute_action)
 
@@ -499,33 +712,25 @@ class ELIARuntime(EpistemicOrganismRuntime):
             with guard as transition:
                 components = self._state_components()
                 agency_before = self._reconcile_agency_from_components(components)
-                report = super().cycle()
-
-                decision = report.get("decision") if isinstance(report, dict) else {}
-                forecast = report.get("forecast") if isinstance(report, dict) else {}
-                prediction = forecast.get("prediction") if isinstance(forecast, dict) else {}
-                assurance = report.get("assurance") if isinstance(report, dict) else {}
                 capabilities = components.get("capabilities")
                 catalog = (
                     capabilities.get("catalog")
                     if isinstance(capabilities, dict)
                     else {}
                 )
-                evaluation = self.attractor.evaluate(
-                    action_name=(
-                        str(decision.get("action_name", ""))
-                        if isinstance(decision, dict)
-                        else ""
-                    ),
-                    prediction=(prediction if isinstance(prediction, dict) else {}),
-                    agency=agency_before.as_dict(),
-                    capability_catalog=(catalog if isinstance(catalog, dict) else {}),
-                    assurance_accepted=(
-                        bool(assurance.get("accepted"))
-                        if isinstance(assurance, dict)
-                        else False
-                    ),
+                self._pre_action_agency = agency_before.as_dict()
+                self._pre_action_capability_catalog = (
+                    dict(catalog) if isinstance(catalog, dict) else {}
                 )
+                self._pending_attractor_candidate = None
+                self._pending_attractor_evaluation = None
+                self._pending_assurance_accepted = None
+                report = super().cycle()
+                evaluation = self._pending_attractor_evaluation
+                if evaluation is None:
+                    raise RuntimeError(
+                        "selected action reached cycle completion without pre-action evaluation"
+                    )
                 evaluation_dict = evaluation.as_dict()
                 self.memory.set_meta(
                     "autonomy_attractor_last_v1",

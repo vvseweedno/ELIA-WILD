@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+import math
 from pathlib import Path
 from typing import Any
+
+from .agency import NEED_REGISTRY
+from .canonical import canonical_json
 
 
 ATTRACTOR_VERSION = 1
@@ -30,6 +34,7 @@ _CONTINUATION_ACTIONS: dict[str, tuple[str, ...]] = {
 
 _NEED_ACTIONS: dict[str, tuple[str, ...]] = {
     "continuity_integrity": ("noop", "self_check", "sensorium_recent", "body_diagnostics"),
+    "identity_drift": ("noop", "self_check", "sensorium_recent", "body_diagnostics"),
     "durable_checkpoint": ("noop", "self_check", "body_diagnostics"),
     "runtime_reliability": ("self_check", "causal_snapshot", "sensorium_recent", "propose_repair"),
     "capability_repair": ("self_check", "causal_snapshot", "body_diagnostics", "propose_repair"),
@@ -38,9 +43,31 @@ _NEED_ACTIONS: dict[str, tuple[str, ...]] = {
     "opportunity_review": ("world_model_query", "http_get", "sensorium_recent"),
     "opportunity_discovery": ("http_get", "world_model_query"),
     "resource_acquisition": ("http_get", "world_model_query", "stage_deliverable"),
+    "resource_execution": ("stage_deliverable", "submit_work", "check_work_outcome"),
+    "resource_discovery": ("http_get", "world_model_query"),
+    "work_execution": ("stage_deliverable", "submit_work", "check_work_outcome"),
+    "resource_runway": ("world_model_query", "http_get", "stage_deliverable"),
+    "uncovered_essential_obligation": (
+        "world_model_query",
+        "http_get",
+        "stage_deliverable",
+    ),
     "compute_conservation": ("noop", "sensorium_recent", "causal_snapshot", "world_model_query"),
     "compute_survival": ("noop",),
+    "storage_survival": ("noop", "self_check", "body_diagnostics", "propose_repair"),
+    "storage_conservation": ("self_check", "body_diagnostics", "propose_repair"),
+    "state_reconciliation": ("self_check", "causal_snapshot", "noop"),
+    "sensorium_degradation": ("self_check", "body_diagnostics", "causal_snapshot"),
+    "epistemic_conflict": ("world_model_query", "sensorium_recent", "http_get"),
+    "goal_formation": ("world_model_query", "sensorium_recent", "noop"),
 }
+
+if set(_NEED_ACTIONS) != set(NEED_REGISTRY):
+    missing = sorted(set(NEED_REGISTRY) - set(_NEED_ACTIONS))
+    extra = sorted(set(_NEED_ACTIONS) - set(NEED_REGISTRY))
+    raise RuntimeError(
+        f"attractor need/action contract differs from canonical registry; missing={missing}, extra={extra}"
+    )
 
 _ACTION_REVERSIBILITY = {
     "noop": 1.0,
@@ -77,14 +104,21 @@ def _unit(value: Any, default: float = 0.0) -> float:
         number = float(value)
     except (TypeError, ValueError):
         number = default
+    if not math.isfinite(number):
+        number = default
+    if not math.isfinite(number):
+        number = 0.0
     return max(0.0, min(1.0, number))
 
 
 def _saturating_nonnegative(value: Any) -> float:
     try:
-        number = max(0.0, float(value))
+        number = float(value)
     except (TypeError, ValueError):
         number = 0.0
+    if not math.isfinite(number):
+        number = 0.0
+    number = max(0.0, number)
     return number / (1.0 + number)
 
 
@@ -102,6 +136,9 @@ class AttractorEvaluation:
     learning_value: float
     action_name: str
     attractor_fingerprint: str
+    decision_fingerprint: str
+    evaluation_phase: str
+    pre_action_contract_satisfied: bool
     notes: tuple[str, ...]
 
     def as_dict(self) -> dict[str, Any]:
@@ -219,16 +256,25 @@ class AutonomyAttractor:
         agency: dict[str, Any] | None,
         capability_catalog: dict[str, Any] | None,
         assurance_accepted: bool,
-        authority_accepted: bool = True,
+        authority_accepted: bool | None = None,
+        action_args: dict[str, Any] | None = None,
+        evaluation_phase: str = "advisory_unspecified",
     ) -> AttractorEvaluation:
         action_name = str(action_name).strip()[:128]
         prediction = prediction if isinstance(prediction, dict) else {}
         agency = agency if isinstance(agency, dict) else {}
         capability = self._capability(capability_catalog, action_name)
-        declared_enabled = bool(capability and capability.get("enabled", True))
+        declared_enabled = bool(capability and capability.get("enabled") is True)
+        contract_loaded = self.path is not None and bool(self.text.strip())
         feasible = bool(
-            assurance_accepted and authority_accepted and action_name and declared_enabled
+            assurance_accepted is True
+            and authority_accepted is True
+            and action_name
+            and declared_enabled
+            and contract_loaded
         )
+        phase = str(evaluation_phase).strip().lower()[:64] or "advisory_unspecified"
+        pre_action_contract = feasible and phase == "pre_action"
 
         success_probability = _unit(
             prediction.get("action_success_probability", 0.5), 0.5
@@ -252,12 +298,18 @@ class AutonomyAttractor:
             )
         if not authority_accepted:
             notes.append(
-                "Owner/delegation authority rejected the proposed decision; soft utility is not applicable."
+                "Owner/delegation authority was not explicitly accepted; soft utility is not applicable."
             )
+        if not contract_loaded:
+            notes.append("The autonomy-attractor contract is unavailable or empty.")
         if capability is None:
             notes.append("Action is absent from the declared capability catalog.")
         elif not bool(capability.get("enabled", True)):
             notes.append("Declared capability is disabled.")
+        if phase != "pre_action":
+            notes.append(
+                "This is advisory/post-hoc evaluation, not evidence that the attractor constrained action selection."
+            )
         continuation = agency.get("continuation_work_item")
         if isinstance(continuation, dict):
             notes.append(
@@ -284,6 +336,21 @@ class AutonomyAttractor:
             if feasible
             else None
         )
+        args_payload = canonical_json(
+            action_args if isinstance(action_args, dict) else {}
+        )
+        decision_payload = canonical_json(
+            {
+                "action_name": action_name,
+                "action_args_digest": sha256(args_payload.encode("utf-8")).hexdigest(),
+                "success_probability": success_probability,
+                "information_gain": information,
+                "assurance_accepted": assurance_accepted is True,
+                "authority_accepted": authority_accepted is True,
+                "phase": phase,
+                "contract": self.fingerprint,
+            }
+        )
         return AttractorEvaluation(
             version=ATTRACTOR_VERSION,
             formula=ATTRACTOR_FORMULA,
@@ -297,5 +364,54 @@ class AutonomyAttractor:
             learning_value=round(learning, 6),
             action_name=action_name,
             attractor_fingerprint=self.fingerprint,
+            decision_fingerprint=sha256(decision_payload.encode("utf-8")).hexdigest(),
+            evaluation_phase=phase,
+            pre_action_contract_satisfied=pre_action_contract,
             notes=tuple(notes),
         )
+
+    def evaluate_pre_action_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        agency: dict[str, Any] | None,
+        capability_catalog: dict[str, Any] | None,
+    ) -> tuple[AttractorEvaluation, ...]:
+        """Evaluate and rank already-reviewed candidates before execution.
+
+        This method grants no authority. Every candidate must carry explicit assurance
+        and owner/delegation acceptance; infeasible candidates remain in the audit list
+        with ``score=None`` and sort after feasible ones.
+        """
+
+        evaluations = [
+            self.evaluate(
+                action_name=str(candidate.get("action_name", "")),
+                action_args=(
+                    candidate.get("action_args")
+                    if isinstance(candidate.get("action_args"), dict)
+                    else {}
+                ),
+                prediction=(
+                    candidate.get("prediction")
+                    if isinstance(candidate.get("prediction"), dict)
+                    else {}
+                ),
+                agency=agency,
+                capability_catalog=capability_catalog,
+                assurance_accepted=candidate.get("assurance_accepted") is True,
+                authority_accepted=candidate.get("authority_accepted") is True,
+                evaluation_phase="pre_action",
+            )
+            for candidate in candidates[:64]
+            if isinstance(candidate, dict)
+        ]
+        evaluations.sort(
+            key=lambda item: (
+                0 if item.pre_action_contract_satisfied else 1,
+                -(item.score if item.score is not None else -1.0),
+                item.action_name,
+                item.decision_fingerprint,
+            )
+        )
+        return tuple(evaluations)

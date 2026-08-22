@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import runpy
+
+import pytest
 
 from elia.wake_transport import render_runner
 
@@ -21,6 +24,7 @@ def test_kaggle_cli_child_never_receives_continuity_secrets(monkeypatch) -> None
     monkeypatch.setenv("ELIA_CHECKPOINT_KEY", "auth-secret")
     monkeypatch.setenv("ELIA_CHECKPOINT_ENCRYPTION_KEY", "encryption-secret")
     monkeypatch.setenv("ELIA_CHECKPOINT_REQUIRE_ENCRYPTION", "1")
+    monkeypatch.setenv("ELIA_WAKE_RESET_AUTH", "reset-authorization-secret")
 
     env = module["_kaggle_child_env"]()
 
@@ -28,6 +32,7 @@ def test_kaggle_cli_child_never_receives_continuity_secrets(monkeypatch) -> None
     assert "ELIA_CHECKPOINT_KEY" not in env
     assert "ELIA_CHECKPOINT_ENCRYPTION_KEY" not in env
     assert "ELIA_CHECKPOINT_REQUIRE_ENCRYPTION" not in env
+    assert "ELIA_WAKE_RESET_AUTH" not in env
 
 
 def test_rendered_remote_runner_requires_encrypted_continuity() -> None:
@@ -38,10 +43,10 @@ def test_rendered_remote_runner_requires_encrypted_continuity() -> None:
         template,
         {
             "version": 1,
-            "launch_nonce": "n" * 32,
+            "launch_nonce": "c" * 32,
             "source_digest": "a" * 64,
             "repo_url": "https://github.com/vvseweedno/ELIA-WILD.git",
-            "repo_ref": "elia/genesis-1.7.1-consolidation",
+            "repo_ref": "a" * 40,
             "max_cycles": 2,
         },
     )
@@ -52,6 +57,8 @@ def test_rendered_remote_runner_requires_encrypted_continuity() -> None:
     assert "ELIA_CHECKPOINT_REQUIRE_ENCRYPTION" in rendered
     assert "assert_encrypted_checkpoint(source_checkpoint)" in rendered
     assert '"encrypted_checkpoint": True' in rendered
+    assert 'run(["git", "rev-parse", "HEAD"]' in rendered
+    assert 'mode in {"halt", "owner_halt"}' in rendered
 
 
 def test_prepared_kernel_is_private_t4_and_uses_current_kaggle_cli_flag(
@@ -67,7 +74,7 @@ def test_prepared_kernel_is_private_t4_and_uses_current_kaggle_cli_flag(
         accelerator="NvidiaTeslaT4",
         source_digest="b" * 64,
         nonce="c" * 32,
-        repo_ref="elia/genesis-1.7.1-consolidation",
+        repo_ref="a" * 40,
         max_cycles=4,
     )
 
@@ -82,3 +89,36 @@ def test_prepared_kernel_is_private_t4_and_uses_current_kaggle_cli_flag(
     source = (repo_root() / "scripts" / "kaggle_wake.py").read_text(encoding="utf-8")
     assert source.count('"--acc"') == 1
     assert source.count('"--timeout"') == 1
+
+
+def test_prepared_kernel_rejects_a_movable_repository_ref(tmp_path: Path) -> None:
+    module = relay_module()
+    with pytest.raises(ValueError, match="immutable 40-hex"):
+        module["prepare_kernel"](
+            repo_root=repo_root(),
+            destination=tmp_path / "kernel",
+            kernel_id="owner/elia-wild-runtime",
+            state_dataset="owner/elia-wild-state",
+            accelerator="NvidiaTeslaT4",
+            source_digest="b" * 64,
+            nonce="c" * 32,
+            repo_ref="main",
+            max_cycles=4,
+        )
+
+
+def test_controlled_notebook_uses_immutable_source_and_explicit_gates() -> None:
+    notebook_path = repo_root() / "runtime" / "kaggle" / "ELIA_WILD_Genesis.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    code = "\n".join(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    )
+    tree = ast.parse(code)
+
+    assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+    assert "[0-9a-fA-F]{40}" in code
+    assert "git', 'checkout', '--detach'" in code
+    assert "--branch" not in code
+    assert "elia/genesis-1.7.1-consolidation" not in code

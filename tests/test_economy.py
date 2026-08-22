@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from elia.autonomy import derive_needs
 from elia.brain import Decision
 from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.economy import EconomyStore

@@ -4,20 +4,15 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
-import json
 import secrets
 import sqlite3
 from typing import Any, Mapping
 
+from .canonical import canonical_json_bytes
+
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _digest(value: Any) -> str:

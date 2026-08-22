@@ -12,11 +12,12 @@ import shutil
 from typing import Any
 
 from . import __version__
+from .checkpoint import recover_interrupted_restore
 from .chronicle import Chronicle
 from .config import Config, load_config
 from .identity import IdentityBundle, IdentityStore
 from .memory import MemoryStore
-from .transition_kernel import AcceptedTransitionGuard
+from .transition_kernel import AcceptedTransitionGuard, StateWriterLock
 
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -51,15 +52,24 @@ class BranchManager:
 
     def __init__(self, config: Config):
         self.config = config
-        self.state_dir = config.runtime.state_dir
+        self.state_dir = config.runtime.state_dir.resolve()
         self.database = self.state_dir / "memory.sqlite3"
-        self.chronicle = Chronicle(self.state_dir / "chronicle.jsonl")
-        AcceptedTransitionGuard.recover_incomplete(self.state_dir, self.chronicle)
-        self.memory = MemoryStore(self.database)
-        persisted = self.memory.get_meta("branch_id")
-        if persisted:
-            self.config.branch_id = str(persisted)
-        self.identity_store = IdentityStore(self.database)
+        # A checkpoint restore replaces the whole state directory. Finish/revert that
+        # operation before Chronicle/SQLite constructors can initialize a half-swapped
+        # directory, and hold the same external writer inode across both recoveries.
+        with StateWriterLock(self.state_dir):
+            recover_interrupted_restore(self.state_dir, lock_held=True)
+            self.chronicle = Chronicle(self.state_dir / "chronicle.jsonl")
+            AcceptedTransitionGuard.recover_incomplete(
+                self.state_dir,
+                self.chronicle,
+                lock_held=True,
+            )
+            self.memory = MemoryStore(self.database)
+            persisted = self.memory.get_meta("branch_id")
+            if persisted:
+                self.config.branch_id = str(persisted)
+            self.identity_store = IdentityStore(self.database)
         self.identity = IdentityBundle.load(
             config.subject_core_path,
             config.continuity_constitution_path,

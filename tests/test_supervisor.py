@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
+import threading
 
-from elia.identity import IdentityBundle
+import pytest
+
 from elia.memory import MemoryStore
-from elia.supervisor import ResidentSupervisor
+from elia.owner_control import OwnerControl, OwnerMandate
+from elia.supervisor import ResidentSupervisor, SupervisorAlreadyRunning
 
 
 def repo_root() -> Path:
@@ -89,3 +93,61 @@ def test_supervisor_halts_on_identity_mismatch_even_if_due(tmp_path: Path) -> No
     decision = supervisor.decide()
     assert decision.action == "halt"
     assert "Identity fingerprint mismatch" in decision.reason
+
+
+def test_supervisor_enforces_child_deadline_and_kills_process_group(
+    tmp_path: Path,
+) -> None:
+    supervisor = ResidentSupervisor(
+        make_config_copy(tmp_path),
+        child_timeout_seconds=0.2,
+        termination_grace_seconds=0.1,
+    )
+    result = supervisor.run_child(
+        (sys.executable, "-c", "import time; time.sleep(30)")
+    )
+    assert result["timed_out"] is True
+    assert result["terminated_by_owner"] is False
+    assert result["returncode"] != 0
+
+
+def test_owner_kill_terminates_running_cognitive_child(tmp_path: Path) -> None:
+    supervisor = ResidentSupervisor(
+        make_config_copy(tmp_path),
+        child_timeout_seconds=10,
+        termination_grace_seconds=0.1,
+    )
+    mandate = OwnerMandate(
+        schema_version=1,
+        precedence=("owner", "continuity"),
+        require_external_lease=False,
+        approval_required_actions=(),
+        default_lease_hours=1.0,
+        fingerprint="f" * 64,
+    )
+    control = OwnerControl(
+        supervisor.config.runtime.state_dir / "memory.sqlite3", mandate
+    )
+    timer = threading.Timer(
+        0.2, lambda: control.kill(reason="emergency stop during cognition")
+    )
+    timer.start()
+    try:
+        result = supervisor.run_child(
+            (sys.executable, "-c", "import time; time.sleep(30)")
+        )
+    finally:
+        timer.cancel()
+        timer.join(timeout=1)
+    assert result["terminated_by_owner"] is True
+    assert result["timed_out"] is False
+    assert result["returncode"] != 0
+
+
+def test_supervisor_singleton_rejects_second_resident(tmp_path: Path) -> None:
+    first = ResidentSupervisor(make_config_copy(tmp_path))
+    second = ResidentSupervisor(tmp_path / "genesis.yaml")
+    with first.singleton():
+        with pytest.raises(SupervisorAlreadyRunning, match="another resident"):
+            with second.singleton():
+                raise AssertionError("second supervisor must never enter")

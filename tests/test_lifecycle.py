@@ -10,7 +10,9 @@ from elia.chronicle import Chronicle
 from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.lifecycle import evaluate_preflight
 from elia.memory import MemoryStore
+from elia.owner_control import OwnerControl, OwnerMandate
 from elia.runtime import EliaRuntime
+from elia.transition_kernel import AcceptedTransitionGuard
 
 
 class SleepBrain:
@@ -32,7 +34,7 @@ def make_config(tmp_path: Path, *, auto_checkpoint: bool = False) -> Config:
         identity_statement="Lifecycle test seed.",
         mission=["preserve continuity", "conserve scarce compute"],
         brain=BrainConfig(
-            backend="fake-expensive",
+            backend="mock",
             model_id="fake-expensive-model",
             base_url="http://127.0.0.1:8000/v1",
             timeout_seconds=5,
@@ -109,6 +111,53 @@ def test_chronicle_failure_halts_even_with_force_wake(tmp_path: Path) -> None:
     decision = evaluate_preflight(config.runtime.state_dir, 30, force_wake=True)
     assert decision.mode == "halt"
     assert "integrity failure" in decision.reason.lower()
+
+
+def test_preflight_recovers_interrupted_transition_before_reading_baseline(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    memory = MemoryStore(config.runtime.state_dir / "memory.sqlite3")
+    memory.set_meta("continuity_probe", "accepted")
+    chronicle = Chronicle(config.runtime.state_dir / "chronicle.jsonl")
+    chronicle.append("BOOT", {"accepted": True})
+
+    guard = AcceptedTransitionGuard(config.runtime.state_dir, chronicle)
+    guard.__enter__()
+    memory.set_meta("continuity_probe", "dirty-after-crash")
+    chronicle.append("CYCLE", {"accepted": False})
+    guard._release()
+
+    evaluate_preflight(config.runtime.state_dir, 30, force_wake=True)
+    recovered = MemoryStore(config.runtime.state_dir / "memory.sqlite3")
+    assert recovered.get_meta("continuity_probe") == "accepted"
+    assert not (
+        config.runtime.state_dir / "transition-kernel" / "active.json"
+    ).exists()
+
+
+def test_owner_kill_halts_preflight_even_when_force_wake_is_requested(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    database = config.runtime.state_dir / "memory.sqlite3"
+    mandate = OwnerMandate(
+        schema_version=1,
+        precedence=("owner", "continuity"),
+        require_external_lease=False,
+        approval_required_actions=(),
+        default_lease_hours=1.0,
+        fingerprint="f" * 64,
+    )
+    OwnerControl(database, mandate).kill(reason="operator emergency stop")
+
+    decision = evaluate_preflight(
+        config.runtime.state_dir,
+        30,
+        force_wake=True,
+    )
+    assert decision.mode == "halt"
+    assert "owner kill" in decision.reason.lower()
 
 
 def test_long_sleep_becomes_hibernate_transition(tmp_path: Path) -> None:

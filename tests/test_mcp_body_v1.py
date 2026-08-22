@@ -9,6 +9,17 @@ from mcp.server import MCPServer
 from elia.body.mcp import MCPBody
 
 
+ADD_ARGUMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "a": {"type": "integer"},
+        "b": {"type": "integer"},
+    },
+    "required": ["a", "b"],
+    "additionalProperties": False,
+}
+
+
 def _server() -> MCPServer:
     server = MCPServer("ELIA Body Test")
 
@@ -37,6 +48,7 @@ def _body(server: MCPServer) -> MCPBody:
                     "enabled": True,
                     "allow_tool_calls": True,
                     "allowed_tools": ["add"],
+                    "tool_argument_schemas": {"add": ADD_ARGUMENT_SCHEMA},
                     "allowed_resources": ["test://*"],
                     "timeout_seconds": 5,
                 }
@@ -62,6 +74,10 @@ def test_mcp_v2_inprocess_discovery_call_and_resource() -> None:
     denied = body.call("local", "forbidden_operation", {})
     assert denied.ok is False
     assert "not allow-listed" in (denied.error or "")
+
+    out_of_scope = body.call("local", "add", {"a": 1, "b": 2, "command": "extra"})
+    assert out_of_scope.ok is False
+    assert "out-of-scope fields" in (out_of_scope.error or "")
 
     resource = body.read_resource("local", "test://hello")
     assert resource.ok is True, resource.error

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from hypothesis import given, strategies as st
 
 from elia.wake_transport import (
     CHECKPOINT_NAME,
@@ -14,6 +15,7 @@ from elia.wake_transport import (
     launch_suppressed,
     locate_state_bundle,
     mark_failure,
+    mark_operator_reset,
     mark_pending,
     mark_success,
     parse_dataset_status,
@@ -63,6 +65,99 @@ def test_transport_state_failure_suppression_and_success_reset(tmp_path: Path) -
     write_transport_state(path, success)
     loaded = read_transport_state(path)
     assert loaded.as_dict() == success.as_dict()
+
+
+def test_authenticated_transport_roundtrip_rejects_tampering_and_missing_key(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / TRANSPORT_NAME
+    key = b"transport-test-key-32-bytes-long"
+    state = mark_failure(TransportState(), "GPU worker failed")
+    write_transport_state(path, state, key=key, require_auth=True)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["schema"] == "elia-wake-transport-v2"
+    assert read_transport_state(path, key=key, require_auth=True) == state
+    with pytest.raises(ValueError, match="key is required"):
+        read_transport_state(path)
+
+    raw["transport"]["consecutive_kernel_failures"] = 0
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(PermissionError, match="authentication failed"):
+        read_transport_state(path, key=key, require_auth=True)
+
+
+def test_transport_schema_rejects_semantic_malleability_and_unknown_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / TRANSPORT_NAME
+    key = b"transport-test-key-32-bytes-long"
+    write_transport_state(path, TransportState(), key=key, require_auth=True)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["transport"]["version"] = "2"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="version"):
+        read_transport_state(path, key=key, require_auth=True)
+
+    write_transport_state(path, TransportState(), key=key, require_auth=True)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["transport"]["ignored_authority"] = True
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown fields"):
+        read_transport_state(path, key=key, require_auth=True)
+
+
+def test_transport_state_invariants_fail_closed_before_write(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="occur together"):
+        TransportState(pending_launch_nonce="nonce-without-time")
+    with pytest.raises(ValueError, match="occur together"):
+        TransportState(last_success_digest=D1)
+    with pytest.raises(ValueError, match="positive integer"):
+        mark_success(TransportState(), D1, 0)
+
+    state = TransportState()
+    state.consecutive_kernel_failures = -1
+    with pytest.raises(ValueError, match="non-negative integer"):
+        write_transport_state(tmp_path / TRANSPORT_NAME, state)
+
+
+def test_required_auth_rejects_missing_and_legacy_transport(tmp_path: Path) -> None:
+    path = tmp_path / TRANSPORT_NAME
+    with pytest.raises(FileNotFoundError, match="missing"):
+        read_transport_state(path, key=b"transport-test-key", require_auth=True)
+
+    write_transport_state(path, TransportState())
+    with pytest.raises(PermissionError, match="legacy unauthenticated"):
+        read_transport_state(path, key=b"transport-test-key", require_auth=True)
+
+
+def test_operator_reset_is_explicit_audited_and_never_clears_pending() -> None:
+    healthy = TransportState()
+    with pytest.raises(ValueError, match="suppressed"):
+        mark_operator_reset(healthy, evidence="diagnosis complete")
+
+    suppressed = TransportState(consecutive_kernel_failures=3)
+    reset = mark_operator_reset(suppressed, evidence="incident ELIA-17 resolved")
+    assert reset.consecutive_kernel_failures == 0
+    assert reset.operator_reset_count == 1
+    assert reset.last_operator_reset_at is not None
+    assert reset.last_operator_reset_evidence_sha256 is not None
+    assert "ELIA-17" not in json.dumps(reset.as_dict())
+
+    pending = mark_pending(suppressed, "still-running")
+    with pytest.raises(ValueError, match="pending"):
+        mark_operator_reset(pending, evidence="must not reset")
+
+
+@given(st.integers(min_value=0, max_value=100))
+def test_failure_counter_and_circuit_threshold_hold_for_all_bounded_counts(
+    initial_failures: int,
+) -> None:
+    state = TransportState(consecutive_kernel_failures=initial_failures)
+    failed = mark_failure(state, "property-generated failure")
+    assert failed.consecutive_kernel_failures == initial_failures + 1
+    assert launch_suppressed(failed) is (initial_failures + 1 >= 3)
 
 
 def test_locate_state_bundle_requires_unique_checkpoint_and_digest(tmp_path: Path) -> None:
@@ -137,7 +232,7 @@ def test_real_runner_template_renders_to_valid_python() -> None:
             "launch_nonce": "nonce-compile-test",
             "source_digest": D1,
             "repo_url": "https://github.com/vvseweedno/ELIA-WILD.git",
-            "repo_ref": "deadbeef",
+            "repo_ref": "d" * 40,
             "max_cycles": 8,
         },
     )

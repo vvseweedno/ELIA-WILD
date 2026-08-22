@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .organism import default_organism_contract
+from .provider_context import provider_context
 
 
 DECISION_SCHEMA = {
@@ -401,9 +402,13 @@ class PromptTemplate:
         return cls(path, text, sha256(text.encode("utf-8")).hexdigest())
 
     def render(self, context: dict[str, Any]) -> str:
-        identity_contract = context.get("identity_contract") or {}
-        self_model = context.get("self_model") or {}
-        skills = context.get("skills") or {}
+        # The system prompt leaves the same trust boundary as the user message. Build
+        # it exclusively from the default-deny provider projection so allow-listed
+        # top-level containers cannot smuggle raw memory/sensor/evidence content.
+        safe_context = provider_context(context)
+        identity_contract = safe_context.get("identity_contract") or {}
+        self_model = safe_context.get("self_model") or {}
+        skills = safe_context.get("skills") or {}
         available_skills = {
             name: {
                 "maturity": item.get("maturity"),
@@ -416,10 +421,10 @@ class PromptTemplate:
             if item.get("available")
         }
 
-        world = context.get("world_model") or {}
-        causal = context.get("causal_memory") or {}
-        homeostasis = context.get("homeostasis") or {}
-        metabolism = context.get("metabolism") or homeostasis.get("metabolism") or {}
+        world = safe_context.get("world_model") or {}
+        causal = safe_context.get("causal_memory") or {}
+        homeostasis = safe_context.get("homeostasis") or {}
+        metabolism = safe_context.get("metabolism") or homeostasis.get("metabolism") or {}
         contract = {
             "identity": identity_contract,
             "organism": default_organism_contract(),
@@ -441,24 +446,24 @@ class PromptTemplate:
                 )
                 if key in self_model
             },
-            "agency": _bounded_agency(context.get("agency")),
-            "adaptive_self_hypotheses": context.get("self_hypotheses") or [],
+            "agency": _bounded_agency(safe_context.get("agency")),
+            "adaptive_self_hypotheses": safe_context.get("self_hypotheses") or [],
             "world_model": {
                 "beliefs": list(world.get("beliefs") or [])[:16],
                 "contradictions": list(world.get("contradictions") or [])[:8],
                 "epistemic_rule": world.get("epistemic_rule"),
             },
-            "recent_sensorium": _bounded_sensorium(context.get("sensorium")),
+            "recent_sensorium": _bounded_sensorium(safe_context.get("sensorium")),
             "causal_strategy_statistics": list(causal.get("strategy_statistics") or [])[:16],
             "metabolism": _bounded_metabolism(metabolism),
             "homeostasis": _bounded_homeostasis(homeostasis),
-            "resource_ecology": _bounded_resource_ecology(context.get("resource_ecology")),
-            "work_ports": _bounded_work_ports(context.get("work_ports")),
-            "executive": context.get("executive") or {},
-            "executive_energy": context.get("executive_energy") or {},
-            "digital_body": context.get("digital_body") or {},
-            "organism_state_bus": context.get("organism_state_bus") or {},
-            "metacognitive_calibration": context.get("metacognition") or {},
+            "resource_ecology": _bounded_resource_ecology(safe_context.get("resource_ecology")),
+            "work_ports": _bounded_work_ports(safe_context.get("work_ports")),
+            "executive": safe_context.get("executive") or {},
+            "executive_energy": safe_context.get("executive_energy") or {},
+            "digital_body": safe_context.get("digital_body") or {},
+            "organism_state_bus": safe_context.get("organism_state_bus") or {},
+            "metacognitive_calibration": safe_context.get("metacognition") or {},
             "available_skills": available_skills,
         }
         return (

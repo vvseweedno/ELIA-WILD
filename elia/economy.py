@@ -9,6 +9,7 @@ import sqlite3
 from typing import Any
 from urllib.parse import urlparse
 
+from .sqlite_utils import inserted_row_id
 from .verification import (
     VerificationReceipt,
     VerificationRegistry,
@@ -279,9 +280,12 @@ class EconomyStore:
         with self._connect() as conn:
             authority: str | None = None
             if verified:
-                assert self.verification_registry is not None
-                assert verification_receipt is not None
-                assert claim is not None
+                if (
+                    self.verification_registry is None
+                    or verification_receipt is None
+                    or claim is None
+                ):
+                    raise RuntimeError("verified resource event lost its verification inputs")
                 authority = consume_verified_receipt(
                     conn,
                     self.verification_registry,
@@ -311,7 +315,7 @@ class EconomyStore:
                     receipt_json,
                 ),
             )
-            return int(cur.lastrowid)
+            return inserted_row_id(cur, operation="resource event insert")
 
     def verified_balance(self, asset: str, unit: str) -> float:
         with self._connect() as conn:
@@ -411,7 +415,7 @@ class EconomyStore:
                     source,
                 ),
             )
-            opportunity_id = int(cur.lastrowid)
+            opportunity_id = inserted_row_id(cur, operation="opportunity insert")
             conn.execute(
                 """
                 INSERT INTO opportunity_events(opportunity_id, timestamp, kind, evidence)

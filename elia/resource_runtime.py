@@ -90,8 +90,11 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
             op = str(item.get("op", "")).strip().lower()
             try:
                 if op == "profile_resource":
+                    opportunity_id_raw = item.get("opportunity_id")
+                    if opportunity_id_raw is None:
+                        raise ValueError("resource profile opportunity_id is required")
                     profile = self.resource_ecology_store.upsert_profile(
-                        opportunity_id=int(item.get("opportunity_id")),
+                        opportunity_id=int(opportunity_id_raw),
                         target_asset=str(item.get("target_asset", "")),
                         target_unit=str(item.get("target_unit", "")),
                         target_amount=float(item.get("target_amount", 0)),
@@ -116,22 +119,32 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
                     )
                     continue
                 if op == "plan_work":
-                    work = self.resource_ecology_store.create_work_item(
-                        opportunity_id=int(item.get("opportunity_id")),
+                    opportunity_id_raw = item.get("opportunity_id")
+                    if opportunity_id_raw is None:
+                        raise ValueError("work plan opportunity_id is required")
+                    created_work = self.resource_ecology_store.create_work_item(
+                        opportunity_id=int(opportunity_id_raw),
                         objective=str(item.get("objective", "")),
                         deliverable_spec=str(item.get("deliverable_spec", "")),
                         acceptance_criteria=str(item.get("acceptance_criteria", "")),
                         estimated_gpu_hours=float(item.get("estimated_gpu_hours", 0.0)),
                         source="brain",
                     )
-                    changes.append({"ok": True, "op": op, "work_item": work.as_dict()})
+                    changes.append(
+                        {"ok": True, "op": op, "work_item": created_work.as_dict()}
+                    )
                     continue
                 if op == "abandon_work":
-                    work = self.resource_ecology_store.abandon_work(
-                        int(item.get("work_item_id")),
+                    work_item_id_raw = item.get("work_item_id")
+                    if work_item_id_raw is None:
+                        raise ValueError("abandon_work work_item_id is required")
+                    abandoned_work = self.resource_ecology_store.abandon_work(
+                        int(work_item_id_raw),
                         evidence=str(item.get("evidence", "")),
                     )
-                    changes.append({"ok": True, "op": op, "work_item": work.as_dict()})
+                    changes.append(
+                        {"ok": True, "op": op, "work_item": abandoned_work.as_dict()}
+                    )
                     continue
                 raise ValueError(f"unknown resource ecology operation: {op or '<empty>'}")
             except Exception as exc:
@@ -148,8 +161,10 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
         opportunity_id: int | None = None
         if name == "stage_deliverable" and args.get("opportunity_id") is not None:
             opportunity_id = int(args["opportunity_id"])
-            work = self.resource_ecology_store.work_for_opportunity(opportunity_id, 16)
-            if not any(item.status == "planned" for item in work):
+            planned_work = self.resource_ecology_store.work_for_opportunity(
+                opportunity_id, 16
+            )
+            if not any(item.status == "planned" for item in planned_work):
                 return ToolResult(
                     False,
                     name,
@@ -172,7 +187,7 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
                 "stage_deliverable succeeded without returning its local artifact path",
             )
         try:
-            work = self.resource_ecology_store.attach_staged_deliverable(
+            staged_work = self.resource_ecology_store.attach_staged_deliverable(
                 opportunity_id=opportunity_id,
                 artifact_path=str(artifact_path),
                 evidence=(
@@ -190,7 +205,7 @@ class ResourceOrganismRuntime(ExecutiveOrganismRuntime):
         data["resource_ecology_transition"] = {
             "ok": True,
             "event": "deliverable_staged",
-            "work_item": work.as_dict(),
+            "work_item": staged_work.as_dict(),
         }
         return ToolResult(True, name, data, result.error)
 

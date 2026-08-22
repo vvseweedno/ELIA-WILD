@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import math
 from pathlib import Path
 import shutil
 from typing import Any
 
+from .agency import NEED_REGISTRY
 from .observations import ObservationStore
 from .state_bus import OrganismStateBus
 from .world_model import WorldModelStore
@@ -18,6 +20,12 @@ class HomeostaticSignal:
     reason: str
     response_hint: str
     evidence: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.name not in NEED_REGISTRY:
+            raise ValueError(f"homeostasis emitted an unregistered need: {self.name!r}")
+        if not math.isfinite(float(self.severity)) or not 0.0 <= float(self.severity) <= 1.0:
+            raise ValueError("homeostatic severity must be finite and within [0, 1]")
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,7 +88,13 @@ class HomeostasisEngine:
         signals: list[HomeostaticSignal] = []
         bottleneck = metabolism.get("bottleneck")
         if isinstance(bottleneck, dict) and bottleneck.get("runway_days") is not None:
-            runway = max(0.0, float(bottleneck.get("runway_days", 0.0)))
+            try:
+                runway = float(bottleneck.get("runway_days", 0.0))
+            except (TypeError, ValueError):
+                runway = 0.0
+            if not math.isfinite(runway):
+                runway = 0.0
+            runway = max(0.0, runway)
             if runway <= 0:
                 severity = 1.0
             elif runway < 3:
@@ -109,24 +123,70 @@ class HomeostasisEngine:
                     )
                 )
 
-        uncovered = [
+        incomplete_projection = [
             item
-            for item in list(metabolism.get("upcoming_verified_obligations") or [])
-            if isinstance(item, dict)
-            and bool(item.get("essential", False))
-            and float(item.get("due_in_seconds", 1.0)) <= 7 * 86_400
-        ]
-        resource_index = {
-            (str(item.get("asset")), str(item.get("unit"))): item
             for item in list(metabolism.get("resources") or [])
-            if isinstance(item, dict)
-        }
+            if isinstance(item, dict) and item.get("projection_complete") is False
+        ]
+        if incomplete_projection:
+            signals.append(
+                HomeostaticSignal(
+                    "resource_runway",
+                    0.9,
+                    "At least one cumulative obligation projection hit its audited event bound; future coverage is unknown.",
+                    "Do not treat the truncated horizon as covered. Reduce projection cardinality or obtain an authorized exact accounting projection.",
+                    {"incomplete_resources": incomplete_projection[:8]},
+                )
+            )
+
+        checked_at_raw = str(metabolism.get("checked_at", ""))
+        try:
+            checked_at = datetime.fromisoformat(checked_at_raw.replace("Z", "+00:00"))
+            if checked_at.tzinfo is None:
+                checked_at = checked_at.replace(tzinfo=timezone.utc)
+            checked_at = checked_at.astimezone(timezone.utc)
+        except ValueError:
+            checked_at = datetime.now(timezone.utc)
+
+        # Use the metabolism engine's cumulative recurring cash-flow projection. The
+        # earlier implementation copied one aggregate `next_due_covered` flag onto
+        # every obligation, which could call a later essential bill covered even after
+        # earlier bills had already consumed the same balance.
         not_covered: list[dict[str, Any]] = []
-        for item in uncovered:
-            key = (str(item.get("asset")), str(item.get("unit")))
-            resource = resource_index.get(key)
-            if resource is not None and resource.get("next_due_covered") is False:
-                not_covered.append(item)
+        for resource in list(metabolism.get("resources") or []):
+            if not isinstance(resource, dict):
+                continue
+            due_at = resource.get("first_uncovered_essential_due_at")
+            if not due_at:
+                continue
+            try:
+                due = datetime.fromisoformat(str(due_at).replace("Z", "+00:00"))
+                if due.tzinfo is None:
+                    due = due.replace(tzinfo=timezone.utc)
+                due_in = (due.astimezone(timezone.utc) - checked_at).total_seconds()
+            except ValueError:
+                continue
+            if math.isfinite(due_in) and due_in <= 7 * 86_400:
+                not_covered.append({**resource, "due_in_seconds": due_in})
+
+        # Compatibility fallback for older stored snapshots that do not yet contain
+        # projection fields. It uses per-obligation cumulative coverage annotations,
+        # never the unrelated earliest-due flag of the whole resource vector.
+        if not not_covered:
+            for item in list(metabolism.get("upcoming_verified_obligations") or []):
+                if (
+                    not isinstance(item, dict)
+                    or not bool(item.get("essential", False))
+                    or item.get("cumulative_covered") is not False
+                ):
+                    continue
+                try:
+                    due_in = float(item.get("due_in_seconds", float("inf")))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(due_in) and due_in <= 7 * 86_400:
+                    not_covered.append(item)
+
         if not_covered:
             nearest = min(
                 not_covered,
@@ -140,14 +200,14 @@ class HomeostasisEngine:
                     severity,
                     (
                         f"A verified essential {nearest.get('asset')}/{nearest.get('unit')} "
-                        f"obligation is not covered by the current verified balance and is due "
+                        f"cumulative obligation is not covered by the current verified balance and is due "
                         f"in {max(0.0, due_in) / 3600.0:.1f} hour(s)."
                     ),
                     (
                         "Prioritize an authorized action that can cover, reduce, replace or "
                         "truthfully retire this obligation. Scarcity does not broaden authority."
                     ),
-                    {"obligation": nearest},
+                    {"cashflow_projection": nearest},
                 )
             )
         return signals

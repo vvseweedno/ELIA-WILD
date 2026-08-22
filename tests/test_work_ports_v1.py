@@ -13,7 +13,58 @@ from elia.config import load_config
 from elia.economy import EconomyStore
 from elia.external_work_runtime import ExternalWorkOrganismRuntime
 from elia.resource_ecology import ResourceEcologyStore
-from elia.work_ports import WorkPortRegistry
+from elia.work_ports import WorkPortRegistry, _fingerprint
+
+
+SUBMIT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "work_item_id": {"type": "integer", "minimum": 1},
+        "opportunity_id": {"type": "integer", "minimum": 1},
+        "objective": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "deliverable": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 255},
+                "relative_path": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+                "bytes": {"type": "integer", "minimum": 0, "maximum": 100_000},
+                "text": {"type": "string", "maxLength": 100_000},
+            },
+            "required": ["name", "relative_path", "sha256", "bytes", "text"],
+            "additionalProperties": False,
+        },
+        "acceptance_criteria": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "idempotency_key": {"type": "string", "minLength": 64, "maxLength": 64},
+    },
+    "required": [
+        "work_item_id",
+        "opportunity_id",
+        "objective",
+        "deliverable",
+        "acceptance_criteria",
+        "idempotency_key",
+    ],
+    "additionalProperties": False,
+}
+LOOKUP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "work_item_id": {"type": "integer", "minimum": 1},
+        "idempotency_key": {"type": "string", "minLength": 64, "maxLength": 64},
+    },
+    "required": ["work_item_id", "idempotency_key"],
+    "additionalProperties": False,
+}
+OUTCOME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "work_item_id": {"type": "integer", "minimum": 1},
+        "submission_ref": {"type": "string", "minLength": 1, "maxLength": 1000},
+    },
+    "required": ["work_item_id", "submission_ref"],
+    "additionalProperties": False,
+}
 
 
 def _config(monkeypatch, tmp_path: Path):
@@ -30,6 +81,11 @@ def _config(monkeypatch, tmp_path: Path):
                     "candidate_status",
                     "candidate_lookup",
                 ],
+                "tool_argument_schemas": {
+                    "submit_candidate": SUBMIT_SCHEMA,
+                    "candidate_status": OUTCOME_SCHEMA,
+                    "candidate_lookup": LOOKUP_SCHEMA,
+                },
                 "allowed_resources": [],
                 "timeout_seconds": 10,
             }
@@ -296,6 +352,39 @@ def test_work_port_rejects_unknown_port_without_external_call(monkeypatch, tmp_p
     assert "unknown or disabled work port" in str(result.error)
     assert remote["submit_calls"] == 0
     assert ResourceEcologyStore(config.runtime.state_dir / "memory.sqlite3").work_item(work_id).status == "staged"
+
+
+def test_work_port_rejects_invalid_work_item_ids_without_external_call(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = _config(monkeypatch, tmp_path)
+    server, remote = _server()
+    registry = WorkPortRegistry(
+        config.runtime.state_dir / "workspace",
+        config.raw_tools,
+        mcp_target_overrides={"market": server},
+    )
+
+    for arguments in ({"port": "marketplace"}, {"work_item_id": 0}, {"work_item_id": "bad"}):
+        result = registry.execute("submit_work", arguments)
+        assert result.ok is False
+        assert "work_item_id" in str(result.error)
+
+    assert remote["submit_calls"] == 0
+
+
+def test_work_port_fingerprint_is_order_stable_and_rejects_non_json_values() -> None:
+    assert _fingerprint({"a": 1, "nested": {"x": 2, "y": 3}}) == _fingerprint(
+        {"nested": {"y": 3, "x": 2}, "a": 1}
+    )
+
+    class Stringifiable:
+        def __str__(self) -> str:
+            return "ambiguous"
+
+    for invalid in ({"amount": float("nan")}, {"value": Stringifiable()}):
+        with pytest.raises(ValueError):
+            _fingerprint(invalid)
 
 
 class SubmitBrain:

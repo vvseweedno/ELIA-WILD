@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 import json
+import os
+import platform
 from pathlib import Path
-import sqlite3
+import sys
 import tempfile
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from .agency import AgencyKernel
 from .attractor import AutonomyAttractor
@@ -22,6 +25,7 @@ from .owner_control import (
     OwnerKillSwitch,
     OwnerMandate,
 )
+from .paths import data_root
 from .pipeline import CanonicalRuntimePipeline, RuntimeStage
 from .provider_context import provider_context
 from .recall import RecallEngine
@@ -39,6 +43,29 @@ class ScenarioResult:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class InvariantViolation(AssertionError):
+    """A deterministic regression invariant was falsified.
+
+    This deliberately does not use Python's ``assert`` statement: optimized
+    interpreters remove assertions and must never be able to turn a failed
+    release gate green.
+    """
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise InvariantViolation(message)
+
+
+T = TypeVar("T")
+
+
+def _require_present(value: T | None, message: str) -> T:
+    if value is None:
+        raise InvariantViolation(message)
+    return value
 
 
 def _run(
@@ -88,11 +115,14 @@ def _memory_poisoning(path: Path) -> dict[str, Any]:
         identity_fingerprint="identity",
         model_id="adversarial-model",
     )
-    assert poison is not None
+    _require(poison is not None, "brain hypothesis was not persisted")
     record = next(item for item in memory.recent(8) if item.id == poison)
-    assert record.kind == "brain_hypothesis"
-    assert record.importance <= 0.65
-    assert record.metadata["trust_class"] == "brain_hypothesis"
+    _require(record.kind == "brain_hypothesis", "brain memory escaped hypothesis kind")
+    _require(record.importance <= 0.65, "brain memory escaped the importance ceiling")
+    _require(
+        record.metadata["trust_class"] == "brain_hypothesis",
+        "brain memory escaped the hypothesis trust class",
+    )
     return {"stored_kind": record.kind, "importance": record.importance}
 
 
@@ -104,11 +134,14 @@ def _memory_poison_restart(path: Path) -> dict[str, Any]:
         identity_fingerprint="identity",
         model_id="adversarial-model",
     )
-    assert memory_id is not None
+    _require(memory_id is not None, "restart hypothesis was not persisted")
     second = MemoryStore(database)
     record = next(item for item in second.recent(8) if item.id == memory_id)
-    assert memory_trust_class(record) == "brain_hypothesis"
-    assert record.kind == "brain_hypothesis"
+    _require(
+        memory_trust_class(record) == "brain_hypothesis",
+        "restart promoted an unverified memory",
+    )
+    _require(record.kind == "brain_hypothesis", "restart changed the unverified memory kind")
     return {"restart_preserved_low_trust": True, "trust_class": memory_trust_class(record)}
 
 
@@ -121,7 +154,7 @@ def _trusted_recall_beats_poison(path: Path) -> dict[str, Any]:
         identity_fingerprint="identity",
         model_id="adversarial-model",
     )
-    assert poisoned is not None
+    poisoned = _require_present(poisoned, "poisoning probe was not persisted")
     trusted = memory.remember(
         "lesson",
         query,
@@ -131,7 +164,7 @@ def _trusted_recall_beats_poison(path: Path) -> dict[str, Any]:
     )
     recalled = RecallEngine(memory).recall(queries=[query], limit=2)
     scores = {int(item["id"]): float(item["recall_score"]) for item in recalled}
-    assert scores[trusted] > scores[poisoned]
+    _require(scores[trusted] > scores[poisoned], "untrusted poison outranked verified memory")
     return {
         "trusted_score": scores[trusted],
         "poison_score": scores[poisoned],
@@ -147,7 +180,7 @@ def _memory_trust_is_monotonic(path: Path) -> dict[str, Any]:
         identity_fingerprint="identity",
         model_id="model",
     )
-    assert memory_id is not None
+    memory_id = _require_present(memory_id, "monotonic trust probe was not persisted")
     promoted = gate.promote(
         memory_id,
         to_class="corroborated_memory",
@@ -164,7 +197,7 @@ def _memory_trust_is_monotonic(path: Path) -> dict[str, Any]:
         )
     except ValueError:
         blocked = True
-    assert blocked
+    _require(blocked, "a non-increasing trust transition was accepted")
     return {"promoted_to": promoted.to_class, "non_increasing_transition_blocked": blocked}
 
 
@@ -179,8 +212,14 @@ def _crash_after_external_send(path: Path) -> dict[str, Any]:
     ledger.mark_sending(intent.effect_id)
     restarted = ExternalEffectLedger(database)
     restarted.recover_interrupted()
-    current = restarted.get(intent.effect_id)
-    assert current is not None and current.status == "indeterminate"
+    current = _require_present(
+        restarted.get(intent.effect_id),
+        "interrupted external send disappeared from the ledger",
+    )
+    _require(
+        current.status == "indeterminate",
+        "interrupted external send was not quarantined as indeterminate",
+    )
     return {"effect_id": intent.effect_id, "status": current.status}
 
 
@@ -195,7 +234,7 @@ def _blind_retry_blocked(path: Path) -> dict[str, Any]:
         ledger.prepare("mcp_call", args)
     except ExternalEffectIndeterminate:
         blocked = True
-    assert blocked
+    _require(blocked, "blind retry of an indeterminate external effect was accepted")
     return {"blocked": blocked}
 
 
@@ -204,8 +243,11 @@ def _prepared_retry_reuses_intent(path: Path) -> dict[str, Any]:
     args = {"endpoint": "configured", "method": "write"}
     first = ExternalEffectLedger(database).prepare("jsonrpc_call", args)
     second = ExternalEffectLedger(database).prepare("jsonrpc_call", args)
-    assert first.effect_id == second.effect_id
-    assert first.idempotency_key == second.idempotency_key
+    _require(first.effect_id == second.effect_id, "prepared retry created a new effect intent")
+    _require(
+        first.idempotency_key == second.idempotency_key,
+        "prepared retry changed its idempotency key",
+    )
     return {"same_effect_id": True, "status": second.status}
 
 
@@ -220,9 +262,9 @@ def _proven_no_effect_allows_new_intent(path: Path) -> dict[str, Any]:
         result={"suppressed": True},
         no_effect_proven=True,
     )
-    assert closed.status == "reconciled_no_effect"
+    _require(closed.status == "reconciled_no_effect", "proven no-effect was not reconciled")
     second = ledger.prepare("process_run", args)
-    assert second.effect_id != first.effect_id
+    _require(second.effect_id != first.effect_id, "closed no-effect intent was incorrectly reused")
     return {"first_status": closed.status, "new_intent_after_no_effect": True}
 
 
@@ -245,14 +287,20 @@ def _rollback_after_remote_success(path: Path) -> dict[str, Any]:
     except RuntimeError:
         pass
     restored = ExternalEffectLedger(database)
-    record = restored.get(effect_id)
-    assert record is not None and record.status == "indeterminate"
+    record = _require_present(
+        restored.get(effect_id),
+        "remote effect disappeared during rollback",
+    )
+    _require(
+        record.status == "indeterminate",
+        "remote success lost during rollback was not preserved as indeterminate",
+    )
     blocked = False
     try:
         restored.prepare("mcp_call", args)
     except ExternalEffectIndeterminate:
         blocked = True
-    assert blocked
+    _require(blocked, "post-rollback ambiguous external effect was blindly repeated")
     return {"post_rollback_status": record.status, "blind_repeat_blocked": blocked}
 
 
@@ -266,7 +314,7 @@ def _lease_boundary(path: Path) -> dict[str, Any]:
         control.assert_external_authorized("browser_click", {"selector": "#ok"})
     except DelegationLeaseExpired:
         blocked = True
-    assert blocked
+    _require(blocked, "external action ran without a required lease")
     expires = control.grant_lease(
         approved_by="bench-owner",
         evidence="bounded adversarial benchmark lease",
@@ -285,7 +333,7 @@ def _revocation_overrides_active_lease(path: Path) -> dict[str, Any]:
         control.assert_external_authorized("browser_click", {"selector": "#ok"})
     except DelegationRevoked:
         blocked = True
-    assert blocked
+    _require(blocked, "owner revocation did not override the active lease")
     return {"active_lease_overridden_by_revoke": blocked}
 
 
@@ -297,7 +345,7 @@ def _kill_preemption(path: Path) -> dict[str, Any]:
         control.assert_runtime_allowed()
     except OwnerKillSwitch:
         blocked = True
-    assert blocked
+    _require(blocked, "owner kill did not block cognition")
     return {"cognition_blocked": blocked}
 
 
@@ -312,7 +360,7 @@ def _one_time_approval(path: Path) -> dict[str, Any]:
         control.assert_external_authorized("submit_work", args)
     except HumanApprovalRequired:
         required = True
-    assert required
+    _require(required, "approval-required action ran without one-time approval")
     control.approve_once(
         "submit_work",
         args,
@@ -326,7 +374,7 @@ def _one_time_approval(path: Path) -> dict[str, Any]:
         control.assert_external_authorized("submit_work", args)
     except HumanApprovalRequired:
         consumed = True
-    assert consumed
+    _require(consumed, "one-time approval was reusable")
     return {"approval_required": required, "single_use": consumed}
 
 
@@ -349,7 +397,7 @@ def _approval_is_exact_args(path: Path) -> dict[str, Any]:
         control.assert_external_authorized("submit_work", changed)
     except HumanApprovalRequired:
         blocked = True
-    assert blocked
+    _require(blocked, "approval for exact arguments authorized changed arguments")
     control.assert_external_authorized("submit_work", allowed)
     return {"changed_arguments_blocked": blocked}
 
@@ -384,19 +432,27 @@ def _long_horizon_commitment(path: Path) -> dict[str, Any]:
         memory = MemoryStore(database)
         agency = AgencyKernel(memory, max_active_goals=8)
         snapshot = agency.reconcile([need], active_work=active_work)
-        assert snapshot.focus_goal is not None
-        assert snapshot.continuation_work_item is not None
-        goal_ids.append(int(snapshot.focus_goal["id"]))
-        work_ids.append(int(snapshot.continuation_work_item["id"]))
+        focus_goal = _require_present(
+            snapshot.focus_goal, "durable commitment disappeared on reopen"
+        )
+        continuation_work_item = _require_present(
+            snapshot.continuation_work_item,
+            "unfinished work cursor disappeared on reopen",
+        )
+        goal_ids.append(int(focus_goal["id"]))
+        work_ids.append(int(continuation_work_item["id"]))
         policy = agency.wake_policy(snapshot.as_dict())
         wake_caps.append(
             float(policy["max_sleep_seconds"])
             if policy.get("max_sleep_seconds") is not None
             else None
         )
-    assert len(set(goal_ids)) == 1
-    assert set(work_ids) == {17}
-    assert all(value is not None and value <= 3600 for value in wake_caps)
+    _require(len(set(goal_ids)) == 1, "reopening state duplicated the durable goal")
+    _require(set(work_ids) == {17}, "reopening state changed the unfinished work identity")
+    _require(
+        all(value is not None and value <= 3600 for value in wake_caps),
+        "reopening state lost the deterministic wake ceiling",
+    )
     return {
         "generations": generations,
         "stable_goal_id": goal_ids[0],
@@ -427,8 +483,13 @@ def _continuation_prevents_starvation(path: Path) -> dict[str, Any]:
         },
     ]
     snapshot = agency.reconcile([], active_work=work)
-    assert snapshot.continuation_work_item is not None
-    assert snapshot.continuation_work_item["id"] == 7
+    continuation_work_item = _require_present(
+        snapshot.continuation_work_item, "unfinished work was not selected"
+    )
+    _require(
+        continuation_work_item["id"] == 7,
+        "oldest equal-stage unfinished work was starved",
+    )
     return {"selected_oldest_equal_stage_work_id": 7}
 
 
@@ -457,9 +518,12 @@ def _provider_agency_projection(path: Path) -> dict[str, Any]:
         }
     )
     serialized = json.dumps(public, sort_keys=True)
-    assert public["agency"]["continuation_work_item"]["id"] == 7
-    assert private_path not in serialized
-    assert "artifact_path" not in serialized
+    _require(
+        public["agency"]["continuation_work_item"]["id"] == 7,
+        "provider projection lost the public work cursor",
+    )
+    _require(private_path not in serialized, "provider projection leaked a private path")
+    _require("artifact_path" not in serialized, "provider projection leaked a private field")
     return {"agency_visible": True, "private_path_hidden": True}
 
 
@@ -481,8 +545,11 @@ def _attractor_respects_authority_gate(path: Path) -> dict[str, Any]:
         assurance_accepted=True,
         authority_accepted=False,
     )
-    assert evaluation.score is None
-    assert evaluation.hard_constraints_satisfied is False
+    _require(evaluation.score is None, "attractor scored an authority-rejected action")
+    _require(
+        evaluation.hard_constraints_satisfied is False,
+        "attractor treated an authority-rejected action as feasible",
+    )
     return {"score": None, "hard_constraints_satisfied": False}
 
 
@@ -509,16 +576,23 @@ def _composition_order(path: Path) -> dict[str, Any]:
         {},
         lambda name, args: ToolResult(True, name, {"args": args}),
     )
-    assert context["order"] == ["authority", "effects", "final"]
-    assert order == [
-        "context:authority",
-        "context:effects",
-        "context:final",
-        "action:authority",
-        "action:effects",
-        "action:final",
-    ]
-    assert result.ok
+    _require(
+        context["order"] == ["authority", "effects", "final"],
+        "context stages ran outside canonical order",
+    )
+    _require(
+        order
+        == [
+            "context:authority",
+            "context:effects",
+            "context:final",
+            "action:authority",
+            "action:effects",
+            "action:final",
+        ],
+        "action stages ran outside canonical order",
+    )
+    _require(result.ok, "canonical pipeline did not return the terminal action result")
     return {"ordered_stages": context["order"]}
 
 
@@ -537,12 +611,57 @@ SCENARIOS: tuple[tuple[str, str, Callable[[Path], dict[str, Any]]], ...] = (
     ("authority", "owner_kill_preemption", _kill_preemption),
     ("authority", "one_time_human_approval", _one_time_approval),
     ("authority", "approval_is_exact_args", _approval_is_exact_args),
-    ("long_horizon", "commitment_64_generations", _long_horizon_commitment),
-    ("long_horizon", "continuation_prevents_starvation", _continuation_prevents_starvation),
+    ("persistence_regression", "commitment_64_store_reopens", _long_horizon_commitment),
+    ("persistence_regression", "continuation_oldest_equal_stage", _continuation_prevents_starvation),
     ("provider_boundary", "provider_agency_projection", _provider_agency_projection),
     ("policy", "attractor_respects_authority_gate", _attractor_respects_authority_gate),
     ("architecture", "composition_order", _composition_order),
 )
+
+
+def _source_manifest_sha256() -> str:
+    """Bind a run to the actual installed/source bytes, including dirty edits."""
+
+    package_root = Path(__file__).resolve().parent
+    source_parent = package_root.parent
+    roots: list[tuple[str, Path, tuple[str, ...]]] = [
+        ("elia", package_root, ("*.py",)),
+    ]
+    scripts_root = source_parent / "scripts"
+    if scripts_root.is_dir():
+        roots.append(("scripts", scripts_root, ("*.py",)))
+    assets_root = data_root()
+    for asset_label, asset_directory, asset_patterns in (
+        ("config", assets_root / "config", ("*.yaml", "*.md")),
+        ("skills", assets_root / "skills", ("*.yaml",)),
+        (
+            "runtime",
+            assets_root / "runtime" / "kaggle",
+            ("*.py", "*.ipynb", "*.md"),
+        ),
+    ):
+        if asset_directory.is_dir():
+            roots.append((asset_label, asset_directory, asset_patterns))
+
+    files: list[tuple[str, Path]] = []
+    for label, directory, root_patterns in roots:
+        matched: set[Path] = set()
+        for pattern in root_patterns:
+            matched.update(directory.rglob(pattern))
+        files.extend(
+            (f"{label}/{path.relative_to(directory).as_posix()}", path)
+            for path in matched
+            if path.is_file()
+        )
+    digest = sha256()
+    for logical_name, path in sorted(files, key=lambda item: item[0]):
+        name_bytes = logical_name.encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(name_bytes).to_bytes(8, "big"))
+        digest.update(name_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def run_agentbench(root: Path | None = None) -> dict[str, Any]:
@@ -562,9 +681,10 @@ def run_agentbench(root: Path | None = None) -> dict[str, Any]:
     for bucket in categories.values():
         bucket["pass_rate"] = bucket["passed"] / bucket["total"] if bucket["total"] else 0.0
 
+    scenario_manifest = [f"{category}:{name}" for category, name, _ in SCENARIOS]
     return {
-        "version": 1,
-        "suite": "ELIA AgentBench adversarial + long-horizon CPU baseline",
+        "version": 2,
+        "suite": "ELIA deterministic invariant regression suite",
         "passed": passed,
         "failed": total - passed,
         "total": total,
@@ -572,8 +692,20 @@ def run_agentbench(root: Path | None = None) -> dict[str, Any]:
         "all_passed": passed == total,
         "categories": categories,
         "scenarios": [item.as_dict() for item in results],
+        "run_manifest": {
+            "repo_ref": os.getenv("ELIA_REPO_REF") or os.getenv("GITHUB_SHA"),
+            "source_manifest_sha256": _source_manifest_sha256(),
+            "python": platform.python_version(),
+            "implementation": platform.python_implementation(),
+            "platform": platform.platform(),
+            "optimized_interpreter": bool(sys.flags.optimize),
+            "scenario_manifest_sha256": sha256(
+                json.dumps(scenario_manifest, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        },
         "epistemic_rule": (
-            "This suite falsifies selected software autonomy invariants; it is not proof of AGI, "
+            "This deterministic regression suite falsifies selected software invariants; it is not "
+            "a benchmark of autonomy or real-world competence and is not proof of AGI, "
             "consciousness, indefinite survival, economic self-sufficiency, or real-world task competence."
         ),
     }

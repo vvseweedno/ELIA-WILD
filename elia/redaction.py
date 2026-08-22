@@ -25,6 +25,18 @@ _SECRET_FIELD_SUFFIXES = (
     "hmackey",
     "encryptionkey",
     "signingkey",
+    "emailaddress",
+    "phonenumber",
+    "mobilenumber",
+    "homeaddress",
+    "postaladdress",
+    "streetaddress",
+    "socialsecuritynumber",
+    "nationalid",
+    "passportnumber",
+    "taxid",
+    "dateofbirth",
+    "accountnumber",
 )
 _BEARER_RE = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 _SENSITIVE_QUERY_RE = re.compile(
@@ -51,6 +63,16 @@ _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
     re.DOTALL,
 )
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?![A-Za-z0-9.-])"
+)
+_PHONE_RE = re.compile(
+    r"(?<![\w])(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?|\d{2,4}[ .-])"
+    r"\d{3,4}[ .-]\d{3,4}(?![\w])"
+)
+_SSN_RE = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
 
 
 def fingerprint(value: Any) -> str:
@@ -65,7 +87,12 @@ def fingerprint(value: Any) -> str:
 
 
 def scrub_secret_text(value: str) -> str:
-    """Remove common credential forms while preserving useful surrounding text."""
+    """Remove common credentials and high-confidence PII forms.
+
+    The historical name remains for API compatibility. Free-form names are not guessed
+    as PII; callers that know a value is private must additionally classify the whole
+    payload as sensitive/secret so persistence keeps only a projection.
+    """
 
     text = str(value)
     text = _PRIVATE_KEY_RE.sub(_REDACTED, text)
@@ -76,7 +103,10 @@ def scrub_secret_text(value: str) -> str:
         lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
         text,
     )
-    return _KNOWN_TOKEN_RE.sub(_REDACTED, text)
+    text = _KNOWN_TOKEN_RE.sub(_REDACTED, text)
+    text = _EMAIL_RE.sub(_REDACTED, text)
+    text = _PHONE_RE.sub(_REDACTED, text)
+    return _SSN_RE.sub(_REDACTED, text)
 
 
 def _secret_field_name(value: Any) -> bool:
@@ -85,7 +115,7 @@ def _secret_field_name(value: Any) -> bool:
 
 
 def scrub_secrets(value: Any, *, _depth: int = 0) -> Any:
-    """Recursively scrub credentials at trust and persistence boundaries.
+    """Recursively scrub credentials/high-confidence PII at trust boundaries.
 
     Key-name filtering catches structured secrets; text filtering catches credentials
     embedded in URLs, headers, errors and summaries. Unknown objects are deep-copied
@@ -120,7 +150,10 @@ def safe_action_descriptor(value: Any) -> dict[str, Any]:
         return {"name": str(value)[:128], "arguments_fingerprint": fingerprint({})}
     name = str(value.get("name", ""))[:128]
     if "args" in value:
-        args = value.get("args") if isinstance(value.get("args"), dict) else {}
+        arguments_value = value.get("args")
+        args: dict[Any, Any] = (
+            arguments_value if isinstance(arguments_value, dict) else {}
+        )
         return {
             "name": name,
             "argument_keys": sorted(str(key) for key in args)[:64],

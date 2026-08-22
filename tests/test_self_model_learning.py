@@ -137,6 +137,59 @@ def test_metacognition_records_pre_action_probability_and_brier(tmp_path: Path) 
     assert calibration["resolved_forecasts"] == 1
     assert calibration["observed_success_rate"] == 1.0
     assert calibration["predicted_success_mean"] == 0.8
+    assert calibration["execution_proxy_forecasts"] == 1
+    assert calibration["outcome_calibration"]["resolved_outcomes"] == 0
+
+
+def test_metacognition_calibrates_intended_outcome_not_tool_execution(tmp_path: Path) -> None:
+    store = MetacognitionStore(tmp_path / "memory.sqlite3")
+    forecast_id = store.record(
+        objective="obtain the expected external result",
+        action_name="synthetic_action",
+        success_probability=0.8,
+        expected_outcome="external result is accepted",
+    )
+    brier = store.resolve(
+        forecast_id,
+        success=True,
+        outcome_success=False,
+        observation={"ok": True, "data": {"accepted": False}},
+    )
+    calibration = store.calibration()
+
+    assert brier == pytest.approx(0.64)
+    assert calibration["execution_proxy_forecasts"] == 0
+    assert calibration["outcome_calibration"]["resolved_outcomes"] == 1
+    assert calibration["outcome_calibration"]["observed_success_rate"] == 0.0
+    assert calibration["outcome_calibration"]["powered_claim_supported"] is False
+
+
+def test_metacognition_rejects_out_of_range_probability_and_self_labeled_payload(
+    tmp_path: Path,
+) -> None:
+    store = MetacognitionStore(tmp_path / "memory.sqlite3")
+    with pytest.raises(ValueError, match=r"within \[0, 1\]"):
+        store.record(
+            objective="invalid",
+            action_name="noop",
+            success_probability=1.01,
+        )
+
+    forecast_id = store.record(
+        objective="payload cannot grade itself",
+        action_name="synthetic",
+        success_probability=0.8,
+    )
+    brier = store.resolve(
+        forecast_id,
+        success=True,
+        observation={"ok": True, "data": {"expected_outcome_met": False}},
+    )
+    calibration = store.calibration()
+
+    assert brier == pytest.approx(0.04)
+    assert calibration["execution_proxy_forecasts"] == 1
+    assert calibration["outcome_calibration"]["resolved_outcomes"] == 0
 
 
 def test_runtime_self_update_changes_adaptive_self_model_and_resolves_forecast(tmp_path: Path) -> None:

@@ -9,6 +9,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .canonical import canonical_json
+from .sqlite_utils import inserted_row_id
 from .verification import (
     VerificationReceipt,
     VerificationRegistry,
@@ -22,13 +24,7 @@ def _now() -> str:
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
+    return canonical_json(value)
 
 
 def _fingerprint(subject: str, predicate: str, obj: Any) -> str:
@@ -271,7 +267,7 @@ class WorldModelStore:
                         int(observation_id) if observation_id is not None else None,
                     ),
                 )
-                belief_id = int(cur.lastrowid)
+                belief_id = inserted_row_id(cur, operation="world belief insert")
                 conn.execute(
                     """
                     INSERT INTO world_belief_events(

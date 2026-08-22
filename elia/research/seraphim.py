@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+import math
+from typing import Any
 
 from .decay import DecaySchedule
 
@@ -23,8 +24,11 @@ def ouroboros_inject(
     """
 
     schedule = schedule or DecaySchedule("silver")
-    coefficient = schedule.coefficient(depth, learned_rho=learned_rho)
-    return hidden + anchor_x0 * (float(strength) * coefficient)
+    strength_value = float(strength)
+    if not math.isfinite(strength_value):
+        raise ValueError("Ouroboros injection strength must be finite")
+    attenuation = schedule.attenuation(depth, learned_rho=learned_rho)
+    return hidden + anchor_x0 * (strength_value * attenuation)
 
 
 def _require_torch():
@@ -40,6 +44,8 @@ def pairwise_distance_matrix(embeddings: Any) -> Any:
     if embeddings.ndim < 2:
         raise ValueError("embeddings must have at least 2 dimensions")
     flat = embeddings.reshape(-1, embeddings.shape[-1]).float()
+    if flat.shape[-1] < 1 or not bool(torch.isfinite(flat).all()):
+        raise ValueError("embeddings must have a non-empty finite feature dimension")
     return torch.cdist(flat, flat, p=2)
 
 
@@ -62,6 +68,12 @@ def topological_loss(
     torch = _require_torch()
     current = pairwise_distance_matrix(embeddings)
     reference = pairwise_distance_matrix(reference_embeddings).detach()
+    if current.shape != reference.shape:
+        raise ValueError("current and reference embeddings must contain the same item count")
+    for name, raw in (("local_weight", local_weight), ("global_weight", global_weight)):
+        value = float(raw)
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
     eps = torch.finfo(current.dtype).eps
     current_n = current / (current.mean().detach() + eps)
     reference_n = reference / (reference.mean().detach() + eps)
@@ -79,18 +91,26 @@ def topological_loss(
 
 
 def surprisal_from_token_loss(token_loss: Any) -> Any:
-    """Convert token NLL into a bounded write gate without adding model-specific code."""
+    """Map non-negative token NLL to ``1 - p(token)`` as a bounded write gate.
+
+    The result is a monotone bounded unexpectedness proxy, not Shannon surprisal
+    itself (the input NLL already is surprisal in nats when natural logs are used).
+    """
 
     try:
         torch = _require_torch()
-        if isinstance(token_loss, torch.Tensor):
-            return 1.0 - torch.exp(-torch.clamp(token_loss.float(), min=0.0))
     except RuntimeError:
-        pass
-    import math
+        torch = None
+    if torch is not None and isinstance(token_loss, torch.Tensor):
+        loss = token_loss.float()
+        if not bool(torch.isfinite(loss).all()) or bool((loss < 0).any()):
+            raise ValueError("token NLL must be finite and non-negative")
+        return -torch.expm1(-loss)
 
-    value = max(0.0, float(token_loss))
-    return 1.0 - math.exp(-value)
+    value = float(token_loss)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("token NLL must be finite and non-negative")
+    return -math.expm1(-value)
 
 
 @dataclass(slots=True)
@@ -101,8 +121,9 @@ class ObjectiveWeights:
 
     def validate(self) -> None:
         for name, value in vars(self).items():
-            if float(value) < 0:
-                raise ValueError(f"objective weight {name} must be non-negative")
+            number = float(value)
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"objective weight {name} must be finite and non-negative")
 
 
 def hybrid_objective(
@@ -128,16 +149,25 @@ def build_learned_decay_module(initial_rho: float = 0.5):
     """Return a tiny Torch module exposing a learnable bounded rho parameter."""
 
     torch = _require_torch()
-    nn = torch.nn
-    initial = max(1e-5, min(1.0 - 1e-5, float(initial_rho)))
+    initial = float(initial_rho)
+    if not math.isfinite(initial) or not 0.0 < initial < 1.0:
+        raise ValueError("initial_rho must be finite and strictly within (0, 1)")
     initial_logit = torch.logit(torch.tensor(initial, dtype=torch.float32))
 
-    class LearnedDecay(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.logit_rho = nn.Parameter(initial_logit.clone())
+    def initialize(module: Any) -> None:
+        torch.nn.Module.__init__(module)
+        module.logit_rho = torch.nn.Parameter(initial_logit.clone())
 
-        def forward(self):
-            return torch.sigmoid(self.logit_rho)
+    def forward(module: Any) -> Any:
+        return torch.sigmoid(module.logit_rho)
 
-    return LearnedDecay()
+    learned_decay_type = type(
+        "LearnedDecay",
+        (torch.nn.Module,),
+        {
+            "__init__": initialize,
+            "forward": forward,
+            "__module__": __name__,
+        },
+    )
+    return learned_decay_type()

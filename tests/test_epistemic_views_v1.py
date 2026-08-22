@@ -122,7 +122,7 @@ def test_view_store_keeps_digest_and_fields_not_raw_context(tmp_path: Path) -> N
     assert b"PRIVATE_RAW" not in raw_db
 
 
-def test_one_failed_organ_degrades_but_does_not_abort_council(tmp_path: Path) -> None:
+def test_one_failed_organ_preserves_packets_but_cannot_silently_lower_quorum(tmp_path: Path) -> None:
     registry = _registry()
     biography = CognitiveBiographyStore(tmp_path / "memory.sqlite3")
     views = EpistemicViewStore(tmp_path / "memory.sqlite3")
@@ -132,7 +132,11 @@ def test_one_failed_organ_degrades_but_does_not_abort_council(tmp_path: Path) ->
     assert result["degraded"] is True
     assert len(result["successful_organs"]) >= 2
     assert len(result["failures"]) == 1
-    assert result["adjudication"]["confidence"] == 0.6
+    assert result["required_quorum"] == registry.policy.deep_quorum
+    assert result["achieved_quorum"] == registry.policy.deep_quorum - 1
+    assert result["quorum_satisfied"] is False
+    assert result["adjudication"]["selected_packet_ids"] == []
+    assert result["adjudication"]["confidence"] == 0.0
 
 
 def test_below_minimum_quorum_fails_closed_without_crashing(tmp_path: Path) -> None:

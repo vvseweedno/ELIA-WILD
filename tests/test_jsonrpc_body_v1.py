@@ -7,6 +7,17 @@ from threading import Thread
 from elia.body.protocols import JSONRPCBody
 
 
+ADD_PARAMS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "a": {"type": "integer"},
+        "b": {"type": "integer"},
+    },
+    "required": ["a", "b"],
+    "additionalProperties": False,
+}
+
+
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib signature
         return
@@ -47,6 +58,7 @@ def test_jsonrpc_real_http_roundtrip_and_method_allowlist() -> None:
                         "url": f"http://{host}:{port}",
                         "allow_private": True,
                         "allowed_methods": ["add"],
+                        "method_param_schemas": {"add": ADD_PARAMS_SCHEMA},
                         "timeout_seconds": 2,
                     }
                 },
@@ -76,6 +88,7 @@ def test_jsonrpc_rejects_oversized_model_controlled_request_before_network() -> 
                     "url": "http://127.0.0.1:9",
                     "allow_private": True,
                     "allowed_methods": ["add"],
+                    "method_param_schemas": {"add": ADD_PARAMS_SCHEMA},
                     "max_request_bytes": 1024,
                 }
             },
@@ -83,4 +96,24 @@ def test_jsonrpc_rejects_oversized_model_controlled_request_before_network() -> 
     )
     result = body.call("bounded", "add", {"a": "x" * 5000, "b": 1})
     assert result.ok is False
-    assert "request body exceeds" in (result.error or "")
+    assert "does not match configured type" in (result.error or "")
+
+
+def test_jsonrpc_rejects_out_of_scope_params_before_network() -> None:
+    body = JSONRPCBody(
+        {
+            "enabled": True,
+            "endpoints": {
+                "bounded": {
+                    "enabled": True,
+                    "url": "http://127.0.0.1:9",
+                    "allow_private": True,
+                    "allowed_methods": ["add"],
+                    "method_param_schemas": {"add": ADD_PARAMS_SCHEMA},
+                }
+            },
+        }
+    )
+    result = body.call("bounded", "add", {"a": 1, "b": 2, "command": "extra"})
+    assert result.ok is False
+    assert "out-of-scope fields" in (result.error or "")

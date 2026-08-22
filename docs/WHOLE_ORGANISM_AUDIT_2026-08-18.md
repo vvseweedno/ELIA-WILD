@@ -1,5 +1,12 @@
 # ELIA WILD Whole-Organism Audit — 2026-08-18
 
+> **Historical snapshot.** This report describes the 1.6.0a1 tree at
+> `68d7d0a5357f1d5092fc24887fcc04cbce0fce87`. Its findings remain useful as
+> ancestry, but they are not the security or release verdict for Genesis 1.7.1.
+> See [`AUDIT_REMEDIATION_2026-08-22.md`](AUDIT_REMEDIATION_2026-08-22.md) for
+> the current remediation record, verification evidence and residual deployment
+> limits.
+
 **Audited repository:** `vvseweedno/ELIA-WILD`  
 **Audited main head:** `68d7d0a5357f1d5092fc24887fcc04cbce0fce87`  
 **Audited package version:** `1.6.0a1`  

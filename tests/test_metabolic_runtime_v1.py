@@ -160,7 +160,16 @@ def test_verified_four_day_runway_becomes_deterministic_need(tmp_path: Path) -> 
     assert metabolism["bottleneck"]["asset"] == "api"
     assert metabolism["bottleneck"]["runway_days"] == 4.0
     assert any(item["name"] == "resource_runway" for item in context["needs"])
-    assert context["homeostasis"]["mode"] == "strained"
+    # The balance covers the payments due on days 1..4, but the same verified
+    # essential recurrence is uncovered on day 5. The cumulative projection therefore
+    # raises an explicit near-term essential shortfall, not merely a 4-day runway hint.
+    uncovered = next(
+        item
+        for item in context["needs"]
+        if item["name"] == "uncovered_essential_obligation"
+    )
+    assert uncovered["severity"] == 0.92
+    assert context["homeostasis"]["mode"] == "critical"
 
 
 def test_unverified_obligation_does_not_create_resource_need(tmp_path: Path) -> None:

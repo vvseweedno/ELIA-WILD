@@ -82,8 +82,10 @@ class CanonicalRuntimePipeline:
             if index >= len(action_stages):
                 return terminal(action_name, action_args)
             stage = action_stages[index]
-            assert stage.execute_action is not None
-            return stage.execute_action(
+            executor = stage.execute_action
+            if executor is None:
+                raise RuntimeError("action pipeline contains a stage without an executor")
+            return executor(
                 action_name,
                 action_args,
                 lambda next_name, next_args: invoke(index + 1, next_name, next_args),

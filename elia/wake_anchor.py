@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
+from importlib import import_module
 import json
 import os
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, Iterator
 from uuid import uuid4
+
+from .canonical import canonical_json_bytes
+from .transition_kernel import fsync_directory
+
+fcntl: ModuleType | None = None
+try:  # Linux is the production target.
+    fcntl = import_module("fcntl")
+except ImportError:  # pragma: no cover
+    pass
 
 
 ANCHOR_VERSION = 1
@@ -42,22 +54,33 @@ def default_anchor_path() -> Path:
 
 
 def _canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _atomic_write(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     with temp.open("w", encoding="utf-8") as handle:
+        os.chmod(temp, 0o600)
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temp, path)
+    fsync_directory(path.parent)
+
+
+@contextmanager
+def _anchor_lock(path: Path) -> Iterator[None]:
+    if fcntl is None:  # pragma: no cover - Linux is the production contract.
+        raise WakeTrustAnchorError("wake trust-anchor locking requires fcntl")
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class WakeTrustAnchorStore:
@@ -95,7 +118,7 @@ class WakeTrustAnchorStore:
     def _signature(self, payload: dict[str, Any]) -> str:
         return hmac.new(self.key, _canonical_json(payload), sha256).hexdigest()
 
-    def read(self) -> WakeTrustAnchor | None:
+    def _read_unlocked(self) -> WakeTrustAnchor | None:
         if not self.path.exists():
             return None
         try:
@@ -132,12 +155,28 @@ class WakeTrustAnchorStore:
             raise WakeTrustAnchorError("wake trust anchor Dataset mismatch")
         if anchor.counter < 1 or len(anchor.digest) != 64:
             raise WakeTrustAnchorError("wake trust anchor counter/digest is invalid")
+        try:
+            int(anchor.digest, 16)
+        except ValueError as exc:
+            raise WakeTrustAnchorError(
+                "wake trust anchor digest is not hexadecimal"
+            ) from exc
         return anchor
+
+    def read(self) -> WakeTrustAnchor | None:
+        with _anchor_lock(self.path):
+            return self._read_unlocked()
 
     def _write(self, counter: int, digest: str) -> WakeTrustAnchor:
         digest = str(digest).strip().lower()
         if int(counter) < 1 or len(digest) != 64:
             raise WakeTrustAnchorError("refusing invalid trust-anchor counter/digest")
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise WakeTrustAnchorError(
+                "refusing non-hexadecimal trust-anchor digest"
+            ) from exc
         anchor = WakeTrustAnchor(
             version=ANCHOR_VERSION,
             identity_name=self.identity_name,
@@ -158,18 +197,14 @@ class WakeTrustAnchorStore:
         return anchor
 
     def initialize(self, *, counter: int, digest: str) -> WakeTrustAnchor:
-        if self.path.exists():
-            current = self.read()
-            if current is None:
-                raise WakeTrustAnchorError("wake trust anchor unexpectedly disappeared")
-            self.verify(counter=counter, digest=digest)
-            return current
-        return self._write(counter, digest)
+        with _anchor_lock(self.path):
+            current = self._read_unlocked()
+            if current is not None:
+                return self._verify_unlocked(counter=counter, digest=digest)
+            return self._write(counter, digest)
 
-    def verify(self, *, counter: int, digest: str) -> WakeTrustAnchor:
-        """Require the candidate to equal the independently persisted trusted state."""
-
-        current = self.read()
+    def _verify_unlocked(self, *, counter: int, digest: str) -> WakeTrustAnchor:
+        current = self._read_unlocked()
         if current is None:
             raise WakeTrustAnchorError(
                 "wake trust anchor is missing; initialize it during trusted state bootstrap"
@@ -191,23 +226,34 @@ class WakeTrustAnchorStore:
             )
         return current
 
-    def advance(self, *, counter: int, digest: str) -> WakeTrustAnchor:
-        """Advance after a newly validated checkpoint has become durable externally."""
+    def verify(self, *, counter: int, digest: str) -> WakeTrustAnchor:
+        """Require the candidate to equal the independently persisted trusted state."""
 
-        current = self.read()
-        if current is None:
-            raise WakeTrustAnchorError(
-                "wake trust anchor is missing; initialize it during trusted state bootstrap"
-            )
-        counter = int(counter)
-        digest = str(digest).strip().lower()
-        if counter < current.counter:
-            raise WakeTrustAnchorRollbackError(
-                f"state rollback detected: counter {counter} < trusted {current.counter}"
-            )
-        if counter == current.counter:
-            return self.verify(counter=counter, digest=digest)
-        return self._write(counter, digest)
+        with _anchor_lock(self.path):
+            return self._verify_unlocked(counter=counter, digest=digest)
+
+    def advance(self, *, counter: int, digest: str) -> WakeTrustAnchor:
+        """CAS-advance exactly one generation after durable external publication."""
+
+        with _anchor_lock(self.path):
+            current = self._read_unlocked()
+            if current is None:
+                raise WakeTrustAnchorError(
+                    "wake trust anchor is missing; initialize it during trusted state bootstrap"
+                )
+            counter = int(counter)
+            digest = str(digest).strip().lower()
+            if counter < current.counter:
+                raise WakeTrustAnchorRollbackError(
+                    f"state rollback detected: counter {counter} < trusted {current.counter}"
+                )
+            if counter == current.counter:
+                return self._verify_unlocked(counter=counter, digest=digest)
+            if counter != current.counter + 1:
+                raise WakeTrustAnchorError(
+                    "wake trust anchor can advance only one authenticated generation at a time"
+                )
+            return self._write(counter, digest)
 
     def accept(self, *, counter: int, digest: str) -> WakeTrustAnchor:
         """Compatibility alias for trusted forward acceptance; prefer verify/advance."""

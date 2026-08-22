@@ -5,12 +5,12 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import importlib
 import inspect
-import json
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .canonical import canonical_json_bytes
 from .paths import default_manifest_path
 from .research.registry import RESEARCH_REGISTRY, maturity_summary
 
@@ -19,13 +19,7 @@ MATURITY = {"core", "proven", "prototype", "archived", "hypothesis"}
 
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _fingerprint(value: Any) -> str:
@@ -257,7 +251,14 @@ class OrganismManifest:
         return _fingerprint(self.raw)
 
     def _audit_artifact(self, organ: OrganSpec) -> OrganStatus:
-        assert organ.path is not None
+        if organ.path is None:
+            return OrganStatus(
+                organ,
+                False,
+                None,
+                None,
+                "artifact organ has no configured path",
+            )
         resolved = (self.project_root / organ.path).resolve()
         if not resolved.is_file():
             return OrganStatus(
@@ -271,7 +272,14 @@ class OrganismManifest:
         return OrganStatus(organ, True, digest, str(resolved), None)
 
     def _audit_python(self, organ: OrganSpec) -> OrganStatus:
-        assert organ.module is not None
+        if organ.module is None:
+            return OrganStatus(
+                organ,
+                False,
+                None,
+                None,
+                "python organ has no configured module",
+            )
         try:
             module = importlib.import_module(organ.module)
             target: Any = module

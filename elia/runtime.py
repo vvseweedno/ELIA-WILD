@@ -335,6 +335,7 @@ class EliaRuntime:
 
     def _context(self) -> dict[str, Any]:
         components = self._state_components()
+        lineage_head = self.identity_store.last_lineage()
         recalled = self.recall.recall(
             queries=self._memory_queries(components),
             limit=self.config.runtime.memory_recall_limit,
@@ -368,9 +369,7 @@ class EliaRuntime:
             "capabilities": components["capabilities"],
             "skills": components["skills"],
             "lineage_head": (
-                asdict(self.identity_store.last_lineage())
-                if self.identity_store.last_lineage() is not None
-                else None
+                asdict(lineage_head) if lineage_head is not None else None
             ),
         }
         context["_system_prompt"] = self.prompt_template.render(context)
@@ -448,7 +447,10 @@ class EliaRuntime:
                     )
                     continue
                 if op == "update":
-                    hypothesis_id = int(item.get("id"))
+                    hypothesis_id_raw = item.get("id")
+                    if hypothesis_id_raw is None:
+                        raise ValueError("self update id is required")
+                    hypothesis_id = int(hypothesis_id_raw)
                     status = str(item.get("status", "active")).strip().lower()
                     # Only a trusted runtime/adapter should eventually elevate a
                     # model-originated claim to externally verified truth. The self
@@ -456,14 +458,14 @@ class EliaRuntime:
                     # not as an immutable fact.
                     if status == "supported":
                         status = "active"
-                    confidence = (
+                    updated_confidence = (
                         min(0.90, max(0.0, float(item["confidence"])))
                         if item.get("confidence") is not None
                         else None
                     )
                     updated = self.self_hypotheses.update(
                         hypothesis_id,
-                        confidence=confidence,
+                        confidence=updated_confidence,
                         status=status,
                         evidence=str(item.get("evidence", "")),
                         event="brain_update",
@@ -526,7 +528,10 @@ class EliaRuntime:
                     continue
 
                 if op in {"update", "complete", "abandon", "block", "activate"}:
-                    goal_id = int(item.get("id"))
+                    goal_id_raw = item.get("id")
+                    if goal_id_raw is None:
+                        raise ValueError("goal update id is required")
+                    goal_id = int(goal_id_raw)
                     status = item.get("status")
                     if op == "complete":
                         status = "completed"
@@ -625,7 +630,10 @@ class EliaRuntime:
                     continue
 
                 if op == "update":
-                    opportunity_id = int(item.get("id"))
+                    opportunity_id_raw = item.get("id")
+                    if opportunity_id_raw is None:
+                        raise ValueError("opportunity update id is required")
+                    opportunity_id = int(opportunity_id_raw)
                     updated = self.economy.update_opportunity(
                         opportunity_id,
                         status=(str(item["status"]) if item.get("status") is not None else None),
@@ -713,8 +721,9 @@ class EliaRuntime:
         )
         return result
 
-    @staticmethod
-    def _safe_decision_after_rejection(original: Decision, assurance: dict[str, Any]) -> Decision:
+    def _safe_decision_after_rejection(
+        self, original: Decision, assurance: dict[str, Any]
+    ) -> Decision:
         rules = [
             str(item.get("rule"))
             for item in assurance.get("findings", [])
@@ -900,7 +909,7 @@ class EliaRuntime:
                 report = self.cycle()
                 last_report = report
             except BudgetExhausted:
-                synthetic = {
+                synthetic: dict[str, Any] = {
                     "next_wake_at": self.memory.get_meta("next_wake_at"),
                     "sleep_seconds": None,
                 }

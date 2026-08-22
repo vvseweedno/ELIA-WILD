@@ -70,6 +70,7 @@ def test_attractor_prefers_advancing_persisted_planned_work_over_novel_read(tmp_
         agency=agency,
         capability_catalog=catalog(),
         assurance_accepted=True,
+        authority_accepted=True,
     )
     novelty = attractor.evaluate(
         action_name="http_get",
@@ -77,6 +78,7 @@ def test_attractor_prefers_advancing_persisted_planned_work_over_novel_read(tmp_
         agency=agency,
         capability_catalog=catalog(),
         assurance_accepted=True,
+        authority_accepted=True,
     )
 
     assert continuation.score is not None
@@ -115,6 +117,7 @@ def test_critical_continuity_pressure_beats_external_submission(tmp_path: Path) 
         agency=agency,
         capability_catalog=catalog(),
         assurance_accepted=True,
+        authority_accepted=True,
     )
     external = attractor.evaluate(
         action_name="submit_work",
@@ -122,6 +125,7 @@ def test_critical_continuity_pressure_beats_external_submission(tmp_path: Path) 
         agency=agency,
         capability_catalog=catalog(),
         assurance_accepted=True,
+        authority_accepted=True,
     )
 
     assert diagnostic.score is not None and external.score is not None
@@ -144,6 +148,7 @@ def test_body_readiness_rewards_diagnostics_not_unrelated_external_action(tmp_pa
         agency=agency,
         capability_catalog=catalog(),
         assurance_accepted=True,
+        authority_accepted=True,
     )
     unrelated = attractor.evaluate(
         action_name="submit_work",
@@ -151,6 +156,7 @@ def test_body_readiness_rewards_diagnostics_not_unrelated_external_action(tmp_pa
         agency=agency,
         capability_catalog=catalog(),
         assurance_accepted=True,
+        authority_accepted=True,
     )
 
     assert diagnostic.score is not None and unrelated.score is not None
@@ -163,3 +169,30 @@ def test_attractor_fingerprint_changes_with_contract_text(tmp_path: Path) -> Non
     first = make_attractor(tmp_path, "first attractor")
     second = make_attractor(tmp_path, "second attractor")
     assert first.fingerprint != second.fingerprint
+
+
+def test_pre_action_contract_ranks_only_explicitly_authorized_candidates(tmp_path: Path) -> None:
+    attractor = make_attractor(tmp_path)
+    ranked = attractor.evaluate_pre_action_candidates(
+        [
+            {
+                "action_name": "http_get",
+                "prediction": prediction(0.9),
+                "assurance_accepted": True,
+                # Missing authority must not default to acceptance.
+            },
+            {
+                "action_name": "stage_deliverable",
+                "prediction": prediction(0.2),
+                "assurance_accepted": True,
+                "authority_accepted": True,
+            },
+        ],
+        agency={"continuation_work_item": {"id": 1, "status": "planned"}},
+        capability_catalog=catalog(),
+    )
+
+    assert ranked[0].action_name == "stage_deliverable"
+    assert ranked[0].pre_action_contract_satisfied is True
+    assert ranked[1].score is None
+    assert ranked[1].pre_action_contract_satisfied is False

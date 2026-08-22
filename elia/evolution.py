@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .sqlite_utils import inserted_row_id
+
 from .verification import (
     VerificationReceipt,
     VerificationRegistry,
@@ -233,7 +235,7 @@ class BodyRevisionStore:
                     str(source)[:64],
                 ),
             )
-            revision_id = int(cur.lastrowid)
+            revision_id = inserted_row_id(cur, operation="body revision insert")
             conn.execute(
                 """
                 INSERT INTO body_revision_events(revision_id, timestamp, kind, payload_json)

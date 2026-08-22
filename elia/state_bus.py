@@ -9,13 +9,16 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from .canonical import canonical_json
+from .sqlite_utils import inserted_row_id
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return canonical_json(value)
 
 
 def _event_hash(
@@ -165,7 +168,7 @@ class OrganismStateBus:
             ),
         )
         return BusEvent(
-            int(cur.lastrowid),
+            inserted_row_id(cur, operation="organism event insert"),
             transaction_id,
             seq,
             timestamp,

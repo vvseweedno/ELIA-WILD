@@ -5,8 +5,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .checkpoint import recover_interrupted_restore
 from .chronicle import Chronicle
 from .memory import MemoryStore
+from .owner_control import owner_kill_active
+from .transition_kernel import AcceptedTransitionGuard, StateWriterLock
 
 
 LifecycleMode = Literal["wake", "hibernate", "halt"]
@@ -44,7 +47,53 @@ def evaluate_preflight(
     expected_identity_fingerprint: str | None = None,
     expected_branch_id: str | None = None,
 ) -> LifecycleDecision:
-    """Decide whether expensive cognition should start, without loading a model.
+    """Recover durable state, then decide under the global mutation lease.
+
+    Recovery deliberately precedes construction of ``MemoryStore``: its constructor
+    initializes schema, and doing that against a half-swapped/dirty state would turn an
+    interrupted transition into a new, misleading baseline.
+    """
+
+    state = Path(state_dir).resolve()
+    checked = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    with StateWriterLock(state):
+        recover_interrupted_restore(state, lock_held=True)
+        chronicle = Chronicle(state / "chronicle.jsonl")
+        AcceptedTransitionGuard.recover_incomplete(
+            state, chronicle, lock_held=True
+        )
+        if owner_kill_active(state / "memory.sqlite3"):
+            return LifecycleDecision(
+                mode="halt",
+                reason="Owner kill switch is active; cognition must not start.",
+                checked_at=checked.isoformat(),
+                next_wake_at=None,
+                seconds_until_wake=None,
+                runtime_hours_remaining=max(
+                    0.0, float(weekly_gpu_budget_hours)
+                ),
+                force_wake_requested=force_wake,
+            )
+        return _evaluate_preflight_locked(
+            state,
+            weekly_gpu_budget_hours,
+            force_wake=force_wake,
+            now=checked,
+            expected_identity_fingerprint=expected_identity_fingerprint,
+            expected_branch_id=expected_branch_id,
+        )
+
+
+def _evaluate_preflight_locked(
+    state_dir: Path,
+    weekly_gpu_budget_hours: float,
+    *,
+    force_wake: bool = False,
+    now: datetime | None = None,
+    expected_identity_fingerprint: str | None = None,
+    expected_branch_id: str | None = None,
+) -> LifecycleDecision:
+    """Decide whether expensive cognition should start after recovery/locking.
 
     This layer uses only persisted state, Chronicle verification and deterministic
     arithmetic. `force_wake` bypasses schedule timing only; it never bypasses

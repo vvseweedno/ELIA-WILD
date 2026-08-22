@@ -1,10 +1,32 @@
 from __future__ import annotations
 
+import multiprocessing
 from pathlib import Path
 
+import pytest
+
 from elia.brain import MockBrain
+from elia.checkpoint import recover_interrupted_restore
 from elia.config import BrainConfig, Config, RuntimeConfig
 from elia.continuity_runtime import ELIARuntime
+from elia.epistemic_runtime import EpistemicOrganismRuntime
+from elia.pipeline import CanonicalRuntimePipeline
+from elia.transition_kernel import StateWriterLock, StateWriterLockTimeout
+
+
+def _attempt_restore_with_bounded_writer_lock(
+    state_dir: Path,
+    output: multiprocessing.Queue,
+) -> None:
+    try:
+        with StateWriterLock(state_dir, timeout_seconds=0.25):
+            recover_interrupted_restore(state_dir, lock_held=True)
+    except StateWriterLockTimeout:
+        output.put("blocked")
+    except BaseException as exc:
+        output.put(f"error:{type(exc).__name__}:{exc}")
+    else:
+        output.put("completed")
 
 
 class CaptureBrain(MockBrain):
@@ -100,3 +122,77 @@ def test_cognitive_policy_fingerprint_is_stable_across_process_restart(tmp_path:
     assert second.memory.get_meta("cognitive_policy_fingerprint") == policy_fingerprint
     assert second.memory.get_meta("autonomy_attractor_fingerprint") == attractor_fingerprint
     assert policy_fingerprint == second._cognitive_policy_fingerprint()
+
+
+def test_constructor_holds_writer_across_all_base_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    context = multiprocessing.get_context("fork")
+    outcomes: list[str] = []
+
+    def pause_inside_base_initialization(self, *args, **kwargs) -> None:
+        output = context.Queue()
+        process = context.Process(
+            target=_attempt_restore_with_bounded_writer_lock,
+            args=(config.runtime.state_dir, output),
+        )
+        process.start()
+        process.join(timeout=3)
+        assert process.exitcode == 0
+        outcomes.append(output.get(timeout=1))
+        raise RuntimeError("intentional constructor barrier")
+
+    monkeypatch.setattr(EpistemicOrganismRuntime, "__init__", pause_inside_base_initialization)
+    with pytest.raises(RuntimeError, match="intentional constructor barrier"):
+        ELIARuntime(config, brain=CaptureBrain())
+    assert outcomes == ["blocked"]
+
+    # The constructor's finally path must release the lease even after a failed boot.
+    output = context.Queue()
+    process = context.Process(
+        target=_attempt_restore_with_bounded_writer_lock,
+        args=(config.runtime.state_dir, output),
+    )
+    process.start()
+    process.join(timeout=3)
+    assert process.exitcode == 0
+    assert output.get(timeout=1) == "completed"
+
+
+def test_constructor_keeps_writer_through_final_pipeline_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    context = multiprocessing.get_context("fork")
+    original_init = CanonicalRuntimePipeline.__init__
+    outcomes: list[str] = []
+
+    def probe_at_pipeline_tail(self, stages) -> None:
+        output = context.Queue()
+        process = context.Process(
+            target=_attempt_restore_with_bounded_writer_lock,
+            args=(config.runtime.state_dir, output),
+        )
+        process.start()
+        process.join(timeout=3)
+        assert process.exitcode == 0
+        outcomes.append(output.get(timeout=1))
+        original_init(self, stages)
+
+    monkeypatch.setattr(CanonicalRuntimePipeline, "__init__", probe_at_pipeline_tail)
+    runtime = ELIARuntime(config, brain=CaptureBrain())
+    assert runtime.pipeline.describe()
+    assert outcomes == ["blocked"]
+
+    output = context.Queue()
+    process = context.Process(
+        target=_attempt_restore_with_bounded_writer_lock,
+        args=(config.runtime.state_dir, output),
+    )
+    process.start()
+    process.join(timeout=3)
+    assert process.exitcode == 0
+    assert output.get(timeout=1) == "completed"

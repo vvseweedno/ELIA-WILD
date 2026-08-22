@@ -12,7 +12,12 @@ from elia.body.browser import BrowserBody
 def test_browser_requires_network_isolation_attestation(tmp_path: Path) -> None:
     body = BrowserBody(
         tmp_path,
-        {"enabled": True, "browser": "chromium", "headless": True},
+        {
+            "enabled": True,
+            "network_isolation_confirmed": True,
+            "browser": "chromium",
+            "headless": True,
+        },
     )
     assert body.enabled is False
     capability = {item.name: item for item in body.capabilities()}["browser_navigate"]
@@ -32,6 +37,7 @@ def test_real_playwright_context_snapshot_fill_click_and_screenshot(tmp_path: Pa
             "timeout_ms": 10_000,
             "max_text_chars": 20_000,
         },
+        network_isolation_verifier=lambda policy: True,
     )
     try:
         body._set_content_for_test(
@@ -86,6 +92,7 @@ def test_browser_interaction_is_separately_gated(tmp_path: Path) -> None:
             "browser": "chromium",
             "headless": True,
         },
+        network_isolation_verifier=lambda policy: True,
     )
     try:
         body._set_content_for_test("<button>Do thing</button>")
@@ -107,6 +114,7 @@ def test_browser_interaction_rejects_untrusted_origin(tmp_path: Path) -> None:
             "browser": "chromium",
             "headless": True,
         },
+        network_isolation_verifier=lambda policy: True,
     )
     try:
         body._set_content_for_test("<button>Do thing</button>")
@@ -129,6 +137,7 @@ def test_browser_trusted_page_cannot_click_navigate_to_untrusted_origin(tmp_path
             "headless": True,
             "timeout_ms": 5_000,
         },
+        network_isolation_verifier=lambda policy: True,
     )
     try:
         body._set_content_for_test(
@@ -136,6 +145,39 @@ def test_browser_trusted_page_cannot_click_navigate_to_untrusted_origin(tmp_path
         )
         denied = body.click({"kind": "css", "selector": "#escape"})
         assert denied.ok is False
+        assert body.snapshot().data["url"] == "about:blank"
+    finally:
+        body.close()
+
+
+def test_browser_keeps_origin_gate_active_for_delayed_interaction_traffic(
+    tmp_path: Path,
+) -> None:
+    body = BrowserBody(
+        tmp_path,
+        {
+            "enabled": True,
+            "interaction_enabled": True,
+            "trusted_interaction_origins": ["about:blank"],
+            "browser": "chromium",
+            "headless": True,
+            "timeout_ms": 5_000,
+        },
+        network_isolation_verifier=lambda policy: True,
+    )
+    try:
+        body._set_content_for_test(
+            """
+            <button id="delayed" onclick="setTimeout(() => fetch(
+              'https://untrusted.invalid/delayed-effect', {method: 'POST', body: 'x'}
+            ).catch(() => {}), 50)">Schedule</button>
+            """
+        )
+        clicked = body.click({"kind": "css", "selector": "#delayed"})
+        assert clicked.ok is True
+        body._page.wait_for_timeout(250)
+        assert body._interaction_active is True
+        assert body._interaction_denied_url == "https://untrusted.invalid/delayed-effect"
         assert body.snapshot().data["url"] == "about:blank"
     finally:
         body.close()

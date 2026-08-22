@@ -4,12 +4,19 @@ from contextlib import asynccontextmanager
 import fnmatch
 import importlib.util
 import json
+import math
 import os
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from .asyncio_bridge import run_sync
-from .net import assert_http_url
-from .types import BodyCapability, BodyResult
+from .net import assert_http_url, network_isolation_attested
+from .types import (
+    BodyCapability,
+    BodyInputError,
+    BodyResult,
+    bounded_json_value,
+    validate_json_schema,
+)
 
 
 class MCPBody:
@@ -23,15 +30,20 @@ class MCPBody:
     """
 
     MAX_PAGES = 32
+    MAX_DISCOVERY_ITEMS = 512
+    MAX_CONTENT_BLOCKS = 64
+    MAX_PROJECTED_BYTES = 512_000
 
     def __init__(
         self,
         config: dict[str, Any] | None = None,
         *,
         target_overrides: dict[str, Any] | None = None,
+        network_isolation_verifier: Callable[[dict[str, Any]], bool] | None = None,
     ):
         self.config = dict(config or {})
         self.target_overrides = dict(target_overrides or {})
+        self._network_isolation_verifier = network_isolation_verifier
 
     @property
     def installed(self) -> bool:
@@ -54,7 +66,10 @@ class MCPBody:
             return "ready_inprocess"
         if not str(server.get("url", "")).strip():
             return "url_required"
-        if not bool(server.get("network_isolation_confirmed", False)):
+        if not network_isolation_attested(
+            server,
+            verifier=self._network_isolation_verifier,
+        ):
             return "network_isolation_required"
         return "ready"
 
@@ -109,7 +124,9 @@ class MCPBody:
                 "network_or_local_process",
                 base_enabled
                 and any(
-                    name in ready_names and bool(item.get("allow_tool_calls", False))
+                    name in ready_names
+                    and bool(item.get("allow_tool_calls", False))
+                    and bool(item.get("tool_argument_schemas"))
                     for name, item in configured.items()
                 ),
                 readiness,
@@ -141,6 +158,21 @@ class MCPBody:
     def _allowed(value: str, patterns: list[Any]) -> bool:
         return any(fnmatch.fnmatch(value, str(pattern)) for pattern in patterns)
 
+    @staticmethod
+    def _tool_arguments(server: dict[str, Any], tool: str, arguments: Any) -> dict[str, Any]:
+        schemas = server.get("tool_argument_schemas") or {}
+        if not isinstance(schemas, dict):
+            raise PermissionError("MCP tool_argument_schemas must be an object")
+        schema = schemas.get(tool)
+        validated = validate_json_schema(
+            arguments,
+            schema,
+            field=f"MCP arguments for {tool}",
+        )
+        if not isinstance(validated, dict):
+            raise BodyInputError("MCP tool arguments must validate as an object")
+        return validated
+
     def _headers(self, server: dict[str, Any]) -> dict[str, str]:
         mapping = server.get("headers_from_env") or {}
         if not isinstance(mapping, dict):
@@ -165,7 +197,7 @@ class MCPBody:
         from mcp import Client
 
         server = self._server(name)
-        timeout = max(1.0, min(float(server.get("timeout_seconds", 30.0)), 300.0))
+        timeout = self._operation_timeout(name)
         override = self.target_overrides.get(name)
         if override is not None:
             async with Client(
@@ -197,57 +229,96 @@ class MCPBody:
             async with Client(transport, read_timeout_seconds=timeout) as client:
                 yield client
 
+    def _operation_timeout(self, name: str) -> float:
+        server = self._server(name)
+        raw = server.get("operation_timeout_seconds", server.get("timeout_seconds", 30.0))
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError("MCP operation timeout must be a finite positive number")
+        timeout = float(raw)
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > 300.0:
+            raise ValueError("MCP operation timeout must be finite, positive and at most 300 seconds")
+        return timeout
+
     async def _discover_async(self, name: str) -> dict[str, Any]:
         tools: list[dict[str, Any]] = []
         resources: list[dict[str, Any]] = []
         templates: list[dict[str, Any]] = []
         async with self._client(name) as client:
             cursor = None
+            seen_cursors: set[str] = set()
             for _ in range(self.MAX_PAGES):
                 result = await client.list_tools(cursor=cursor)
-                tools.extend(
-                    {
+                page = list(result.tools or [])
+                if len(page) > self.MAX_DISCOVERY_ITEMS:
+                    raise ValueError("MCP tool discovery page exceeds item limit")
+                for tool in page[: max(0, self.MAX_DISCOVERY_ITEMS - len(tools))]:
+                    tools.append({
                         "name": tool.name,
-                        "title": getattr(tool, "title", None),
-                        "description": getattr(tool, "description", None),
-                        "input_schema": getattr(tool, "input_schema", None),
-                    }
-                    for tool in result.tools
-                )
+                        "title": str(getattr(tool, "title", "") or "")[:1000],
+                        "description": str(getattr(tool, "description", "") or "")[:4000],
+                        "input_schema": bounded_json_value(
+                            getattr(tool, "input_schema", None),
+                            field="MCP discovered input schema",
+                            max_bytes=64_000,
+                            max_items=256,
+                        ),
+                    })
                 cursor = result.next_cursor
                 if cursor is None:
                     break
+                cursor_key = str(cursor)
+                if cursor_key in seen_cursors:
+                    raise ValueError("MCP tool discovery repeated a cursor")
+                seen_cursors.add(cursor_key)
+                if len(tools) >= self.MAX_DISCOVERY_ITEMS:
+                    break
             cursor = None
+            seen_cursors = set()
             for _ in range(self.MAX_PAGES):
                 result = await client.list_resources(cursor=cursor)
-                resources.extend(
-                    {
+                page = list(result.resources or [])
+                if len(page) > self.MAX_DISCOVERY_ITEMS:
+                    raise ValueError("MCP resource discovery page exceeds item limit")
+                for resource in page[: max(0, self.MAX_DISCOVERY_ITEMS - len(resources))]:
+                    resources.append({
                         "uri": str(resource.uri),
-                        "name": getattr(resource, "name", None),
-                        "description": getattr(resource, "description", None),
-                        "mime_type": getattr(resource, "mime_type", None),
-                    }
-                    for resource in result.resources
-                )
+                        "name": str(getattr(resource, "name", "") or "")[:1000],
+                        "description": str(getattr(resource, "description", "") or "")[:4000],
+                        "mime_type": str(getattr(resource, "mime_type", "") or "")[:256],
+                    })
                 cursor = result.next_cursor
                 if cursor is None:
+                    break
+                cursor_key = str(cursor)
+                if cursor_key in seen_cursors:
+                    raise ValueError("MCP resource discovery repeated a cursor")
+                seen_cursors.add(cursor_key)
+                if len(resources) >= self.MAX_DISCOVERY_ITEMS:
                     break
             cursor = None
+            seen_cursors = set()
             for _ in range(self.MAX_PAGES):
                 result = await client.list_resource_templates(cursor=cursor)
-                templates.extend(
-                    {
+                page = list(result.resource_templates or [])
+                if len(page) > self.MAX_DISCOVERY_ITEMS:
+                    raise ValueError("MCP template discovery page exceeds item limit")
+                for template in page[: max(0, self.MAX_DISCOVERY_ITEMS - len(templates))]:
+                    templates.append({
                         "uri_template": str(template.uri_template),
-                        "name": getattr(template, "name", None),
-                        "description": getattr(template, "description", None),
-                    }
-                    for template in result.resource_templates
-                )
+                        "name": str(getattr(template, "name", "") or "")[:1000],
+                        "description": str(getattr(template, "description", "") or "")[:4000],
+                    })
                 cursor = result.next_cursor
                 if cursor is None:
                     break
+                cursor_key = str(cursor)
+                if cursor_key in seen_cursors:
+                    raise ValueError("MCP template discovery repeated a cursor")
+                seen_cursors.add(cursor_key)
+                if len(templates) >= self.MAX_DISCOVERY_ITEMS:
+                    break
             info = client.server_info
-            return {
+            return bounded_json_value({
                 "server": name,
                 "protocol_version": client.protocol_version,
                 "server_info": (
@@ -258,43 +329,70 @@ class MCPBody:
                     if info is not None
                     else None
                 ),
-                "tools": tools[:512],
-                "resources": resources[:512],
-                "resource_templates": templates[:512],
-            }
+                "tools": tools,
+                "resources": resources,
+                "resource_templates": templates,
+            }, field="MCP discovery result", max_bytes=self.MAX_PROJECTED_BYTES)
 
     def discover(self, name: str) -> BodyResult:
         try:
-            return BodyResult(True, "mcp_discover", run_sync(self._discover_async(name)))
+            timeout = self._operation_timeout(name)
+            return BodyResult(
+                True,
+                "mcp_discover",
+                run_sync(
+                    self._discover_async(name),
+                    timeout_seconds=timeout,
+                ),
+            )
         except Exception as exc:
             return BodyResult(False, "mcp_discover", error=f"{type(exc).__name__}: {exc}")
 
-    @staticmethod
-    def _content_blocks(result: Any) -> list[dict[str, Any]]:
+    @classmethod
+    def _content_blocks(cls, result: Any) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
-        for block in getattr(result, "content", []) or []:
+        raw_blocks = list(getattr(result, "content", []) or [])
+        if len(raw_blocks) > cls.MAX_CONTENT_BLOCKS:
+            raise ValueError("MCP response contains too many content blocks")
+        remaining_chars = cls.MAX_PROJECTED_BYTES
+        for block in raw_blocks:
             item: dict[str, Any] = {"type": type(block).__name__}
             for attr in ("text", "mime_type", "uri", "name"):
                 if hasattr(block, attr):
-                    item[attr] = str(getattr(block, attr))[:100_000]
+                    text = str(getattr(block, attr))
+                    if len(text.encode("utf-8")) > remaining_chars:
+                        raise ValueError("MCP response text exceeds aggregate limit")
+                    item[attr] = text[:100_000]
+                    remaining_chars -= len(item[attr].encode("utf-8"))
             if hasattr(block, "data"):
                 data = getattr(block, "data")
                 item["data_size"] = len(data) if hasattr(data, "__len__") else None
             blocks.append(item)
-        return blocks
+        return bounded_json_value(
+            blocks,
+            field="MCP content blocks",
+            max_bytes=cls.MAX_PROJECTED_BYTES,
+        )
 
-    @staticmethod
-    def _machine_object(result: Any) -> dict[str, Any] | None:
+    @classmethod
+    def _machine_object(cls, result: Any) -> dict[str, Any] | None:
         structured = getattr(result, "structured_content", None)
         if isinstance(structured, dict):
             if set(structured) == {"result"} and isinstance(structured.get("result"), dict):
-                return dict(structured["result"])
-            return dict(structured)
+                structured = structured["result"]
+            bounded = bounded_json_value(
+                structured,
+                field="MCP structured_content",
+                max_bytes=cls.MAX_PROJECTED_BYTES,
+            )
+            return dict(bounded)
         for block in getattr(result, "content", []) or []:
             text = getattr(block, "text", None)
             if not isinstance(text, str):
                 continue
             candidate = text.strip()
+            if len(candidate.encode("utf-8")) > cls.MAX_PROJECTED_BYTES:
+                raise ValueError("MCP JSON text block exceeds aggregate limit")
             if not candidate or not candidate.startswith("{"):
                 continue
             try:
@@ -304,8 +402,13 @@ class MCPBody:
             if not isinstance(parsed, dict):
                 continue
             if set(parsed) == {"result"} and isinstance(parsed.get("result"), dict):
-                return dict(parsed["result"])
-            return dict(parsed)
+                parsed = parsed["result"]
+            bounded = bounded_json_value(
+                parsed,
+                field="MCP parsed structured content",
+                max_bytes=cls.MAX_PROJECTED_BYTES,
+            )
+            return dict(bounded)
         return None
 
     async def _call_async(
@@ -320,6 +423,7 @@ class MCPBody:
         patterns = list(server.get("allowed_tools") or [])
         if not patterns or not self._allowed(tool, patterns):
             raise PermissionError(f"MCP tool is not allow-listed: {tool}")
+        arguments = self._tool_arguments(server, tool, arguments)
         async with self._client(server_name) as client:
             result = await client.call_tool(tool, arguments)
             return {
@@ -337,7 +441,11 @@ class MCPBody:
         arguments: dict[str, Any] | None = None,
     ) -> BodyResult:
         try:
-            data = run_sync(self._call_async(server, str(tool), dict(arguments or {})))
+            timeout = self._operation_timeout(server)
+            data = run_sync(
+                self._call_async(server, str(tool), dict(arguments or {})),
+                timeout_seconds=timeout,
+            )
             return BodyResult(
                 not data["is_error"],
                 "mcp_call",
@@ -355,23 +463,39 @@ class MCPBody:
         async with self._client(server_name) as client:
             result = await client.read_resource(uri)
             contents: list[dict[str, Any]] = []
-            for block in result.contents:
+            raw_contents = list(result.contents or [])
+            if len(raw_contents) > self.MAX_CONTENT_BLOCKS:
+                raise ValueError("MCP resource contains too many blocks")
+            remaining_chars = self.MAX_PROJECTED_BYTES
+            for block in raw_contents:
                 item: dict[str, Any] = {"type": type(block).__name__}
                 for attr in ("uri", "mime_type", "text"):
                     if hasattr(block, attr):
-                        item[attr] = str(getattr(block, attr))[:200_000]
+                        text = str(getattr(block, attr))
+                        if len(text.encode("utf-8")) > remaining_chars:
+                            raise ValueError("MCP resource text exceeds aggregate limit")
+                        item[attr] = text[:200_000]
+                        remaining_chars -= len(item[attr].encode("utf-8"))
                 if hasattr(block, "blob"):
                     blob = getattr(block, "blob")
                     item["blob_size"] = len(blob) if hasattr(blob, "__len__") else None
                 contents.append(item)
-            return {"server": server_name, "uri": uri, "contents": contents}
+            return bounded_json_value(
+                {"server": server_name, "uri": uri, "contents": contents},
+                field="MCP resource result",
+                max_bytes=self.MAX_PROJECTED_BYTES,
+            )
 
     def read_resource(self, server: str, uri: str) -> BodyResult:
         try:
+            timeout = self._operation_timeout(server)
             return BodyResult(
                 True,
                 "mcp_read_resource",
-                run_sync(self._read_resource_async(server, str(uri))),
+                run_sync(
+                    self._read_resource_async(server, str(uri)),
+                    timeout_seconds=timeout,
+                ),
             )
         except Exception as exc:
             return BodyResult(

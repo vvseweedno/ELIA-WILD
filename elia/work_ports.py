@@ -10,9 +10,11 @@ import time
 from typing import Any
 
 from .body.mcp import MCPBody
+from .body.types import bounded_json_value
 from .causal import CausalMemoryStore
 from .observations import ObservationStore
 from .resource_ecology import ResourceEcologyStore, WorkItem
+from .sqlite_utils import inserted_row_id
 from .state_bus import OrganismStateBus
 from .tools import Capability, ToolResult
 
@@ -22,12 +24,19 @@ def _now() -> str:
 
 
 def _fingerprint(value: Any) -> str:
-    payload = json.dumps(
+    bounded = bounded_json_value(
         value,
+        field="work-port fingerprint value",
+        max_bytes=512_000,
+        max_depth=12,
+        max_items=4096,
+    )
+    payload = json.dumps(
+        bounded,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-        default=str,
+        allow_nan=False,
     )
     return sha256(payload.encode("utf-8")).hexdigest()
 
@@ -214,8 +223,9 @@ class WorkPortStore:
                     timestamp,
                 ),
             )
+            intent_id = inserted_row_id(cur, operation="work-port intent insert")
             row = conn.execute(
-                "SELECT * FROM work_port_intents WHERE id=?", (int(cur.lastrowid),)
+                "SELECT * FROM work_port_intents WHERE id=?", (intent_id,)
             ).fetchone()
         if row is None:
             raise RuntimeError("work-port intent disappeared after prepare")
@@ -333,6 +343,7 @@ class WorkPortStore:
                     _fingerprint(response),
                 ),
             )
+            submission_id = inserted_row_id(cur, operation="work-port submission insert")
             conn.execute(
                 """
                 UPDATE work_port_intents
@@ -342,7 +353,7 @@ class WorkPortStore:
                 (timestamp, submission_ref, int(work_item_id)),
             )
             row = conn.execute(
-                "SELECT * FROM work_port_submissions WHERE id=?", (int(cur.lastrowid),)
+                "SELECT * FROM work_port_submissions WHERE id=?", (submission_id,)
             ).fetchone()
         if row is None:
             raise RuntimeError("work-port submission disappeared after insert")
@@ -1108,10 +1119,27 @@ class WorkPortRegistry:
             return result
 
     def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
+        work_item_id_raw = args.get("work_item_id")
+        if name in {
+            "submit_work",
+            "check_work_outcome",
+            "reconcile_work_submission",
+        } and work_item_id_raw is None:
+            return ToolResult(False, name, error="work_item_id is required")
+        try:
+            work_item_id = int(work_item_id_raw) if work_item_id_raw is not None else 0
+        except (TypeError, ValueError):
+            return ToolResult(False, name, error="work_item_id must be an integer")
+        if name in {
+            "submit_work",
+            "check_work_outcome",
+            "reconcile_work_submission",
+        } and work_item_id < 1:
+            return ToolResult(False, name, error="work_item_id must be positive")
         if name == "submit_work":
-            return self.submit(str(args.get("port", "")), int(args.get("work_item_id")))
+            return self.submit(str(args.get("port", "")), work_item_id)
         if name == "check_work_outcome":
-            return self.check_outcome(int(args.get("work_item_id")))
+            return self.check_outcome(work_item_id)
         if name == "reconcile_work_submission":
-            return self.reconcile_submission(int(args.get("work_item_id")))
+            return self.reconcile_submission(work_item_id)
         return ToolResult(False, name, error=f"Unknown work-port capability: {name}")
